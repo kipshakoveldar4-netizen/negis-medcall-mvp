@@ -1,4 +1,11 @@
 export type DeletionRequest = (path: string, init?: RequestInit) => Promise<Response>;
+// Owners may retire an actor/session epoch without waiting for a React render.
+// Once false, that epoch must never become current again (including A/B/A).
+export type DeletionLifetime = {
+  isCurrent: () => boolean;
+  subscribe?: (listener: () => void) => () => void;
+};
+export type DeletionReconciliation = { workspaceId: string; leadId: string; body: string };
 export type DeletionScope = {
   leadId: string;
   leadUpdatedAt: string;
@@ -56,56 +63,89 @@ const conflictMessages: Record<string, string> = {
 
 // A lost response keeps the original scope/key in memory. Only an explicit retry
 // may resend it; no optimistic removal or automatic background retry is allowed.
-export function createSiteInquiryDeletion(workspaceId: string, leadId: string, request: DeletionRequest, newKey: () => string) {
+export function createSiteInquiryDeletion(workspaceId: string, leadId: string, request: DeletionRequest, newKey: () => string, lifetime?: DeletionLifetime) {
   let state: DeletionState = { phase: "checking", visible: false, scope: null, confirmed: false, message: "" };
   let submission: string | null = null;
   let revision = 0;
+  let disposed = false;
+  let unsubscribeLifetime = () => {};
   const listeners = new Set<() => void>();
   const set = (next: DeletionState) => { state = next; listeners.forEach((listener) => listener()); };
+  // This owner-only evidence is never part of the rendered snapshot. Disposal
+  // fences publication, not the server mutation, so it must not clear the body.
+  const getReconciliation = (): DeletionReconciliation | null => submission === null ? null : { workspaceId, leadId, body: submission };
+  const dispose = () => {
+    if (!disposed) {
+      disposed = true;
+      ++revision;
+      unsubscribeLifetime();
+      set({ phase: "hidden", visible: false, scope: null, confirmed: false, message: "" });
+      listeners.clear();
+    }
+    return getReconciliation();
+  };
+  const isCurrent = () => {
+    if (!disposed && lifetime) {
+      try { if (!lifetime.isCurrent()) dispose(); } catch { dispose(); }
+    }
+    return !disposed;
+  };
+  unsubscribeLifetime = lifetime?.subscribe?.(() => { isCurrent(); }) ?? unsubscribeLifetime;
+  // A source may synchronously report retirement while subscribing.
+  if (disposed) unsubscribeLifetime();
   const locked = () => state.phase === "submitting" || state.phase === "uncertain" || state.phase === "done";
   const base = `/api/crm/site-inquiry-deletion?workspaceId=${encodeURIComponent(workspaceId)}`;
   return {
+    dispose, isCurrent, getReconciliation,
     getSnapshot: () => state,
-    subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    subscribe(listener: () => void) { if (!isCurrent()) return () => {}; listeners.add(listener); return () => { listeners.delete(listener); }; },
     async inspect() {
-      if (locked()) return;
+      if (!isCurrent() || locked()) return;
       const current = ++revision;
       submission = null;
       set({ phase: "checking", visible: state.visible, scope: null, confirmed: false, message: "" });
       try {
         if (!uuid.test(workspaceId) || !uuid.test(leadId)) throw new Error("invalid_scope");
+        if (!isCurrent()) return;
         const response = await request(`/api/crm/site-inquiry-deletion-preview?workspaceId=${encodeURIComponent(workspaceId)}&leadId=${encodeURIComponent(leadId)}`, { cache: "no-store" });
+        if (!isCurrent() || current !== revision) return;
         const scope = response.ok ? parseDeletionScope(await response.json(), leadId) : null;
-        if (current !== revision) return;
+        if (!isCurrent() || current !== revision) return;
         if (!scope) throw new Error("unverified_scope");
         set({ phase: "review", visible: true, scope, confirmed: false, message: "" });
       } catch {
-        if (current !== revision) return;
+        if (!isCurrent() || current !== revision) return;
         set({ phase: state.visible ? "error" : "hidden", visible: state.visible, scope: null, confirmed: false,
           message: "Не удалось проверить доступ и состав заявки. Удаление недоступно." });
       }
     },
     confirm(confirmed: boolean) {
-      if (state.phase === "review" && state.scope?.deletionEnabled) set({ ...state, confirmed });
+      if (isCurrent() && state.phase === "review" && state.scope?.deletionEnabled) set({ ...state, confirmed });
     },
     async submit() {
+      if (!isCurrent()) return;
       const scope = state.scope;
       if (!scope || (state.phase !== "uncertain" && !(state.phase === "review" && state.confirmed && scope.deletionEnabled))) return;
       try {
         if (!submission) {
           const requestKey = newKey();
+          if (!isCurrent()) return;
           if (!uuid.test(requestKey)) throw new Error("invalid_request_key");
           submission = JSON.stringify({ leadId, leadUpdatedAt: scope.leadUpdatedAt, receiptIds: scope.receiptIds, requestKey, confirmed: true });
         }
       } catch {
+        if (!isCurrent()) return;
         set({ ...state, phase: "error", scope: null, confirmed: false, message: "Не удалось подготовить запрос. Проверьте состав заново." });
         return;
       }
-      ++revision;
+      const current = ++revision;
       set({ ...state, phase: "submitting", message: "" });
       try {
+        if (!isCurrent()) return;
         const response = await request(base, { method: "POST", headers: { "Content-Type": "application/json" }, body: submission, cache: "no-store" });
+        if (!isCurrent() || current !== revision) return;
         const body = record(await response.json());
+        if (!isCurrent() || current !== revision) return;
         const result = record(body?.data);
         if (response.ok && body?.success === true && result?.deleted === true
           && result.receiptsDeleted === scope.receiptCount && typeof result.replayed === "boolean") {
@@ -122,6 +162,7 @@ export function createSiteInquiryDeletion(workspaceId: string, leadId: string, r
         // Even a later auth failure cannot prove that an earlier lost request did not commit.
         throw new Error("unconfirmed_result");
       } catch {
+        if (!isCurrent() || current !== revision) return;
         set({ ...state, phase: "uncertain", message: "Результат удаления не подтверждён. Запрос мог выполниться. Повторите тот же запрос; повтор не создаст новое удаление. Если доступ истёк, сначала восстановите вход." });
       }
     },

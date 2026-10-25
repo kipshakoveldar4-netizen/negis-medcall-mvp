@@ -1,0 +1,301 @@
+# Test Release Candidate: 25 October 2026
+
+## Decision and Evidence Boundary
+
+**Local release inventory, not deployment approval.** Base before G7-C24: branch
+`codex/blog-publication-runtime-fix`, commit `37e1d3ed9ef9`. The accumulated branch
+is not a selected release manifest. Main owns architecture, migrations, video,
+queues, candidate selection and serial acceptance. No readiness percentage or
+legal conclusion follows from this document.
+
+The G7-C24 runtime/tests and migration 100 are a later local increment, not
+silently included in historical passes below. Its exact current acceptance is
+recorded separately in DELIVERY-CYCLES. Freeze the selected committed source
+and refresh byte receipts before any approved test release.
+
+This task is LOCAL ONLY: no remote inspection, browser-user sessions, cloud SQL,
+Preview/Production deployment, Baspana/salons, WhatsApp, providers, paid
+generation, sends or expenses. Protected 059/065 are not edited or staged by
+this increment. The checklist below is future work requiring its own
+authorization, not an instruction to cross that boundary now.
+
+Evidence labels used below:
+
+- **Recorded Preview:** an explicit historical receipt in the two source docs;
+  no claim that the remote deployment or configuration was rechecked today.
+- **Local:** source/runtime/synthetic React/Chromium/HTTP or disposable SQL
+  evidence recorded by main. Fake Auth/SDK/Storage is not real service acceptance.
+- **Pending:** missing acceptance/owner decision. A file's presence is not an
+  applied migration, READY deployment or permission to enable a feature.
+
+Primary sources: [DELIVERY-CYCLES](DELIVERY-CYCLES.md), especially G5-C45 through
+G7-C23, and [LEGAL-SECURITY-READINESS](LEGAL-SECURITY-READINESS.md), including its
+G7-C22/C23 addenda. Earlier sections are historical; later scoped completions
+supersede earlier local residuals only for the behavior actually proved.
+
+## Latest Recorded Preview
+
+The latest recorded content/security Preview is **6c11l89kr / f18f411**,
+deployment `dpl_8CXaiuXmMfBY1EfrjqtMT2GNVjWv`: READY, target=null, aliases=[],
+846/846 sources matched. G5-C45 records site-test in loaded JS, absence of the
+working DB URL, anonymous auth-context/usage refusal, disabled paid controls,
+own synthetic clipboard text and a selected owner -> manager A -> owner cycle.
+Actual viewport was 1002x884, not mobile; no injected cloud late-response matrix
+or real generation/send was accepted by that cycle. G8-C2/C3 privacy, legal-page
+and dependency work was previously recorded in gpgfqnj86/5f51b3e and
+5iabnbv9g/b434172; these receipts are not acceptance of later local changes.
+See DELIVERY G8-C2/C3, G5-C43/C44/C45 and LEGAL's corresponding entries.
+
+**Do not infer current configuration from that snapshot.** G7-C20's subsequent
+read-only preflight found no test connection variables for the selected Preview
+branch; the narrow C50 candidate ec9f3d8 was not deployed. No later deployment
+receipt is credited here. Restoring proven test-only build/runtime isolation is
+a gate, not an invitation to inherit Production settings or request secrets.
+
+## G1-G8 Matrix
+
+G7-C24 results are the later local acceptance of this increment; older counts
+are historical source-reported results. Overlapping suites must not be summed.
+
+| Family | Current local evidence and schema coupling | Latest relevant recorded Preview acceptance | Required next evidence |
+|---|---|---|---|
+| G1: operator actions/access | G1-C1/C2 and G7-C19/C21 guard original actor/lifetime, dispatch, delayed bodies and callbacks. G7-C22/C23 add 094 then 096: live authority under locks, DB clock, RPC-only mutations; 096 native 36/36. Request-specific 404/409 closes only that collaboration's panels; real React/loopback 16/16. | G7-C3 in dje83i8kv/087f031 accepted positive assign/unassign, end, proposal/withdrawal and denied ended access, with cleanup. It did not accept new 094/096 or a two-session delayed-action matrix. | Coordinated API + 096 rollout; positive create/accept/decline/end and original-actor refusal. Pending A/B/A, authority revocation/rebind, old collaboration handler and late success/error controls in the selected test candidate. |
+| G2: CRM/calendar/tasks/recovery | G2-C1-C12, G7-C19/C21/C23 cover IDs, time/price, task scopes and uncertain creation. Committed-recovery denial hides private fields but retains original unknown request key; included in 291/291 local profile checks. Existing appointment/sale dependencies include 063/064/072/073 and 076, not a new recovery migration. | G7-C14/C15: 72buufklv/156a6a2 accepted desktop/mobile open/cancel, owner -> admin unsent-draft clearing and admin recovery after an unconfirmed attempt at +5. **Committed lost-ACK replay and pending A/B/A were not accepted.** G7-C8 accepted one pending sale with 076. G2-C15 v85t1mxnu/67416e9 accepted selected postponed-card transitions; that narrow later Production exception does not release this branch. | Exact same-key committed replay without duplicate, denied recovery privacy without key loss, pending A/B/A and late/unmount controls; role/workspace, grouped capacity, exact client/service, UTC/+5 and fractional amount checks. No mortgage-hook edits under this task. |
+| G3: team analytics | G3-C6 uses one DB statement snapshot, strict DTO and live role/purpose checks via 083; 095 refreshes the clock after authorization lock wait. Historical native 083 31/31 and 095 24/24. G7-C21 adds period/lifetime controls. Separate page blocks are not one common snapshot. | G7-C11: 6wg1y3bnf/e58a0b5 with 078 only site-test; selected owner/admin/manager A/B results and foreign-card/general-report refusals accepted. Manager B -> A with an unfinished form was deferred and fixtures removed. No 083/095 cloud acceptance. | Apply/verify 083 -> 095 dependencies; report completeness and exact period after lock waits, stale period/account/workspace/role responses, revoked rights and outstanding B -> A form control. No CPL/ROI/ROMI inference. |
+| G4: navigation/mobile/regression | G4-C1-C15 and G7-C21/C22 cover regressions, context-bound logout/navigation and drawer focus/background isolation. Actual Chromium DOM accepted; SDK B before render, batched A/B/A and same-user refresh have local controls. | G7-C14's selected 1440x900/375x812 calendar/content smoke is recorded. Separate historical style/visit/calendar releases in G4-C12-C14 are not Preview evidence for newer menu/profile/recovery code. | Repeat exact-candidate desktop/mobile screenshots, overflow, keyboard/focus/scroll restoration and stale logout/navigation controls. iOS/WebKit, physical devices and external targeting remain unaccepted; no working tenant is a QA fixture. |
+| G5: advertising/content/files/Telegram | C46-C56 and G7-C22/C23 locally cover error privacy, history, actual image decode, stable identities, private prepare/finalize, native video promotion, occupied-key reclamation and Telegram admission/ACK. Dependencies 082/085-092/097; quotas retain 051/081. 092 supersedes C56's earlier terminal-failure reserve residual only for proven pre-input provider failure, not paid-quota refund or unknown dispatch. | Latest 6c11l89kr/f18f411 as above. Older qdgmfjo1t/4a38872 and hmtoh6fdu/7ad4047 accepted selected public JPEG/MP4 Storage and QA text delivery; 7a08d511z accepted selected Unicode text/no-repeat. They do **not** prove new private staging, 086/090 worker, 097 admission, or full cross-device delivery. | Exact schema/API/worker compatibility, real isolated Storage/fence/versioning and legacy-token plan, Linux package/host acceptance, bounded end-to-end request/recovery and mobile upload pixels. C56 DOM/media loading at 390/1440 passed locally but screenshot capture timed out: pixel acceptance remains pending. No paid generation, provider/send or ACTIVE authorization is implied. |
+| G6: subscriptions/payment | G6-C2/G8-C5: 084 manual operations depend on 067; exact actor/key/payload/CAS, receipt/replay/abandon, paused-row actions and unknown-outcome recovery. Historical native 30/30 plus real React/fake HTTP at 1440/375, exact tiyn display and A/B/A. G7-C21 guards ClinicCard callbacks. | No Preview acceptance of 084/manual-operation recovery is credited. Old page status or manual subscription assignment is not payment evidence. | 084 + matching Control/API receipt acceptance, same-key replay/abandon race, reload without automatic POST, original actor and amount/currency/period controls. Bank/merchant sandbox, signatures, recipient, refunds and commercial terms remain separately gated. |
+| G7: release/schema | G7-C23 records raw 009-099 native chain 114/114 and earlier runtime evidence; do not sum. G7-C24 extends the exact raw chain to 009-100: 134/134, including three native concurrent-authority refusals. All source-created application tables have RLS. Only synthetic Storage catalogues are scaffolded. 100 enables seven remaining RLS flags without changing rows, grants, policies or FORCE flags; service-role tenant authorization is still required. | Latest recorded Preview remains f18f411; ec9f3d8 stopped at G7-C20 isolation gate. Historical exact Git-source receipts do not cover the accumulated current branch or new SQL. | Selected committed manifest, EOL-aware byte receipts, exact target dependencies/ACLs and renewed test-only isolation. 100 is locally accepted, **not cloud-applied or release-approved**. |
+| G8: privacy/legal/security | G8-C5-C7 and G7-C22/C23 guard Control/profile epochs, original bearer and unknown consent versions. 093 adds immutable notice snapshots; default approved-notice registry remains empty. Synthetic dump/restore 12/12 covered two tenants, consent, constraints/ACL/RLS and rejected bad targets. This is not real-backup/site/legal acceptance. | G8-C2/C3 accepted scoped legal-page/privacy/log/dependency work in test Preview; G5-C45 accepted a selected real A/B/A, not new Control/profile/093 behavior. No later legal text/consent approval is recorded. | Test 093 new inquiries/replay/erasure and unknown-version refusal with explicit synthetic notice injection only; do not invent historical consent. L2-L5, deployment geography, operator identity/contracts, processing category/MFA, real restore/incident process and dependency residuals require separate evidence/owner review. |
+
+## Pending Schema and Dependencies
+
+This is a dependency inventory, **not an apply script**. Existing site-test
+receipts are scoped: DELIVERY records selected applications of 072/073/074,
+075, 076/077, 078, 021+079, 080 and 051+081 in their respective R2/O2/G7/G5
+cycles. They do not attest every 009-081 body, effective grant or later branch
+snapshot. No cloud application of 082-100 is credited from the reviewed local
+records. Prove the exact target baseline before calculating a delta.
+
+| Migration/source | Required predecessor/schema | Release coupling or owner-review effect |
+|---|---|---|
+| [082](../migrations/082_ad_creative_assets_server_access.sql) | 015 `ad_creative_assets`; anon/authenticated and BYPASSRLS service_role | Enables RLS, removes table/column browser grants, preserves server CRUD. No Storage change. |
+| [083](../migrations/083_lead_team_analytics_snapshot.sql) | 029 + 070; underlying 009/010/011/013/014/019/028/038/069 chain supplies staff/settings/taxonomy/audit and actor-role contract | Matching `read_lead_team_analytics` server consumer. Missing RPC is unavailable, not fallback pagination or zero report. 080 is optional stage data, not snapshot prerequisite. |
+| [084](../migrations/084_platform_subscription_operations.sql) | 034 -> 067, workspaces and exact `replace_platform_subscription` signature | Manual subscription ledger through apply/read/abandon RPCs; even service_role has no direct ledger CRUD. Matching Control/API required; no bank proof. |
+| [085](../migrations/085_generated_creative_identity.sql) | 015 -> 082 | Unique workspace/key and immutable file identity; legacy ambiguity/duplicates abort, no arbitrary row deletion or invented content hash. |
+| [086](../migrations/086_video_job_promotion.sql) | 015/016/017/018 + 082 + 085 | Queue RLS/table/column/RPC boundary and atomic asset/job promotion. New worker must not run on older schema. |
+| [087](../migrations/087_staged_creative_foundation.sql) | 015 + 082 + 085; real Storage buckets/objects schema with objects RLS | Adds private staging bucket, restrictive browser policy and immutable verified fields. Existing incompatible bucket settings abort; old assets are not backfilled as verified. |
+| [088](../migrations/088_staged_creative_workflow.sql) | 015/082/085/087 + `staff_users`/workspaces (010/011 actor binding in the cumulative chain) | Durable signed-image admission/guard/finalize/replay; live authority lock and immutable receipt. Match prepare/finalize API and both callers; metadata-only bypass stays refused. |
+| [089](../migrations/089_staged_creative_reclamation.sql) | 088 operations/admission guards | Append-only claim journal, lease/ABA/ACK and raw-budget reclamation. SQL does not delete Storage; matching reclaimer must prove occupied-key replacement. |
+| [090](../migrations/090_generated_video_workflow.sql) | 015/016/017/018 + 082/085/086 + `staff_users`/workspaces | Generated admission/dispatch nonce/input/job/finalize/fence receipts. Couple API, producer, worker and browser handles; stop mixed old public writers. Not dependent on 088/089 for its separate generated ledger. |
+| [091](../migrations/091_lead_taxonomy_server_access.sql) | 019 tables/seed functions and reviewed service-role schema access; accepts 080 seed replacement when present | RLS + table/column/function access for lead stages/sources. Unexpected inherited access aborts, not silently repaired. |
+| [092](../migrations/092_generated_video_terminal_failure.sql) | 090 workflow, guards and exact actor/envelope helpers | Only proven terminal failure before input binding releases native capacity. Key/receipt and paid usage stay; unknown/timeout remains quarantined. |
+| [093](../migrations/093_site_consent_receipts.sql) | 058 intake; existing 062 erasure integration when present | New immutable notice receipt and `accept_crm_site_inquiry_with_consent`; old version-only accept is revoked. Pair server/renderer/registry; historical rows unchanged, approved registry empty. |
+| [094](../migrations/094_operator_request_concurrency.sql) | 052 -> 053; 054 when lead scopes enabled | Live operator/author locks for proposals; historical author must not block later transitions. Prerequisite to 096, not final actor-mutation solution by itself. |
+| [095](../migrations/095_lead_team_analytics_clock.sql) | 083 and its 029/070 dependencies/exact helper signatures | Replaces report function with fresh post-auth-lock clock; preserves formulas/private snapshot helper. |
+| [096](../migrations/096_operator_request_actor_mutations.sql) | 052/053/054/094, staff auth/profile RLS and service role | Three server mutation RPCs; revokes service-role direct INSERT/UPDATE and old accept RPC. Old API must fail closed; no fallback writer during rollout. |
+| [097](../migrations/097_content_telegram_delivery_admission.sql) | 010 `content_videos`/staff/workspaces, live auth binding from 011, reviewed service role/schema access | RPC-only Telegram admission/part ACK journals. Match `lib/crm/telegram-delivery.ts`; no blind resend for partial/unknown/lost ACK. 10,000/workspace cap, no hidden TTL. |
+| [098](../migrations/098_legacy_server_access.sql) | 009/010/013/014 exact fields/types and reviewed server/browser roles | Only 17 server permissions, RLS on `content_videos`, `meta_ad_accounts`, `meta_campaign_launches`, `meta_launch_audit_logs`, `release_checks`, `targeting_campaigns`, `targeting_reports`. Not the seven-table residual assigned to 100. |
+| [099](../migrations/099_application_function_default_access.sql) | 023 context; execute as known creator postgres, public schema and browser roles, reviewed default ACLs | Global future postgres-function PUBLIC EXECUTE revoke, **all schemas**, not just public. No retroactive fix for existing functions or another creator's defaults. Extra direct/inherited grants abort. |
+| [100](../migrations/100_legacy_crm_row_security.sql) | Existing 010/013 tables, reviewed service SELECT/INSERT/UPDATE grants/BYPASSRLS, postgres ownership and no unexpected browser rights/permissive policies; rechecked after DDL lock wait | Seven tables: `ai_provider_settings`, `calls`, `chat_messages`, `clients`, `integration_statuses`, `staff_users`, `workspace_settings`. Raw source SHA-256 `e11717ba583fcacb491db52d85404c71c8a32f49b08afb269726b4fc8a36cfe0`; native chain 134/134, focused source/refusal 19/19. No cloud application. Service-role queries still need API tenant authorization. |
+
+Consumer source anchors: [operator RPC callers](../lib/crm/operators.ts),
+[report reader](../lib/crm/lead-team-analytics.ts),
+[private upload workflow](../lib/crm/staged-creative-workflow.ts),
+[generated workflow](../lib/crm/generated-video-workflow.ts),
+[Telegram admission](../lib/crm/telegram-delivery.ts),
+[intake wrapper](../lib/crm/site-intake-handler.ts), and
+[worker compatibility contract](VIDEO-WORKER.md).
+
+## Receipts and Baseline Limits
+
+[Raw source review](../scripts/fixtures/migration-chain-review.mjs) explicitly
+pins worktree bytes, not a released/applied manifest. Local byte comparison in
+this task found:
+
+| Protected file | Worktree SHA-256 | HEAD-content SHA-256 |
+|---|---|---|
+| 059 | `c56c820f9b29b28f96de34b51cb63af44f29be207b7c76740c491c9811aaae47` | `5360f797f6a4c0a0cd510ee6db8499f3df230008142085ce37af74548b2fb741` |
+| 065 | `ccc908b1a91126540b78dedcbfb75ae86e191d057fbeeeb4742241e8a0c61984` | `acaeb855fbf44b91c87a199959c38d10fcf206c3dd2a43129e38947526d41d86` |
+
+Both raw files differ from HEAD bytes; this comparison found equal content
+after CRLF-to-LF normalization. This is **not a newly discovered SQL defect**.
+Git status lists both modified even though normal diff is empty. HEAD Git blobs
+are 059 `6f3653853eac15bceb435a36d081c8c0d94e09f0` and 065
+`071f703d47cca699c4aa98ce6b25f5eda615e6a5`; Git blob IDs are not file SHA-256.
+In particular, the protected **059 raw-worktree receipt is not committed release
+evidence**. Main must explicitly reconcile approved bytes and rerun the selected
+manifest; this task neither normalizes nor stages/restores either file.
+
+G7-C22/C23 records owner's authorized 065 source restoration and later 4/4
+structural checks. Earlier 064/dirty-065 duplicate failures remain historical
+failed runs, not today's proven duplicate. The later native 009-099 114/114 is
+also historical: it does not cover new 100, or attest an arbitrary Git export.
+The earlier EBUSY cleanup run was not wholly accepted; main reports a later
+successful cleaned run. No force-cleanup or ownership-guard weakening is implied.
+
+[Native chain scope](../scripts/fixtures/migration-chain-native.test.mjs):
+**001-008 require an undocumented legacy baseline and were excluded**;
+`migrations/data/*.sql` is not the application chain. Synthetic Storage catalogue
+tables and roles are prerequisites, not Supabase HTTP/Auth/signed-token services.
+Fresh 009-100 compatibility is not existing-data migration safety, idempotency,
+actual cloud ACL evidence or permission to apply the whole directory.
+
+## Owner Review and Rollout Order
+
+Proposed order for a separately approved test release, not executed here:
+
+1. **Select source first.** Freeze exact approved Git candidate, API/UI/worker
+   files, dependency lock and SQL byte manifest. Record deltas from the intended
+   Preview baseline, not merely current HEAD. Resolve protected-byte and 100
+   evidence with main; no foreign changes or env/generated files in upload.
+2. **Prove target and pause incompatible writers.** Preserve baseline/restore
+   plan, exact dependencies, role memberships, effective table/column/RPC/default
+   ACLs and Storage settings. Stop/drain old producer/worker/intake/operator
+   writers where contracts change. Do not leave old API silently writing around
+   093/096, or old public video writers mixed with 086/090.
+3. **Schema before dependent runtime.** In main-approved dependency order:
+   015/016/017/018 -> 082 -> 085 -> 086; 085 + Storage -> 087 -> 088 -> 089;
+   086 + staff -> 090 -> 092; 029/070 -> 083 -> 095;
+   034/067 -> 084; 019 -> 091; 058/(062) -> 093;
+   052/053/054 -> 094 -> 096; 010/011 -> 097; reviewed legacy tables -> 098;
+   owner-reviewed defaults -> 099. Review 100 against the exact target after
+   verifying its required server grants. Numeric fresh-chain order does not mean every target needs
+   every migration. Existing-function ACLs still need verification after 099.
+4. **Deploy matching runtime only under separate approval.** Publish selected
+   API/UI and matching worker package only after schema/postflight acceptance.
+   Keep external actions disabled. Verify actual loaded build and server target,
+   then run the approved synthetic/test acceptance lanes below. No whole-branch
+   release or enablement follows automatically.
+5. **Postflight and rollback decision.** Compare exact counts/hashes/ACLs,
+   receipts and untouched deployment settings; clean only owned fixtures.
+   Preserve unknown operations, occupied-key fences and replay journals. Rollback
+   is coordinated source/schema compatibility, not blind DROP/regrant/delete.
+
+Owner review must cover these authority/destructive effects before any apply:
+browser/column/RPC revokes and RLS (082/086/087/091/098/100); service-role writer
+revocation (096); old intake accept revocation (093); global future postgres
+routine defaults (099); immutable constraints/legacy backfill and uniqueness
+(085/087); and locks/outage windows. Unknown inherited grants, policies or data
+must stop, not be silently removed to make a test green. Raw replacement/deletion,
+erasure cascades, tombstones, old public assets and retention are separate data
+decisions; technical capacity release is not physical deletion or legal erasure.
+
+Dependency limits also remain: LEGAL G8-C4 records the retaining chain
+`@vercel/node -> undici 5.29.0 -> @fastify/busboy 2.1.1`. The direct Busboy
+3.2.4 pin does not remove that transitive advisory match. Its 64-case parser
+characterization expects a fatal truncated-file child exit on both compared
+versions; passing characterization is not a safe parser fix or deployed-runtime
+reachability proof. No dependency install/update is performed by this task.
+
+## Next Test-Preview Acceptance Checklist
+
+All boxes are intentionally pending for the next **selected** candidate.
+Historical passes are not carried forward as fresh acceptance.
+
+- [ ] **Authorization and manifest:** main identifies candidate, file/SQL hashes,
+  baseline, test workspace, permitted mutations, rollback and cleanup owners.
+  100 local evidence does not replace exact target review. No secrets or real Auth/env
+  values belong in this document, fixtures, logs or acceptance report.
+- [ ] **Inherited environment isolation:** prove both build and runtime use
+  only the approved test DB/public client, same-origin API and no inherited
+  production DB/`DATABASE_URL`. Recheck both AI fallback keys, media providers,
+  Meta/TikTok, Telegram, WhatsApp/Wazzup, push, targeting, worker secrets/flags,
+  control/auth-link origins, site indexing/intake and schedulers. Record only
+  non-secret scope/presence/disabled receipts. The old
+  [isolation fixture](../scripts/fixtures/site-preview-isolation.mjs) is an
+  inventory, **not a current candidate attestation**: it pins an older branch;
+  empty targeting URL falls back to localhost and is not true disablement.
+  Missing test config or inherited DATABASE_URL means stop, not Production fallback.
+- [ ] **Schema postflight:** main's serial fixture verifies selected bytes,
+  migration order, exact RPC signatures/bodies/search_path, RLS and effective
+  table/column/function/default ACLs, positive server operations, explicit anon/
+  authenticated/foreign-tenant refusals and rollback on unknown inherited access.
+  Fresh-chain, target baseline and 100 evidence are separate receipts; no native
+  PG is run by this task and no missing dependency is guessed into existence.
+- [ ] **Baseline behavior:** positive read/write/refresh for each permitted role
+  and selected family; owner-only and foreign-workspace refusals; anonymous API
+  denial and no raw provider/DB text. Missing schema, malformed data and 401/403
+  must not become success, empty membership, empty analytics or fake ready asset.
+  PAUSED/disabled-first, ACTIVE gate, Instagram-only, approved city selection and
+  destination-link behavior remain protected by synthetic tests, not real sends.
+- [ ] **Race/recovery controls:** existing owned synthetic React/Chromium/HTTP
+  fixtures first: positive + A -> B + A -> B -> A, silent SDK change before
+  render, same-user refresh, logout, late success/error before headers and during
+  body read, old handler/input/finally and unmount/remount. Assert exact request
+  counts/actor/key, no stale private UI/toast/clipboard/download and no duplicate.
+  Distinguish pre-dispatch refusal from already admitted/committed work; never
+  promise cancellation of an accepted operation. Only subsequently authorized
+  test-session acceptance can close the explicitly pending cloud scenarios.
+- [ ] **Family outcomes:** G1 coordinated 096 proposals/transitions/revocation;
+  G2 same-key committed replay/denied recovery, exact client/time/capacity/price;
+  G3 083/095 complete report/period/role changes; G4 menu/profile focus and mobile
+  layout; G6 084 exact paused ID/CAS/replay/abandon and no automatic reload POST;
+  G8 Control/profile original-account and 093 consent snapshot/replay/refusal.
+  For a genuine new defect preserve runtime reproduction and positive/A/B/A/
+  late/unmount controls before a narrow main-owned fix; do not weaken assertions.
+- [ ] **G5 Storage and legacy tokens:** accept private ticket -> bounded verified
+  bytes -> exact receipt/replay, metadata bypass refusal, no public fallback and
+  086/090 native video identity/promotion. Test missing/corrupt/late/lost ACK,
+  expired/reissued tokens, occupied-key late-create fence and actual backend
+  versioning behavior using separately approved disposable media only. Earlier
+  public JPEG/MP4 passes do not cover this path. DELIVERY C55 records two-hour
+  signed-upload validity without a new login: logout is not revocation. Require
+  an owner-approved last-issuance/in-flight drain/fence plan for **legacy public
+  tokens** and old assets; new restrictive staging policy does not revoke them.
+  Do not delete fences or label old files verified. No Storage inspection here.
+- [ ] **Host/package gate:** prove selected Linux/serverless Sharp and worker
+  FFmpeg packaging, non-root/read-only app behavior, process groups, resource/
+  disk/CPU/RAM quotas, filesystem/network/seccomp isolation and bounded overall
+  request/recovery. Windows native tests, subprocess flags, Docker USER and
+  same-UID cleanup canaries are not an accepted host sandbox. Synthetic worker
+  proof does not authorize a live worker/provider or generation expense.
+- [ ] **Visual gate:** actual desktop/mobile screenshots and console checks on
+  the selected build, measured viewport/no page overflow, controls/focus/error/
+  recovery and ready-media rendering; no timeout/thumbnail substituted for pixel
+  acceptance. Distinguish Chromium from physical devices/iOS/WebKit. Restore
+  only owned fixture state and report remaining viewport/device gaps.
+- [ ] **Retention and delivery gate:** agree reconciliation for unknown dispatch,
+  partial Telegram/lost ACK, valid public orphans, raw files/old backend versions,
+  permanent fences and append-only journals, including 097 capacity exhaustion.
+  089/090 occupied-key budget ACK and 092 terminal-failure release are not physical
+  GC, paid refund, universal TTL or external exactly-once. Real delivery remains
+  outside this task and needs explicit separate authorization.
+- [ ] **Legal/bank gates:** owner/specialist confirms operator identity/contracts,
+  purposes/recipients and approved notice archive, geography of DB/Auth/storage/
+  logs/backups and transfers, processing category/MFA, subject requests/erasure,
+  retention, incident procedure and real backup restore/RPO/RTO. Empty notice
+  registry stays closed; no retrospective consent invention or legal approval
+  inferred from tests. Synthetic pg_dump/restore is not real backup/role-loss
+  recovery. Merchant sandbox/provider contract, signature/amount/recipient,
+  replay/refund and business terms remain pending; manual subscriptions prove
+  neither payment nor bank readiness. No credentials, bank access or expenses
+  are requested here. See LEGAL L2-L5 and DELIVERY G6-C2/G7-C23.
+- [ ] **Closeout:** list exact commands/results and unrun limits, fixture
+  cleanup/baseline equality and unchanged settings/protection. Preserve failed
+  runs, skips, timeouts and unknowns. Record Preview acceptance separately from
+  local tests, legal/bank decisions and any future Production authorization.
+
+## Verification and Subsequent Acceptance
+
+- Read-only source/HEAD/status and protected raw-vs-HEAD SHA-256 comparison;
+  protected files were not modified. Links refer to local repository evidence,
+  not fresh remote observations.
+- Final document validation passed: 31 local file links resolve, all eight family
+  rows exist, table widths are consistent and content is ASCII. Scoped
+  `git diff --check -- docs/TEST-RELEASE-CANDIDATE-2026-10-25.md` exited 0;
+  because the file is new/untracked, its content checks were performed separately.
+- Initial documentation review executed `node --test scripts/fixtures/migration-chain-review.test.mjs`:
+  **exit 1, 0 pass / 1 file failure**, before test registration/native startup.
+  During review main's `100_legacy_crm_row_security.sql` appeared; reviewed
+  membership still ended at 099. Assertion: `Chain membership/order changed`.
+  This is a truthful unreviewed-source stop, not an invented runtime defect or
+  permission to remove 100. That historical stop is superseded only by the
+  following explicit local acceptance, not erased from the record.
+- G7-C24: exact source/refusal/manifest tests **57/57**; native PostgreSQL 17.11
+  raw 009-100 application chain **134/134**, including all three lock-wait
+  authority changes and unchanged data/catalogue snapshots. Owned server and
+  fixture were cleaned normally. These overlapping results are not added.
+- No remote/browser-user inspection, real auth/env/secrets, provider calls,
+  sends, paid generation, cloud migrations or deployments in this increment.
+  Final UI/regression/build results are recorded separately in DELIVERY-CYCLES.

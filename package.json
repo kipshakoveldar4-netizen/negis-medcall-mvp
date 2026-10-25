@@ -4,6 +4,8 @@
   "packageManager": "pnpm@10.33.2",
   "license": "MIT",
   "scripts": {
+    "test:legacy-crm-rls": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:legacy-crm-rls",
+    "test:readiness-composed": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:readiness-composed",
     "test:function-default-access": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:function-default-access",
     "test:operator-request-refusal": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:operator-request-refusal",
     "test:legacy-server-access": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:legacy-server-access",

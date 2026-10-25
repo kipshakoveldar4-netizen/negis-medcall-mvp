@@ -1,6 +1,10 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ChevronDown, Loader2, RefreshCw, Trash2 } from "lucide-react";
-import { createSiteInquiryDeletion, type DeletionRequest } from "../../lib/siteInquiryDeletion";
+import { createSiteInquiryDeletion, type DeletionLifetime, type DeletionReconciliation, type DeletionRequest, type DeletionState } from "../../lib/siteInquiryDeletion";
+
+const hidden: DeletionState = { phase: "hidden", visible: false, scope: null, confirmed: false, message: "" };
+const hiddenSnapshot = () => hidden;
+const noSubscription = () => () => {};
 
 const reasonLabels: Record<string, string> = {
   linked_client: "Создан клиент", assigned_staff: "Назначен сотрудник", linked_campaign: "Связана реклама",
@@ -10,23 +14,45 @@ const reasonLabels: Record<string, string> = {
   growth_operator_bookings: "Есть запись оператора", audit_history: "Есть журнал изменений", other_site_receipts: "Есть обращения с другого сайта",
 };
 
-export function SiteInquiryDeletion({ workspaceId, leadId, request, onDeleted }: {
+export function SiteInquiryDeletion({ workspaceId, leadId, request, onDeleted, lifetime, onReconciliationRequired }: {
   workspaceId: string;
   leadId: string;
   request: DeletionRequest;
   onDeleted: () => void;
+  lifetime?: DeletionLifetime;
+  // The original owner may retain unresolved evidence; never retry it automatically
+  // or show it to the next actor/card. This is not a cancellation acknowledgement.
+  // The sink must stay bound to the original actor/session.
+  onReconciliationRequired?: (evidence: DeletionReconciliation) => void;
 }) {
-  const workflow = useMemo(() => createSiteInquiryDeletion(workspaceId, leadId, request, () => crypto.randomUUID()), [workspaceId, leadId, request]);
-  const state = useSyncExternalStore(workflow.subscribe, workflow.getSnapshot, workflow.getSnapshot);
-  const [open, setOpen] = useState(false);
+  const [owner, setOwner] = useState<{
+    workspaceId: string; leadId: string; request: DeletionRequest; lifetime?: DeletionLifetime;
+    workflow: ReturnType<typeof createSiteInquiryDeletion>; onDeleted: () => void;
+  } | null>(null);
+  const workflow = owner?.workspaceId === workspaceId && owner.leadId === leadId && owner.request === request && owner.lifetime === lifetime
+    ? owner.workflow : null;
+  const state = useSyncExternalStore(workflow?.subscribe ?? noSubscription, workflow?.getSnapshot ?? hiddenSnapshot, hiddenSnapshot);
+  const [expanded, setExpanded] = useState<typeof workflow>(null);
+  const open = workflow !== null && expanded === workflow;
   const notified = useRef(false);
   const headingId = `site-deletion-${leadId}`;
   const busy = state.phase === "submitting";
   const unresolved = busy || state.phase === "uncertain";
-  useEffect(() => { void workflow.inspect(); }, [workflow]);
+  useLayoutEffect(() => {
+    // A fresh workflow for every setup also handles StrictMode cleanup/replay.
+    // Callbacks belong to this owner, not to a later render's card.
+    const workflow = createSiteInquiryDeletion(workspaceId, leadId, request, () => crypto.randomUUID(), lifetime);
+    setOwner({ workspaceId, leadId, request, lifetime, workflow, onDeleted });
+    notified.current = false;
+    void workflow.inspect();
+    return () => {
+      const evidence = workflow.dispose();
+      if (evidence) onReconciliationRequired?.(evidence);
+    };
+  }, [workspaceId, leadId, request, lifetime]);
   useEffect(() => {
-    if (state.phase === "done" && !notified.current) { notified.current = true; onDeleted(); }
-  }, [state.phase, onDeleted]);
+    if (state.phase === "done" && !notified.current && owner && workflow?.isCurrent()) { notified.current = true; owner.onDeleted(); }
+  }, [state.phase, workflow, owner]);
   useEffect(() => {
     if (!unresolved) return;
     const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
@@ -35,12 +61,13 @@ export function SiteInquiryDeletion({ workspaceId, leadId, request, onDeleted }:
   }, [unresolved]);
   // Visibility is granted by a successful workspace-scoped server preview, not by a UI admin toggle.
   if (!state.visible) return null;
+  if (!workflow?.isCurrent()) return null;
   const scope = state.scope;
   return (
     <section className="mt-5 min-w-0 border-t pt-4 text-sm [overflow-wrap:anywhere]" style={{ borderColor: "var(--negis-border)" }} aria-labelledby={headingId}>
       <button type="button" id={headingId} aria-expanded={open} aria-controls={`${headingId}-body`}
         className="flex w-full items-center gap-2 text-left font-semibold disabled:opacity-60" disabled={unresolved}
-        onClick={() => { setOpen(!open); workflow.confirm(false); if (!open) void workflow.inspect(); }}>
+        onClick={() => { if (!workflow.isCurrent()) return; setExpanded(open ? null : workflow); workflow.confirm(false); if (!open) void workflow.inspect(); }}>
         <Trash2 size={16} className="shrink-0" /> Удаление заявки с сайта
         <ChevronDown size={16} className={`ml-auto shrink-0 ${open ? "rotate-180" : ""}`} />
       </button>

@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { startNativePostgres } from './native-postgres.mjs';
 import { digest, readReviewedChain } from './migration-chain-review.mjs';
 import { legacyServerPrivilegeMatrix as directServiceResources } from './legacy-server-access-requirements.mjs';
 import { exerciseLegacyAccessRefusals, legacyAccessSnapshot, proveLegacyAccessBaseline, proveLegacyAccessRepair } from './legacy-server-access-cases.mjs';
+import { legacyCrmRlsSnapshot,exerciseLegacyCrmRlsRefusals,proveLegacyCrmRlsBaseline,
+  proveLegacyCrmRlsChange,proveLegacyCrmRlsEnforcement } from './legacy-crm-rls-cases.mjs';
 
 // Native application-chain acceptance, NOT an authority to release migrations.
 // 001-008 require an undocumented legacy baseline; data/*.sql is deliberately
@@ -14,7 +17,7 @@ import { exerciseLegacyAccessRefusals, legacyAccessSnapshot, proveLegacyAccessBa
 // Storage catalogue relations referenced by 015/016/087 are scaffolded. This
 // proves PostgreSQL application compatibility, not remote Storage enforcement,
 // Auth identity, API authorization, worker processing, delivery, or migration
-// idempotency on existing/live datasets. Legacy RLS omissions are reported.
+// idempotency on existing/live datasets. Missing source-table RLS is a failure.
 
 const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const quote = value => '"' + value.replaceAll('"', '""') + '"';
@@ -70,6 +73,42 @@ async function requireNoExternalFacilities(db, after = false) {
     'No listener consumes the source migrations\' local pgrst reload notifications');
 }
 
+async function proveRlsAuthorityAfterWait(fixture,observer,sql,t) {
+  const lock=await fixture.connect(),runner=await fixture.connect();
+  try {
+    const pid=(await one(runner,'select pg_backend_pid() as value')).value;
+    for(const [name,change,restore,message] of [
+      ['server bypass revoked','alter role service_role nobypassrls','alter role service_role bypassrls','legacy_crm_rls_roles_unconfirmed'],
+      ['browser bypass added','alter role anon bypassrls','alter role anon nobypassrls','legacy_crm_rls_roles_unconfirmed'],
+      ['browser privileged membership added','grant service_role to authenticated','revoke service_role from authenticated','legacy_crm_rls_role_membership_unconfirmed'],
+    ]) {
+      let passed=false;
+      await t.test(`100 rechecks ${name} after a real native DDL lock wait`,async()=>{
+        const before=await legacyCrmRlsSnapshot(observer);
+        await lock.query('begin; lock table public.calls in access exclusive mode');
+        const work=observed(runner.query(sql));let changed=false;
+        try {
+          const end=Date.now()+3500;let waiting=false;
+          while(Date.now()<end) {
+            if((await one(observer,'select wait_event_type from pg_stat_activity where pid=$1',[pid]))?.wait_event_type==='Lock') {waiting=true;break;}
+            await delay(10);
+          }
+          assert.equal(waiting,true,'The exact migration transaction must be waiting on its owned table lock');
+          await observer.query(change);changed=true;
+          await lock.query('commit');
+          assert.equal((await work).error?.message,message);
+        } finally {
+          await lock.query('rollback');await work;await runner.query('rollback');
+          if(changed) await observer.query(restore);
+        }
+        assert.deepEqual(await legacyCrmRlsSnapshot(observer),before,'A concurrent authority change must leave all application state unchanged');
+        passed=true;
+      });
+      assert.ok(passed,'Do not accept 100 after a failed concurrent-authority proof');
+    }
+  } finally {await lock.end();await runner.end();}
+}
+
 test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { timeout: 480000 }, async t => {
   // Full membership, raw bytes, functions/languages and outward effects are
   // checked BEFORE starting even the owned server. No DSN is accepted anywhere.
@@ -106,7 +145,18 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
   t.diagnostic('Protected dirty 059 and restored 065 are executed exactly as read, not modified/staged/replaced. This is not an applied/released manifest.');
 
   let legacyBefore;
+  let legacyRlsBefore;
   for (const entry of chain) {
+    if (entry.file === '100_legacy_crm_row_security.sql') {
+      let baselinePassed=false;
+      await t.test('before 100, actual temporary read grant exposes both synthetic tenants on the seven unprotected tables',async()=>{
+        await proveLegacyCrmRlsBaseline(db);baselinePassed=true;
+      });
+      assert.ok(baselinePassed,'Do not accept 100 without reproducing the missing RLS boundary');
+      await exerciseLegacyCrmRlsRefusals(db,entry.source,t);
+      await proveRlsAuthorityAfterWait(fixture,db,entry.source,t);
+      legacyRlsBefore=await legacyCrmRlsSnapshot(db);
+    }
     if (entry.file === '099_application_function_default_access.sql') {
       await t.test('before 099, actual new application routine is still PUBLIC-callable despite 023', async () => rollback(db, async () => {
         await db.query("create function public.owned_chain_default_before_099() returns integer language sql as 'select 1'");
@@ -142,6 +192,14 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     // Stop after the first failed migration. Running later steps on a partial
     // chain would mislabel dependent SQL as independently accepted.
     assert.ok(passed, `${entry.file} failed; the remaining cumulative gate is unexecuted`);
+    if(entry.file==='100_legacy_crm_row_security.sql') {
+      let repaired=false;
+      await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{
+        await proveLegacyCrmRlsChange(db,legacyRlsBefore,entry.source);
+        await proveLegacyCrmRlsEnforcement(db);repaired=true;
+      });
+      assert.ok(repaired,'Do not continue cumulative acceptance after a failed 100 protection proof');
+    }
     if (entry.file === '098_legacy_server_access.sql') {
       let repaired = false;
       await t.test('098 cumulative repair changes only reviewed ACL/RLS, restores all 17 operations and is idempotent', async () => {
@@ -157,7 +215,8 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     assert.deepEqual(tables.map(table => `public.${table.name}`).sort(), expected);
     const requiredRls = new Set(chain.flatMap(entry => entry.evidence.rls));
     for (const table of tables) if (requiredRls.has(`public.${table.name}`)) assert.equal(table.rls, true, `${table.name}: a later migration disabled required RLS`);
-    t.diagnostic(`Authoritative legacy RLS omissions (not fixed or blessed by this gate): ${tables.filter(table => !table.rls).map(table => table.name).join(', ') || 'none'}`);
+    assert.deepEqual(tables.filter(table=>!table.rls).map(table=>table.name),[],
+      'Every application table in this exact chain needs RLS; this is not a claim about service-role tenant filtering');
   });
 
   await t.test('entire cumulative chain creates no business records or external facilities', async () => {

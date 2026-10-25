@@ -117,6 +117,7 @@ before(async () => {
   await db.query("insert into public.workspaces(id,name) values($1,'Marketing'),($2,'Other')", [id(1), id(2)]);
   await db.query("insert into public.crm_intake_sites(id,site_key,workspace_id,consent_version,allowed_page_paths,enabled) values($1,'medina-test',$2,'v1',array['/ru/'],true),($3,'other-test',$4,'v1',array['/ru/'],true)", [id(10), id(1), id(11), id(2)]);
   await db.exec(await readFile(path.join(root, "migrations/062_site_inquiry_manual_deletion.sql"), "utf8"));
+  await db.exec(await readFile(path.join(root, "migrations/093_site_consent_receipts.sql"), "utf8"));
   await db.query("insert into public.staff_users(id,workspace_id,auth_user_id,full_name,email,role) values($1,$2,$3,'Owner','owner@example.invalid','owner')", [id(91), id(1), id(90)]);
 });
 beforeEach(async () => {
@@ -124,7 +125,8 @@ beforeEach(async () => {
   allowRpc = false; rpcCalls = []; rpcFailure = ""; rpcResponse = undefined;
   permissionOverride = undefined;
   supabase.setSupabaseServerClientFactoryForTests(client);
-  for (const key of [100, 101]) await db.query("select public.accept_crm_site_inquiry('medina-test',$1,$2::jsonb)", [id(key), JSON.stringify(inquiry)]);
+  for (const key of [100, 101]) await db.query("select public.accept_crm_site_inquiry_with_consent('medina-test',$1,$2::jsonb,$3::jsonb)",
+    [id(key), JSON.stringify(inquiry), JSON.stringify(syntheticSiteConsent()(inquiry.consentVersion))]);
   leadId = String((await row("select lead_id from public.crm_site_inquiries where site_id=$1 limit 1", [id(10)])).lead_id);
 });
 afterEach(async () => { supabase.setSupabaseServerClientFactoryForTests(null); await db.exec("rollback"); });
@@ -471,10 +473,12 @@ test("late public-form retry after confirmed erasure returns safe 409 without re
   assert.equal((await erase(await confirmationBody())).status, 200);
   supabase.setSupabaseServerClientFactoryForTests(() => ({
     async rpc(name: string, args: Record<string, unknown>) {
-      assert.equal(name, "accept_crm_site_inquiry");
+      assert.equal(name, "accept_crm_site_inquiry_with_consent");
+      assert.deepEqual(args.p_consent_receipt, syntheticSiteConsent()(inquiry.consentVersion));
       await db.exec("savepoint late_retry");
       try {
-        const result = await row("select public.accept_crm_site_inquiry($1,$2,$3) as result", [args.p_site_key, args.p_request_key, args.p_inquiry]);
+        const result = await row("select public.accept_crm_site_inquiry_with_consent($1,$2,$3,$4) as result",
+          [args.p_site_key, args.p_request_key, args.p_inquiry, args.p_consent_receipt]);
         await db.exec("release savepoint late_retry");
         return { data: result.result, error: null };
       } catch (error) {
@@ -494,4 +498,5 @@ test("late public-form retry after confirmed erasure returns safe 409 without re
   assert.deepEqual(payload, { success: false, code: "inquiry_erased" });
   assert.equal((await row("select count(*)::int as n from public.leads")).n, 0);
   assert.equal((await row("select count(*)::int as n from public.crm_site_inquiries")).n, 0);
+  assert.equal((await row("select count(*)::int as n from public.crm_site_consent_receipts")).n, 0);
 });

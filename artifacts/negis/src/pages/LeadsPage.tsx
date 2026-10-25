@@ -29,6 +29,7 @@ import { ChangeLogPanel } from "@/components/crm/change-log-panel";
 import { LeadTeamAnalytics } from "@/components/crm/lead-team-analytics";
 import { TaskPanel } from "@/components/crm/task-panel";
 import { SiteInquiryDeletion } from "@/components/crm/site-inquiry-deletion";
+import type { DeletionLifetime, DeletionRequest } from "@/lib/siteInquiryDeletion";
 import { useAuth } from "@/contexts/AuthContext";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useDemoCollection, readDemoStorage, writeDemoStorage, isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
@@ -602,6 +603,8 @@ type LeadSessionAccess = {
   workspaceId: string;
   isCurrent: () => boolean;
   request: (path: string, init?: RequestInit) => Promise<Response>;
+  deletionRequest: DeletionRequest;
+  deletionLifetime: DeletionLifetime;
   loadTeamAnalytics: (days: number) => Promise<Response>;
 };
 
@@ -636,23 +639,40 @@ function LeadsPageSession({ actorId, workspaceId }: { actorId: string; workspace
     };
   }, []);
 
-  if (!lifetime) return null;
-  const { controller } = lifetime;
-  const isCurrent = () => Boolean(actorId && workspaceId
-    && liveScopeRef.current.actorId === actorId && liveScopeRef.current.workspaceId === workspaceId
-    && liveScopeRef.current.userRole === capturedScope.userRole && liveScopeRef.current.workspacePurpose === capturedScope.workspacePurpose
-    && sessionRef.current === controller && !controller.signal.aborted);
-  const assertCurrent = () => {
-    if (!isCurrent()) throw new DOMException("Lead session ended", "AbortError");
-  };
-  const request = async (path: string, init?: RequestInit) => {
-    assertCurrent();
-    const response = await crmFetch(path, { ...init, cache: "no-store", expectedUserId: actorId, signal: controller.signal });
-    assertCurrent();
-    return response;
-  };
-  const loadTeamAnalytics = (days: number) => request(`/api/crm/lead-team-analytics?workspaceId=${encodeURIComponent(workspaceId)}&days=${days}`);
-  return <LeadsPageContent key={lifetime.epoch} access={{ actorId, workspaceId, isCurrent, request, loadTeamAnalytics }} />;
+  const access = useMemo<LeadSessionAccess | null>(() => {
+    if (!lifetime) return null;
+    const { controller } = lifetime;
+    const isCurrent = () => Boolean(actorId && workspaceId
+      && liveScopeRef.current.actorId === actorId && liveScopeRef.current.workspaceId === workspaceId
+      && liveScopeRef.current.userRole === capturedScope.userRole && liveScopeRef.current.workspacePurpose === capturedScope.workspacePurpose
+      && sessionRef.current === controller && !controller.signal.aborted);
+    const requestWithGuard = async (path: string, init: RequestInit | undefined, dispatchGuard: () => boolean) => {
+      const assertCurrent = () => {
+        if (!dispatchGuard()) throw new DOMException("Lead session ended", "AbortError");
+      };
+      assertCurrent();
+      const response = await crmFetch(path, { ...init, cache: "no-store", expectedUserId: actorId, signal: controller.signal, dispatchGuard });
+      assertCurrent();
+      return response;
+    };
+    const request: DeletionRequest = (path, init) => requestWithGuard(path, init, isCurrent);
+    // The selector can change before Auth context renders. This extra fence is
+    // deletion-only; ordinary clinic collection access keeps its existing scope.
+    const deletionLifetime: DeletionLifetime = {
+      isCurrent: () => isCurrent() && readWorkspaceId() === workspaceId,
+      subscribe(listener) {
+        controller.signal.addEventListener("abort", listener, { once: true });
+        if (controller.signal.aborted) listener();
+        return () => controller.signal.removeEventListener("abort", listener);
+      },
+    };
+    const deletionRequest: DeletionRequest = (path, init) => requestWithGuard(path, init, deletionLifetime.isCurrent);
+    const loadTeamAnalytics = (days: number) => request(`/api/crm/lead-team-analytics?workspaceId=${encodeURIComponent(workspaceId)}&days=${days}`);
+    return { actorId, workspaceId, isCurrent, request, deletionRequest, deletionLifetime, loadTeamAnalytics };
+  }, [actorId, workspaceId, lifetime, capturedScope]);
+
+  if (!lifetime || !access) return null;
+  return <LeadsPageContent key={lifetime.epoch} access={access} />;
 }
 
 function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
@@ -1633,11 +1653,13 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
                 key={`${clinicId}:${user.id}:${detailLead.id}`}
                 workspaceId={clinicId}
                 leadId={detailLead.id}
-                request={crmFetch}
+                request={access.deletionRequest}
+                lifetime={access.deletionLifetime}
                 onDeleted={() => {
+                  if (!access.deletionLifetime.isCurrent()) return;
                   clearCrmCache();
-                  setItems((current) => current.filter((lead) => lead.id !== detailLead.id));
-                  setDetailId(null);
+                  setItems((current) => access.deletionLifetime.isCurrent() ? current.filter((lead) => lead.id !== detailLead.id) : current);
+                  setDetailId((current) => access.deletionLifetime.isCurrent() && current === detailLead.id ? null : current);
                   toast.success("Заявка и её копии согласия удалены");
                 }}
               />

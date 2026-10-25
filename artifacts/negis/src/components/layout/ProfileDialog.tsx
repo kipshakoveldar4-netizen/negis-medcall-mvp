@@ -66,7 +66,8 @@ function clearPasswordInputs(element: HTMLDivElement | null) {
 }
 
 export function ProfileDialog({ onClose }: ProfileDialogProps) {
-  const { user, session, isImpersonation, isDemoMode, isSigningOut, applyConfirmedProfile } = useAuth();
+  const { user, session, isImpersonation, isDemoMode, isSigningOut, applyConfirmedProfile,
+    clinicId, userRole, workspacePurpose, vertical, rolePermissions } = useAuth();
   const [fullName, setFullName] = useState(user?.user_metadata?.full_name ?? '');
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -81,6 +82,10 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
     root.current = element;
   });
   const contextKey = JSON.stringify([user?.id, user?.email, profileSessionIdentity(session), isImpersonation, isDemoMode, isSigningOut]);
+  const focusContextKey = JSON.stringify([contextKey, clinicId, userRole, workspacePurpose, vertical,
+    Object.entries(rolePermissions ?? {}).sort(([left], [right]) => left.localeCompare(right))]);
+  const focusScope = useRef({ key: focusContextKey, valid: true, generation: 0 });
+  if (focusScope.current.key !== focusContextKey) focusScope.current.valid = false;
   const lifetime = useRef({ key: contextKey, mounted: false, invalidated: false, closed: false,
     sdkIdentity: profileSessionIdentity(session), sdkToken: session?.access_token });
   const pending = useRef<{ abort: AbortController } | null>(null);
@@ -226,6 +231,77 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
     }
   };
 
+  const modalClose = useRef(close);
+  modalClose.current = close;
+  const maintainFocus = useRef<(() => void) | null>(null);
+  useLayoutEffect(() => {
+    const panel = root.current?.querySelector<HTMLDivElement>('[role="dialog"]');
+    if (!panel || !isCurrent()) return;
+    const doc = panel.ownerDocument, view = doc.defaultView;
+    if (!view) return;
+    const trigger = doc.activeElement instanceof view.HTMLElement ? doc.activeElement : null;
+    const generation = ++focusScope.current.generation;
+    let active = true;
+    // Screen changes revoke opener restoration, not containment of a profile
+    // that still belongs to the current personal account/session.
+    const live = () => active && panel.isConnected && isCurrent();
+    const available = (element: HTMLElement) => element.isConnected && !element.matches(':disabled')
+      && !element.closest('[inert], [hidden], [aria-hidden="true"]')
+      && element.getClientRects().length > 0 && view.getComputedStyle(element).visibility === 'visible';
+    const controls = () => Array.from(panel.querySelectorAll<HTMLElement>(
+      'button, input:not([type="hidden"]), select, textarea, a[href], [tabindex], [contenteditable="true"]',
+    )).filter(element => element.tabIndex >= 0 && available(element));
+    const focusInside = () => (controls()[0] ?? panel).focus({ preventScroll: true });
+    const ensureFocus = () => {
+      if (live() && (!panel.contains(doc.activeElement)
+        || (doc.activeElement instanceof view.HTMLElement && !available(doc.activeElement)))) focusInside();
+    };
+    const containKeys = (event: globalThis.KeyboardEvent) => {
+      if (!live()) return;
+      if (event.key === 'Escape') {
+        event.preventDefault(); event.stopPropagation(); modalClose.current(); return;
+      }
+      if (event.key !== 'Tab') return;
+      const items = controls(), first = items[0], last = items[items.length - 1];
+      const outside = !items.includes(doc.activeElement as HTMLElement);
+      if (!first || !last) { event.preventDefault(); panel.focus({ preventScroll: true }); return; }
+      if (event.shiftKey ? doc.activeElement === first || outside : doc.activeElement === last || outside) {
+        event.preventDefault(); (event.shiftKey ? last : first).focus({ preventScroll: true });
+      }
+    };
+    doc.addEventListener('focusin', ensureFocus, true);
+    doc.addEventListener('keydown', containKeys, true);
+    maintainFocus.current = ensureFocus;
+    focusInside();
+    return () => {
+      active = false;
+      doc.removeEventListener('focusin', ensureFocus, true);
+      doc.removeEventListener('keydown', containKeys, true);
+      if (maintainFocus.current === ensureFocus) maintainFocus.current = null;
+      // Normal close/success invalidates without `closed`; auth invalidation
+      // sets `closed`. A raw unmount must not restore an old screen's opener.
+      if (!lifetime.current.invalidated || lifetime.current.closed) return;
+      // The main subscription has unmounted, but an SDK A/B/A can still run
+      // before the queued focus return. Observe only that short focus handoff.
+      const identity = lifetime.current.sdkIdentity, token = lifetime.current.sdkToken;
+      const subscription = supabase.auth.onAuthStateChange((event, next) => {
+        const nextIdentity = profileSessionIdentity(next);
+        if (nextIdentity !== identity || (event === 'SIGNED_IN' && nextIdentity === next?.user.id
+          && next?.access_token !== token)) focusScope.current.valid = false;
+      }).data.subscription;
+      queueMicrotask(() => {
+        subscription.unsubscribe();
+        if (focusScope.current.generation !== generation || !focusScope.current.valid
+          || lifetime.current.closed || !trigger || !available(trigger)) return;
+        // Wait for removal and never steal focus from a replacement surface.
+        const focused = doc.activeElement;
+        if (focused && focused !== doc.body && focused !== doc.documentElement && !panel.contains(focused)) return;
+        trigger.focus({ preventScroll: true });
+      });
+    };
+  }, []);
+  useLayoutEffect(() => { maintainFocus.current?.(); });
+
   if (lifetime.current.invalidated) return null;
 
   return (
@@ -238,6 +314,7 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
       <div
         role="dialog"
         aria-modal="true"
+        tabIndex={-1}
         aria-label="Профиль сотрудника"
         className="max-h-[90dvh] w-full max-w-[360px] overflow-y-auto rounded-xl border bg-white p-7"
         style={{ borderColor: 'var(--negis-border)', boxShadow: '0 20px 45px rgba(17, 24, 39, 0.18)' }}

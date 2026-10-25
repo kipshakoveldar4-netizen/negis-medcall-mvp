@@ -130,6 +130,8 @@ type TelegramResponse = {
   packageText: string;
   test: boolean;
   parts?: number;
+  replayed?: boolean;
+  testRequestId?: string;
 };
 
 function createContentApproval(
@@ -735,14 +737,19 @@ function parsePromptPackage(value: unknown): PromptPackage | null {
   return { prompt: prompt.prompt, negativePrompt: prompt.negativePrompt, format: prompt.format };
 }
 
-function parseTelegramResponse(value: unknown, mode: string, test: boolean, packageText?: string): TelegramResponse | null {
+function parseTelegramResponse(value: unknown, mode: string, test: boolean, packageText?: string, testRequestId?: string): TelegramResponse | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const result = value as TelegramResponse;
   if (typeof result.sent !== "boolean" || result.test !== test || typeof result.packageText !== "string" || !result.packageText.trim()
     || (!test && result.packageText !== packageText)) return null;
+  if (("replayed" in result && typeof result.replayed !== "boolean") || (result.replayed === true && !result.sent)
+    || (test && ((result.sent && "replayed" in result) || "testRequestId" in result)
+      && (typeof result.testRequestId !== "string" || result.testRequestId !== testRequestId))
+    || (!test && "testRequestId" in result)) return null;
   if (result.sent ? mode !== "telegram" || !Number.isSafeInteger(result.parts) || (result.parts ?? 0) < 1
     : mode !== "demo" || result.parts !== undefined) return null;
-  return { sent: result.sent, test: result.test, packageText: result.packageText, parts: result.parts };
+  return { sent: result.sent, test: result.test, packageText: result.packageText, parts: result.parts,
+    replayed: result.replayed, testRequestId: result.testRequestId };
 }
 
 function telegramErrorMessage<TData>(body: ApiResponse<TData> | null, fallback: string) {
@@ -2721,6 +2728,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     const kind = test ? "telegram-test" : "telegram";
     let started = false;
     let delivered = false;
+    let deliveryNotice = "";
     let receipt: TelegramDeliveryReceipt | null = null;
     const denyAccess = () => {
       const message = "Доступ к Telegram отозван. Обновите страницу.";
@@ -2778,9 +2786,18 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       if (!response.ok || body?.success !== true) {
         throw new Error(telegramErrorMessage(body, test ? "Проверка Telegram не подтверждена" : "Доставка в Telegram не подтверждена"));
       }
-      const result = parseTelegramResponse(body.data, body.mode, test, active ? buildTelegramPackage(active) : undefined);
+      const result = parseTelegramResponse(body.data, body.mode, test, active ? buildTelegramPackage(active) : undefined, testRequestId);
       if (!result) throw new Error("Сервер вернул неподтверждённый результат Telegram.");
       delivered = result.sent;
+      const deliveryParts = !test && result.parts && result.parts > 1 ? ` частями: ${result.parts}` : "";
+      // Legacy receipts confirm delivery, but only explicit false establishes a fresh send.
+      deliveryNotice = result.replayed === true
+        ? test ? "Проверочное сообщение было доставлено ранее. Повторно не отправлялось; новая проверка не выполнялась."
+          : `Пакет был доставлен в Telegram ранее${deliveryParts}. Повторно не отправлялся.`
+        : result.replayed === false
+          ? test ? "Telegram подтвердил проверочное сообщение." : "Telegram подтвердил отправку."
+          : test ? "Telegram подтвердил проверочное сообщение. Новая проверка не подтверждена."
+            : `Telegram подтвердил доставку пакета${deliveryParts}. Новая отправка не подтверждена.`;
       if (body.warning !== undefined && typeof body.warning !== "string") throw new Error("Сервер вернул неполные данные Telegram.");
       if (!result.sent) {
         if (receipt) releaseUnsentTelegramDelivery(window.localStorage, receipt);
@@ -2790,8 +2807,9 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
         return;
       }
       if (test) {
-        setNotice("Telegram подключён");
-        toast.success("Telegram подключён");
+        const message = result.replayed === false ? "Telegram подключён" : deliveryNotice;
+        setNotice(message);
+        toast.success(message);
         return;
       }
       if (receipt) confirmTelegramDelivery(window.localStorage, receipt);
@@ -2799,13 +2817,14 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       if (!await isLibraryWriteVerified(write)) return;
       const published = write.published?.videos.find((video) => video.id === active?.id);
       if (!saved || write.persistence !== "server" || published?.status !== "telegram_ready") {
-        const message = "Telegram подтвердил отправку. Статус в библиотеке на сервере не подтверждён. Не отправляйте пакет повторно ради статуса; обновите библиотеку.";
+        const message = `${deliveryNotice} Статус в библиотеке на сервере не подтверждён. Не отправляйте пакет повторно ради статуса; обновите библиотеку.`;
         setNotice(message);
         toast.warning(message);
         return;
       }
-      setNotice(`Пакет отправлен в Telegram${result.parts && result.parts > 1 ? ` частями: ${result.parts}` : ""}.`);
-      toast.success("Отправлено в Telegram");
+      setNotice(result.replayed === false
+        ? `Пакет отправлен в Telegram${result.parts && result.parts > 1 ? ` частями: ${result.parts}` : ""}.` : deliveryNotice);
+      toast.success(result.replayed === false ? "Отправлено в Telegram" : deliveryNotice);
     } catch (error) {
       // This transport refusal proves no POST, even if the captured session has ended.
       if (receipt && !delivered && error instanceof CrmApiError
@@ -2818,8 +2837,8 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
         return;
       }
       const detail = error instanceof Error ? error.message : "Не удалось проверить Telegram";
-      const message = delivered ? test ? "Telegram подтвердил проверочное сообщение, но дополнительные данные ответа не подтверждены."
-        : "Telegram подтвердил отправку, но статус в библиотеке не подтверждён. Не отправляйте пакет повторно ради статуса."
+      const message = delivered ? `${deliveryNotice} ${test ? "Дополнительные данные ответа не подтверждены."
+        : "Статус в библиотеке не подтверждён. Не отправляйте пакет повторно ради статуса."}`
         : `${detail} Проверьте Telegram перед повторной попыткой: часть сообщения могла быть доставлена.`;
       setNotice(message);
       if (delivered) toast.warning(message);

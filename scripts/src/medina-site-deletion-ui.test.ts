@@ -155,8 +155,10 @@ test("integration is session/role scoped, server-gated and does not persist dele
   const model = await read("artifacts/negis/src/lib/siteInquiryDeletion.ts");
   assert.match(page, /!isDemoMode && !isImpersonation && session && user && clinicId === readWorkspaceId\(\)/);
   assert.match(page, /userRole === "owner" \|\| userRole === "admin"/);
-  assert.match(page, /request=\{crmFetch\}/);
-  assert.match(page, /onDeleted=\{\(\) => \{\s*clearCrmCache\(\);\s*setItems/);
+  assert.match(page, /request=\{access\.deletionRequest\}/);
+  assert.match(page, /lifetime=\{access\.deletionLifetime\}/);
+  assert.match(page, /expectedUserId: actorId, signal: controller\.signal, dispatchGuard/);
+  assert.match(page, /onDeleted=\{\(\) => \{\s*if \(!access\.deletionLifetime\.isCurrent\(\)\) return;\s*clearCrmCache\(\);\s*setItems/);
   assert.match(component, /if \(!state.visible\) return null/);
   assert.doesNotMatch(component + model, /localStorage|sessionStorage|\.from\(|service_role|setInterval/);
   assert.match(component, /state.phase === "done" && !notified.current/);

@@ -113,7 +113,7 @@ function ActivityForm({ workspace, activity, kind, leadId, initialStartsAt, onOp
   const allowedStatuses: MortgageActivityStatus[] = kind === "meeting" ? ["open", "done", "cancelled", "missed"] : ["open", "in_progress", "done", "cancelled"];
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (savingRef.current || !workspace.isCurrent()) return;
+    if (!alive.current || savingRef.current || !workspace.isCurrent()) return;
     setError("");
     if (!selected || selected.id !== selectedId) { setError("Выберите доступного клиента."); return; }
     if (kind === "meeting" && !manager) { setError("Для встречи клиенту нужен активный менеджер или вы как ответственный администратор."); return; }
