@@ -68,11 +68,14 @@ function text(value: any): string {
 }
 class Host {
   isConnected = true;
+  ownerDocument: any;
   node!: Node;
   children: Host[] = [];
   constructor(private focusNode: (node: Host) => void) {}
   focus() { assert.ok(this.isConnected, "Do not focus an unmounted old account node"); this.focusNode(this); }
   contains(node: Host): boolean { return this === node || this.children.some(child => child.contains(node)); }
+  closest() { return null; }
+  querySelector(selector: string) { return this.querySelectorAll(selector)[0] ?? null; }
   querySelectorAll(selector: string): Host[] {
     assert.match(selector, /button/, "The actual drawer contains only native button controls");
     const buttons = (node: Host): Host[] => node.children.flatMap(child => [child, ...buttons(child)]);
@@ -85,7 +88,24 @@ function fixture(t: TestContext, patch: Partial<Auth> = {}, authModule?: AuthMod
   const navigations: string[] = [], signOutActors: Array<string | null> = [], focusEvents: Array<string | null> = [];
   const slots: any[] = [], effects: Effect[] = [], hosts = new Map<string, Host>();
   const refs = new Set<{ current: unknown }>();
-  const document = { activeElement: null as Host | null, body: { style: { overflow: "auto" } } };
+  const style = () => {
+    const values = new Map<string, { value: string; priority: string }>([["overflow", { value: "auto", priority: "" }]]);
+    return { get overflow() { return values.get("overflow")?.value ?? ""; },
+      getPropertyValue: (key: string) => values.get(key)?.value ?? "",
+      getPropertyPriority: (key: string) => values.get(key)?.priority ?? "",
+      setProperty(key: string, value: string, priority: string) { values.set(key, { value, priority }); },
+      removeProperty(key: string) { values.delete(key); } };
+  };
+  const listeners = new Map<string, Set<(event: any) => void>>();
+  const document = { activeElement: null as Host | null, body: { style: style(), children: [] },
+    documentElement: { style: style() },
+    defaultView: { scrollX: 0, scrollY: 0, scrollTo() {},
+      matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+      MutationObserver: class { observe() {} disconnect() {} },
+    },
+    addEventListener(key: string, listener: (event: any) => void) { if (!listeners.has(key)) listeners.set(key, new Set()); listeners.get(key)!.add(listener); },
+    removeEventListener(key: string, listener: (event: any) => void) { listeners.get(key)?.delete(listener); },
+  };
   let cursor = 0, tree: Node, dirty = false, writes = 0, mounted = true;
   const jsx = (type: unknown, props: Props, key?: string): Node => ({ type, props, key });
   function effect(create: Effect["create"], deps?: unknown[]) {
@@ -103,7 +123,9 @@ function fixture(t: TestContext, patch: Partial<Auth> = {}, authModule?: AuthMod
     const node = value as Node;
     if (typeof node.type !== "string") return commit(node.props.children, `${position}.children`);
     let host = hosts.get(position);
-    if (!host) { host = new Host(node => { document.activeElement = node; focusEvents.push(auth.user?.id ?? null); }); hosts.set(position, host); }
+    if (!host) { host = new Host(node => { document.activeElement = node; focusEvents.push(auth.user?.id ?? null);
+      for (const listener of listeners.get("focusin") ?? []) listener({ target: node });
+    }); host.ownerDocument = document; hosts.set(position, host); }
     host.node = node; host.isConnected = true; node.host = host;
     host.children = commit(node.props.children, `${position}.children`);
     if (node.props.ref) { assert.equal(typeof node.props.ref, "object"); node.props.ref.current = host; refs.add(node.props.ref); }
@@ -124,6 +146,7 @@ function fixture(t: TestContext, patch: Partial<Auth> = {}, authModule?: AuthMod
       useRef(initial: unknown) { const index = cursor++; return slots[index] ??= { current: initial }; },
     },
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: Symbol("Fragment") },
+    "react-dom": { createPortal: (children: unknown) => children },
     wouter: { useLocation: () => ["/leads", (href: string) => navigations.push(href)] },
     "lucide-react": Object.fromEntries(["BadgeDollarSign", "BarChart2", "CalendarDays", "Clapperboard", "FileText", "ClipboardList",
       "LayoutDashboard", "MessageCircle", "Megaphone", "Menu", "PhoneCall", "Rocket", "Settings", "Store", "Tag", "User", "Users", "X", "LogOut"].map(name => [name, () => null])),
@@ -282,21 +305,22 @@ function keyEvent(key: string, shiftKey = false) {
   let prevented = false;
   return { key, shiftKey, preventDefault() { prevented = true; }, isPrevented: () => prevented };
 }
-test("MobileNav drawer labels its dialog and enters button focus without claiming full modality", bounded, t => {
+test("MobileNav drawer labels its modal dialog and enters button focus", bounded, t => {
   const f = fixture(t); const more = f.button("Ещё разделы"); more.host!.focus(); f.open();
   const sheet = f.sheet();
-  assert.equal(sheet.props.role, "dialog"); assert.equal(sheet.props["aria-modal"], undefined);
+  assert.equal(sheet.props.role, "dialog"); assert.equal(sheet.props["aria-modal"], "true");
   assert.equal(f.button("Ещё разделы").props["aria-expanded"], true);
   assert.ok(sheet.host!.contains(f.document.activeElement!), "Opening moves focus to a drawer button");
 });
 
-test("MobileNav focus characterization: background is not inert or scroll-locked and programmatic focus is not contained", bounded, t => {
+test("MobileNav contains programmatic focus and locks scrolling only while open", bounded, t => {
   const f = fixture(t); f.open(); const background = f.route("/leads");
-  assert.equal(background.props.inert, undefined); assert.equal(f.document.body.style.overflow, "auto");
+  assert.equal(f.document.body.style.overflow, "hidden");
   background.host!.focus();
-  assert.equal(f.document.activeElement, background.host);
-  assert.equal(f.sheet().host!.contains(f.document.activeElement!), false);
-  assert.equal(f.hasSheet(), true, "This is an explicit limitation, not complete modal-focus acceptance");
+  assert.notEqual(f.document.activeElement, background.host);
+  assert.equal(f.sheet().host!.contains(f.document.activeElement!), true);
+  f.click(f.button("Закрыть меню"));
+  assert.equal(f.document.body.style.overflow, "auto");
 });
 
 test("MobileNav Escape closes the drawer and restores focus to its More trigger", bounded, t => {

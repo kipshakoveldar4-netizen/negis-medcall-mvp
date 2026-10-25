@@ -1,4 +1,5 @@
 import { normalizePhone } from "./phone";
+import type { SiteConsentNotice } from "../site/consent-registry.cjs";
 
 // Shared by the future server adapter; never accepts a workspace from a visitor.
 export const SITE_SERVICE_KEYS = [
@@ -18,6 +19,9 @@ export type SiteInquiry = {
 export type SiteInquiryValidation =
   | { ok: true; data: SiteInquiry }
   | { ok: false; code: "invalid_inquiry" | "consent_required" | "invalid_phone" };
+
+// Server-owned audit data, never accepted as part of a visitor's inquiry.
+export type SiteConsentReceipt = SiteConsentNotice;
 
 const allowedKeys = new Set(["name", "phone", "business", "service", "pagePath", "consentVersion", "consent"]);
 const cleanText = (value: unknown, max: number) =>

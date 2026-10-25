@@ -31,6 +31,7 @@ import {
 } from "../../lib/content-studio/generation";
 import { generatedVideoRequestDigest, readGeneratedVideoJobHandle, signGeneratedVideoJobHandle } from "../../lib/content-studio/generated-video-handle";
 import {
+  ackGeneratedVideoProviderFailure,
   admitGeneratedVideoWorkflow,
   beginGeneratedVideoDispatch,
   cancelGeneratedVideoWorkflow,
@@ -1055,6 +1056,7 @@ type GeneratedVideoApiState = {
   needInput: boolean;
   progress: number;
   result: Record<string, unknown> | null;
+  failureCode?: "generated_video_provider_failed";
 };
 
 function videoRecord(value: unknown): Record<string, unknown> {
@@ -1083,10 +1085,14 @@ function generatedVideoApiState(value: unknown, generationKey: string): Generate
   if ((state.status === "ready" && !result) || (state.needInput === true && !["rendering", "awaiting_upload"].includes(String(state.status)))) {
     throw new Error("generated_video_state_unconfirmed");
   }
+  if (state.failureCode === "generated_video_provider_failed"
+    && (state.status !== "cancelled" || !state.providerJobId || jobId !== null || state.needInput === true)) {
+    throw new Error("generated_video_state_unconfirmed");
+  }
   return { generationKey, requestDigest: state.requestDigest as string | null, providerJobId: state.providerJobId as string | null,
     status: String(state.status), validationJobId: jobId, needInput: state.needInput === true,
     progress: typeof state.progress === "number" && Number.isFinite(state.progress) ? Math.max(0, Math.min(95, state.progress)) : 0,
-    result };
+    result, ...(state.failureCode === "generated_video_provider_failed" ? { failureCode: "generated_video_provider_failed" as const } : {}) };
 }
 
 async function requireCurrentVideoActor(req: VercelRequest, expected: WorkspaceAccessContext): Promise<void> {
@@ -1131,6 +1137,7 @@ function sendAcceptedVideo(res: VercelResponse, context: WorkspaceAccessContext,
   options: { size: string; seconds: number; format: string; warning?: string; model?: string; progress?: number; status?: string }) {
   if (!state.providerJobId) throw new Error("generated_video_provider_link_unconfirmed");
   const handle = signGeneratedVideoJobHandle({ workspaceId: context.workspaceId, generationKey: state.generationKey, providerJobId: state.providerJobId }, secret);
+  if (state.failureCode === "generated_video_provider_failed") return sendVideoWorkflowState(res, context, state, handle);
   return sendJson(res, 202, { success: true, mode: "openai", ...(options.warning ? { warning: options.warning } : {}),
     data: { handle, status: options.status === "failed" ? "failed" : options.status === "queued" ? "queued" : "in_progress",
       progress: typeof options.progress === "number" && Number.isFinite(options.progress) ? Math.max(0, Math.min(95, options.progress)) : state.progress,
@@ -1168,6 +1175,10 @@ function sendVideoWorkflowState(res: VercelResponse, context: WorkspaceAccessCon
       thumbnailPath: result.thumbnailPath, thumbnailSize: result.thumbnailSize, thumbnailSha256: result.thumbnailSha256 } });
   }
   if (state.status === "failed" || state.status === "cancelled") {
+    if (state.failureCode === "generated_video_provider_failed") {
+      return sendJson(res, 200, { success: true, mode: "openai", data: { handle, status: "failed", phase: "generation", progress: 0,
+        failureReason: "Сервис генерации подтвердил ошибку рендера. Исходная задача сохранена; повтор проверки не запускает новую генерацию." } });
+    }
     return sendJson(res, 200, { success: true, mode: "openai", data: { handle, status: "failed", phase: "validation", progress: state.progress,
       ...(state.validationJobId ? { validationJobId: state.validationJobId } : {}), failureReason: "Проверка файла не завершилась успешно. Повторная проверка не требует нового рендера." } });
   }
@@ -1352,22 +1363,16 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
     const config = readGenerationConfig();
     const refusal = videoGenerationRefusal(config);
     if (refusal) return sendVideoWorkflowFailure(res, undefined, signedHandle, true);
-    await requireGeneratedVideoWorkflowReady(nativeConfig, context);
     await requireCurrentVideoActor(req, context);
     const job = await fetchVideoJob({ fetchImpl: fetch as unknown as GenerationFetch, config, jobId: handle.providerJobId });
     await requireCurrentVideoActor(req, context);
+    if (job.id !== handle.providerJobId) return sendVideoRequestConflict(res);
     if (job.status === "failed") {
-      return sendJson(res, 200, {
-        success: true,
-        mode: "openai",
-        data: {
-          status: "failed",
-          progress: job.progress,
-          handle: signedHandle,
-          phase: "generation",
-          failureReason: "Сервис генерации сообщил об ошибке рендера.",
-        },
-      });
+      state = generatedVideoApiState(await ackGeneratedVideoProviderFailure(nativeConfig, context, generationKey,
+        { id: job.id, status: "failed" }), generationKey);
+      await requireCurrentVideoActor(req, context);
+      if (state.providerJobId !== handle.providerJobId) return sendVideoRequestConflict(res);
+      return sendVideoWorkflowState(res, context, state, signedHandle);
     }
 
     if (job.status !== "completed") {
@@ -1377,6 +1382,8 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
         data: { handle: signedHandle, status: job.status, progress: Math.min(95, job.progress), phase: "generation" },
       });
     }
+    await requireGeneratedVideoWorkflowReady(nativeConfig, context);
+    await requireCurrentVideoActor(req, context);
     const buffer = await downloadVideoContent({ fetchImpl: fetch as unknown as GenerationFetch, config, jobId: handle.providerJobId });
     await requireCurrentVideoActor(req, context);
     state = generatedVideoApiState(await receiveGeneratedVideoInput(nativeConfig, context, generationKey, buffer), generationKey);

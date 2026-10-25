@@ -23,7 +23,7 @@ const simulatedOrigin = 'https://site.example.invalid';
 export async function startSiteIntakeFixture({ articles = [] } = {}) {
   const db = new PGlite();
   await db.exec('create role anon; create role authenticated; create role service_role bypassrls; grant usage on schema public to anon, authenticated, service_role;');
-  const selected = new Set([9, 10, 11, 12, 13, 14, 19, 58]);
+  const selected = new Set([9, 10, 11, 12, 13, 14, 19, 58, 93]);
   for (const file of (await readdir(path.join(root, 'migrations'))).sort()) {
     if (selected.has(Number(file.slice(0, 3)))) {
       await db.exec((await readFile(path.join(root, 'migrations', file), 'utf8')).replace(/CREATE EXTENSION IF NOT EXISTS pgcrypto;/i, ''));
@@ -40,10 +40,10 @@ export async function startSiteIntakeFixture({ articles = [] } = {}) {
     (select count(*)::int from public.leads where workspace_id=$2) as other_workspace_leads`, [workspace, otherWorkspace])).rows[0];
   setSupabaseServerClientFactoryForTests(() => ({
     async rpc(name, args) {
-      assert.equal(name, 'accept_crm_site_inquiry');
+      assert.equal(name, 'accept_crm_site_inquiry_with_consent');
       try {
-        const result = await db.query('select public.accept_crm_site_inquiry($1,$2,$3::jsonb) as result',
-          [args.p_site_key, args.p_request_key, JSON.stringify(args.p_inquiry)]);
+        const result = await db.query('select public.accept_crm_site_inquiry_with_consent($1,$2,$3::jsonb,$4::jsonb) as result',
+          [args.p_site_key, args.p_request_key, JSON.stringify(args.p_inquiry), JSON.stringify(args.p_consent_receipt)]);
         return { data: result.rows[0].result, error: null };
       } catch (error) { return { data: null, error: { message: error.message } }; }
     },

@@ -1,7 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
-import { validateSiteInquiry, type SiteInquiry } from "./site-intake";
-import { resolveSiteConsent, type SiteConsentResolver } from "../site/consent-registry.cjs";
+import { validateSiteInquiry, type SiteConsentReceipt, type SiteInquiry } from "./site-intake";
+import { createSiteConsentRegistry, resolveSiteConsent, type SiteConsentResolver } from "../site/consent-registry.cjs";
 
 type Config = { origin: string; hostname: string; siteKey: string; secret: string };
 type VerificationFetch = (url: string, init: {
@@ -9,6 +9,19 @@ type VerificationFetch = (url: string, init: {
 }) => Promise<{ ok: boolean; text(): Promise<string> }>;
 const record = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+
+export function resolveSiteConsentReceipt(version: string, resolve: SiteConsentResolver): SiteConsentReceipt | null {
+  try {
+    const notice = resolve(version);
+    if (!notice || notice.version !== version
+      || typeof notice.text !== "string" || notice.text.length > 32768
+      || typeof notice.purpose !== "string" || notice.purpose.length > 4096
+      || typeof notice.policyRevision !== "string" || notice.policyRevision.length > 200
+      || typeof notice.policyUrl !== "string" || notice.policyUrl.length > 2048) return null;
+    // Reuse the registry's canonical binding and freeze a fresh copy before any await.
+    return createSiteConsentRegistry([notice])(version);
+  } catch { return null; }
+}
 
 export function readSiteIntakeConfig(env: NodeJS.ProcessEnv): Config | null {
   if (env.MEDINA_SITE_INTAKE_ENABLED !== "true") return null;
@@ -37,16 +50,17 @@ export async function verifySiteChallenge(config: Config, token: string,
   } catch { return false; }
 }
 
-async function persist(siteKey: string, requestKey: string, inquiry: SiteInquiry): Promise<string | null> {
+async function persist(siteKey: string, requestKey: string, inquiry: SiteInquiry, receipt: SiteConsentReceipt): Promise<string | null> {
   const client = getSupabaseServerClient();
   if (!client) return "unavailable";
-  const { data, error } = await client.rpc("accept_crm_site_inquiry", {
-    p_site_key: siteKey, p_request_key: requestKey, p_inquiry: inquiry,
+  const { data, error } = await client.rpc("accept_crm_site_inquiry_with_consent", {
+    p_site_key: siteKey, p_request_key: requestKey, p_inquiry: inquiry, p_consent_receipt: receipt,
   });
   if (error) return error.message === "intake_rate_limited" ? "rate_limited"
     : error.message === "request_conflict" ? "request_conflict"
     : error.message === "inquiry_erased" ? "inquiry_erased" : "unavailable";
-  return record(data)?.accepted === true ? null : "unavailable";
+  const result = record(data);
+  return result?.accepted === true && Object.keys(result).length === 1 ? null : "unavailable";
 }
 
 export async function readSiteJsonBody(req: VercelRequest): Promise<unknown> {
@@ -108,10 +122,11 @@ export function createSiteIntakeHandler(deps: {
       || typeof challengeToken !== "string" || challengeToken.length < 1 || challengeToken.length > 2048) return reply(400, "invalid_request");
     const inquiry = validateSiteInquiry(body.inquiry);
     if (!inquiry.ok) return reply(400, inquiry.code);
-    if (!(deps.resolveConsent || resolveSiteConsent)(inquiry.data.consentVersion)) return reply(400, "invalid_inquiry");
+    const receipt = resolveSiteConsentReceipt(inquiry.data.consentVersion, deps.resolveConsent || resolveSiteConsent);
+    if (!receipt) return reply(400, "invalid_inquiry");
     try {
       if (!await (deps.verify || verifySiteChallenge)(config, challengeToken)) return reply(403, "challenge_failed");
-      const error = await (deps.save || persist)(config.siteKey, requestKey, inquiry.data);
+      const error = await (deps.save || persist)(config.siteKey, requestKey, inquiry.data, receipt);
       if (error === "rate_limited") return reply(429, error);
       if (error === "request_conflict") return reply(409, error);
       if (error === "inquiry_erased") return reply(409, error);

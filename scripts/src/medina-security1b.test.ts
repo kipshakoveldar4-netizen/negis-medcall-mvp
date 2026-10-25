@@ -3,6 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { analyzeSqlAcl, assertNoBrowserFunctionGrants, sameSqlObject, type SqlObject } from "./sql-acl-verifier";
 
 // Medina OS Security-1B — the public schema must expose nothing to the browser
 // roles, and future migrations must not silently reintroduce exposure.
@@ -25,6 +26,12 @@ const migrationsDir = path.join(repoRoot, "migrations");
 const negisSrc = path.join(repoRoot, "artifacts", "negis", "src");
 
 const HARDENING_MIGRATION = "023_public_privilege_hardening.sql";
+const aclCache = new Map<string, ReturnType<typeof analyzeSqlAcl>>();
+function inspectAcl(source: string) {
+  let analysis = aclCache.get(source);
+  if (!analysis) { analysis = analyzeSqlAcl(source); aclCache.set(source, analysis); }
+  return analysis;
+}
 
 /** Strip SQL comments so assertions never match explanatory prose. */
 function sqlOnly(source: string): string {
@@ -307,11 +314,10 @@ test("22b a migration that only alters a table does not get a free pass on RLS a
 
 test("23 new public functions must not become browser-callable by default", () => {
   for (const file of laterMigrations) {
-    const sql = normalize(migrations.get(file) ?? "");
-    assert.ok(
-      !/grant execute[^;]*to[^;]*(anon|authenticated|public)/.test(sql),
-      `${file} must not grant function execution to browser roles without review`,
-    );
+    const source = migrations.get(file) ?? "";
+    const sql = normalize(source);
+    assert.doesNotThrow(() => assertNoBrowserFunctionGrants(source),
+      `${file} must not grant function execution to browser roles or use unverifiable dynamic grants`);
     if (sql.includes("security definer")) {
       assert.ok(sql.includes("set search_path"), `${file} SECURITY DEFINER function must pin search_path`);
     }
@@ -380,53 +386,197 @@ function createdTables(sql: string): string[] {
  */
 function grantsToServiceRole(chain: Iterable<[string, string]>, table: string): boolean {
   for (const [, source] of chain) {
-    for (const match of normalize(source).matchAll(/\bgrant\s+[^;]+?\s+on\s+(?:table\s+)?([^;]+?)\s+to\s+([^;]+);/g)) {
-      const tables = match[1].split(",").map((name) => name.trim().replace(/^public\./, ""));
-      const roles = match[2].split(",").map((name) => name.trim());
-      if (tables.includes(table) && roles.includes("service_role")) return true;
+    for (const acl of inspectAcl(source).acls) {
+      if (acl.action === "grant" && acl.kind === "table" && acl.roles.includes("service_role")
+        && acl.objects.some((object) => sameSqlObject(object, { schema: "public", name: table }))) return true;
     }
   }
   return false;
 }
 
-// Receipt rows are deliberately inaccessible even to service_role. Only the
-// reviewed pair of SECURITY DEFINER RPCs per table may read/write them.
-const RPC_ONLY_TABLES = new Map([
+// Receipt mutations use only reviewed SECURITY DEFINER RPCs. Most receipts are
+// wholly RPC-only; 093 explicitly permits service_role SELECT, never DML.
+type ReceiptFunction = { name: string; args: string[] };
+type ReceiptReview = {
+  migration: string;
+  functions: ReceiptFunction[];
+  readOnly?: boolean;
+  privateFunctions?: (ReceiptFunction & { external?: boolean; definer?: boolean })[];
+  triggers?: { name: string; table: string; fn: string; events: string[]; timing: string; deferred?: boolean }[];
+};
+const RPC_ONLY_TABLES = new Map<string, ReceiptReview>([
   ["crm_appointment_create_requests", {
     migration: "064_appointment_create_requests.sql",
-    functions: ["read_crm_appointment_create_request", "create_crm_appointment_once"],
+    functions: [
+      { name: "read_crm_appointment_create_request", args: ["uuid", "uuid", "uuid", "text"] },
+      { name: "create_crm_appointment_once", args: ["uuid", "uuid", "uuid", "text", "jsonb", "jsonb", "text"] },
+    ],
   }],
   ["crm_sale_create_requests", {
     migration: "076_crm_sale_create_requests.sql",
-    functions: ["read_crm_sale_create_request", "create_crm_sale_once"],
+    functions: [
+      { name: "read_crm_sale_create_request", args: ["uuid", "uuid", "uuid", "uuid", "text"] },
+      { name: "create_crm_sale_once", args: ["uuid", "uuid", "uuid", "uuid", "text", "jsonb"] },
+    ],
+  }],
+  ["platform_subscription_operations", {
+    migration: "084_platform_subscription_operations.sql",
+    functions: [
+      { name: "apply_platform_subscription_operation", args: ["uuid", "uuid", "uuid", "text", "jsonb"] },
+      { name: "read_platform_subscription_operation", args: ["uuid", "uuid", "uuid"] },
+      { name: "abandon_platform_subscription_operation", args: ["uuid", "uuid", "uuid"] },
+    ],
+  }],
+  ["crm_site_consent_receipts", {
+    migration: "093_site_consent_receipts.sql",
+    readOnly: true,
+    functions: [{ name: "accept_crm_site_inquiry_with_consent", args: ["text", "uuid", "jsonb", "jsonb"] }],
+    privateFunctions: [
+      { name: "guard_crm_site_consent_receipt", args: [], definer: true },
+      { name: "require_crm_site_consent_receipt", args: [], definer: true },
+      { name: "valid_crm_site_consent_receipt", args: ["jsonb"], definer: false },
+      { name: "accept_crm_site_inquiry", args: ["text", "uuid", "jsonb"], external: true },
+    ],
+    triggers: [
+      { name: "guard_crm_site_consent_receipt", table: "crm_site_consent_receipts", fn: "guard_crm_site_consent_receipt", events: ["insert", "update"], timing: "before" },
+      { name: "guard_crm_site_inquiry_binding", table: "crm_site_inquiries", fn: "guard_crm_site_consent_receipt", events: ["update"], timing: "before" },
+      { name: "require_crm_site_consent_receipt", table: "crm_site_inquiries", fn: "require_crm_site_consent_receipt", events: ["insert"], timing: "after", deferred: true },
+    ],
   }],
 ]);
 
 test("26a grant checks recognize table lists without accepting similarly named tables or roles", () => {
-  const chain = new Map([["local.sql", "grant select on public.first, public.second to service_role; grant select on table public.third to service_role;"]]);
+  const chain = new Map([["local.sql", 'grant select on public.first, public.second to service_role; grant select on table public.third to "service_role" with grant option;']]);
   for (const table of ["first", "second", "third"]) assert.equal(grantsToServiceRole(chain, table), true);
   assert.equal(grantsToServiceRole(chain, "secon"), false);
   assert.equal(grantsToServiceRole(new Map([["local.sql", "grant select on second to other_service_role;"]]), "second"), false);
+  assert.equal(grantsToServiceRole(new Map([["local.sql", "grant execute on function public.second() to service_role;"]]), "second"), false);
+  assert.equal(grantsToServiceRole(new Map([["local.sql", "grant select on other.second to service_role;"]]), "second"), false);
 });
 
 function assertPrivateReceipt(chain: Map<string, string>, table: string) {
   const review = RPC_ONLY_TABLES.get(table);
-  assert.ok(review, "an RPC-only exception needs an explicit reviewed migration and function pair");
-  const sql = normalize(chain.get(review.migration) ?? "");
+  assert.ok(review, "an RPC-only exception needs an explicit reviewed migration and exact function signatures");
+  const source = chain.get(review.migration) ?? "";
+  const sql = normalize(source);
+  const reviewed = inspectAcl(source);
+  const relation: SqlObject = { schema: "public", name: table };
   assert.ok(createdTables(sql).includes(table));
-  assert.match(sql, new RegExp(`alter table public\\.${table} enable row level security\\s*;`));
-  assert.match(sql, new RegExp(`revoke all on public\\.${table} from public\\s*,\\s*anon\\s*,\\s*authenticated\\s*,\\s*service_role\\s*;`));
-  assert.equal(grantsToServiceRole(chain, table), false);
-  for (const name of review.functions) {
-    const start = sql.indexOf(`create or replace function public.${name}(`);
-    assert.ok(start >= 0, name);
-    const end = sql.indexOf("$$;", start);
-    const fn = sql.slice(start, end);
-    assert.ok(fn.includes("security definer"), name);
-    assert.ok(fn.includes("set search_path = ''"), name);
-    assert.ok(fn.includes(`public.${table}`), name);
-    assert.match(sql, new RegExp(`grant execute on function public\\.${name}\\([^;]+\\) to service_role;`));
-    assert.match(sql, new RegExp(`revoke all on function public\\.${name}\\([^;]+\\) from public\\s*,\\s*anon\\s*,\\s*authenticated;`));
+  assert.ok(reviewed.rls.some((item) => sameSqlObject(item.object, relation) && item.enabled), "explicit RLS required");
+  for (const role of ["public", "anon", "authenticated", "service_role"]) {
+    assert.ok(reviewed.acls.some((acl) => acl.action === "revoke" && !acl.optionOnly && acl.kind === "table"
+      && acl.privileges.includes("all") && acl.roles.includes(role)
+      && acl.objects.some((object) => sameSqlObject(object, relation))), `explicit table REVOKE from ${role}`);
+  }
+  const analyses = [...chain].map(([file, text]) => ({ file, ...inspectAcl(text) }));
+  if (review.readOnly) {
+    assert.ok(reviewed.acls.some((acl) => acl.action === "grant" && acl.kind === "table" && !acl.columnScoped
+      && !acl.grantOption && acl.privileges.length === 1 && acl.privileges[0] === "select"
+      && acl.roles.length === 1 && acl.roles[0] === "service_role"
+      && acl.objects.some((object) => sameSqlObject(object, relation))), "read-only server SELECT must be explicit");
+    let serverSelect = false;
+    for (const analysis of analyses) {
+      for (const acl of analysis.acls.filter((item) => item.kind === "table" && !item.optionOnly && !item.columnScoped
+        && item.roles.includes("service_role") && item.privileges.some((privilege) => ["all", "select"].includes(privilege))
+        && item.objects.some((object) => sameSqlObject(object, relation)))) serverSelect = acl.action === "grant";
+    }
+    assert.ok(serverSelect, "read-only server SELECT must remain available after the full chain");
+  }
+  for (const analysis of analyses) {
+    assert.ok(!analysis.rls.some((item) => sameSqlObject(item.object, relation) && !item.enabled), "RLS cannot be disabled later");
+    assert.ok(!analysis.policies.some((object) => sameSqlObject(object, relation)), "receipt tables have no direct-access policies");
+    for (const acl of analysis.acls.filter((item) => item.action === "grant" && item.kind === "table"
+      && item.objects.some((object) => sameSqlObject(object, relation)))) {
+      assert.ok(review.readOnly && acl.roles.length === 1 && acl.roles[0] === "service_role"
+        && !acl.grantOption && acl.privileges.length === 1 && acl.privileges[0] === "select"
+        && acl.objects.length === 1 && acl.objects[0].name === table,
+      "receipt tables cannot have unreviewed direct or column grants");
+    }
+    for (const fn of analysis.functions.filter((item) => item.definer
+      && item.references.some((reference) => sameSqlObject(reference, relation)))) {
+      assert.ok([...review.functions, ...(review.privateFunctions ?? [])].some((signature) => sameSqlObject(fn.object, { schema: "public", ...signature })),
+        `${table}: an additional SECURITY DEFINER reader needs explicit review`);
+    }
+  }
+  for (const signature of review.functions) {
+    const object: SqlObject = { schema: "public", ...signature };
+    const functions = reviewed.functions.filter((fn) => sameSqlObject(fn.object, object));
+    assert.equal(functions.length, 1, `${signature.name}: exact reviewed overload required`);
+    assert.ok(functions[0].references.some((reference) => sameSqlObject(reference, relation)), signature.name);
+    for (const role of ["public", "anon", "authenticated"]) {
+      assert.ok(reviewed.acls.some((acl) => acl.action === "revoke" && !acl.optionOnly && acl.kind === "function"
+        && acl.privileges.some((privilege) => ["all", "execute"].includes(privilege)) && acl.roles.includes(role)
+        && acl.objects.some((target) => target.name !== "*" && sameSqlObject(target, object))),
+      `${signature.name}: reviewed migration must explicitly revoke ${role} on this overload`);
+    }
+    assert.ok(reviewed.acls.some((acl) => acl.action === "grant" && acl.kind === "function"
+      && acl.privileges.some((privilege) => ["all", "execute"].includes(privilege)) && acl.roles.includes("service_role")
+      && acl.objects.some((target) => target.name !== "*" && sameSqlObject(target, object))),
+    `${signature.name}: reviewed migration must explicitly grant server EXECUTE`);
+    const revoked = new Set<string>();
+    let serviceExecute = false;
+    for (const analysis of analyses) {
+      for (const fn of analysis.functions.filter((item) => sameSqlObject(item.object, object))) {
+        assert.ok(fn.definer && fn.emptySearchPath, `${signature.name}: SECURITY DEFINER and empty search_path required`);
+      }
+      for (const acl of analysis.acls.filter((item) => item.kind === "function"
+        && item.objects.some((target) => sameSqlObject(target, object))
+        && item.privileges.some((privilege) => ["all", "execute"].includes(privilege)))) {
+        if (acl.optionOnly) continue;
+        for (const role of acl.roles) {
+          if (acl.action === "revoke") {
+            revoked.add(role);
+            if (role === "service_role") serviceExecute = false;
+          } else {
+            assert.ok(!["public", "anon", "authenticated"].includes(role), `${signature.name}: no browser EXECUTE`);
+            if (role === "service_role") {
+              assert.equal(acl.grantOption, false, `${signature.name}: no delegated grant option`);
+              serviceExecute = true;
+            }
+          }
+        }
+      }
+    }
+    for (const role of ["public", "anon", "authenticated"]) assert.ok(revoked.has(role), `${signature.name}: revoke ${role}`);
+    assert.ok(serviceExecute, `${signature.name}: server EXECUTE must remain available`);
+  }
+  for (const signature of review.privateFunctions ?? []) {
+    const object: SqlObject = { schema: "public", name: signature.name, args: signature.args };
+    if (!signature.external) {
+      const functions = reviewed.functions.filter((fn) => sameSqlObject(fn.object, object));
+      assert.equal(functions.length, 1, `${signature.name}: exact closed helper required`);
+      assert.ok(functions[0].emptySearchPath && functions[0].definer === signature.definer, `${signature.name}: reviewed helper security`);
+    }
+    for (const fn of analyses.flatMap((analysis) => analysis.functions).filter((item) => sameSqlObject(item.object, object))) {
+      assert.ok(fn.emptySearchPath && (signature.definer === undefined || fn.definer === signature.definer),
+        `${signature.name}: later definitions must preserve helper security`);
+    }
+    for (const role of ["public", "anon", "authenticated", "service_role"]) {
+      assert.ok(reviewed.acls.some((acl) => acl.action === "revoke" && acl.kind === "function" && !acl.optionOnly
+        && acl.privileges.some((privilege) => ["all", "execute"].includes(privilege)) && acl.roles.includes(role)
+        && acl.objects.some((target) => target.name !== "*" && sameSqlObject(target, object))), `${signature.name}: explicit closed helper REVOKE ${role}`);
+      let executable = false;
+      for (const analysis of analyses) {
+        for (const acl of analysis.acls.filter((item) => item.kind === "function" && !item.optionOnly
+          && item.privileges.some((privilege) => ["all", "execute"].includes(privilege)) && item.roles.includes(role)
+          && item.objects.some((target) => sameSqlObject(target, object)))) executable = acl.action === "grant";
+      }
+      assert.equal(executable, false, `${signature.name}: no bypass through ${role}`);
+    }
+  }
+  for (const expected of review.triggers ?? []) {
+    const object = { schema: "public", name: expected.table };
+    const trigger = reviewed.triggers.filter((item) => item.name === expected.name && sameSqlObject(item.object, object));
+    assert.equal(trigger.length, 1, `${expected.name}: receipt trigger required`);
+    assert.equal(analyses.flatMap((analysis) => analysis.triggers).filter((item) => item.name === expected.name
+      && sameSqlObject(item.object, object)).length, 1, `${expected.name}: replacement needs review`);
+    assert.ok(sameSqlObject(trigger[0].fn, { schema: "public", name: expected.fn, args: [] }));
+    assert.deepEqual(trigger[0].events, expected.events, `${expected.name}: all expected events`);
+    assert.equal(trigger[0].timing, expected.timing);
+    assert.equal(trigger[0].row, true);
+    assert.equal(trigger[0].deferred, expected.deferred ?? false);
+    assert.ok(!analyses.some((analysis) => analysis.triggerEdits.some((edit) => sameSqlObject(edit.object, object)
+      && [expected.name, "all", "user"].includes(edit.name))), `${expected.name}: no later trigger replacement or disable`);
   }
 }
 
@@ -437,23 +587,81 @@ for (const [table, review] of RPC_ONLY_TABLES) {
 
   test(`26b ${table} privacy check rejects weakened grants and inaccessible or unsafe RPCs`, () => {
     const source = migrations.get(review.migration)!;
+    assert.doesNotThrow(() => assertPrivateReceipt(migrations, table), "negative fixtures require a valid baseline");
     for (const [from, to] of [
       ["enable row level security", "disable row level security"],
       ["security definer", "security invoker"],
-      ["set search_path = ''", "set search_path = public"],
+      [source.includes("security definer set search_path = ''") ? "security definer set search_path = ''" : "security definer set search_path=''",
+        "security definer set search_path=public"],
       [`revoke all on public.${table}`, `grant select on public.${table}`],
-      [`grant execute on function public.${review.functions[0]}`, `revoke execute on function public.${review.functions[0]}`],
+      [`grant execute on function public.${review.functions[0].name}`, `revoke execute on function public.${review.functions[0].name}`],
     ]) {
       assert.ok(source.includes(from), "each mutation must change the current migration");
       const changed = new Map(migrations);
       changed.set(review.migration, source.replace(from, to));
-      assert.throws(() => assertPrivateReceipt(changed, table));
+      assert.throws(() => assertPrivateReceipt(changed, table), `${from} -> ${to}`);
     }
-    const exposed = new Map(migrations);
-    exposed.set("999_synthetic_exposure.sql", `grant select on public.${table} to service_role;`);
-    assert.throws(() => assertPrivateReceipt(exposed, table));
+    for (const exposure of [
+      `grant ${review.readOnly ? "insert" : "select"} on public.${table} to service_role;`,
+      `grant select on table public.other, public.${table} to "service_role" with grant option;`,
+      `grant select on public.${table} to "anon";`,
+      `grant select (workspace_id) on public.${table} to authenticated;`,
+      "grant select on all tables in schema public to service_role;",
+      `alter table public.${table} disable row level security;`,
+      `create policy leak on public.${table} to authenticated using (true);`,
+      `grant execute on function public.${review.functions[0].name}(${review.functions[0].args.join(",")}) to "authenticated";`,
+      `revoke execute on function public.${review.functions[0].name}(${review.functions[0].args.join(",")}) from service_role;`,
+      `create function public.unreviewed_receipt_reader() returns jsonb language sql security definer set search_path='' as $$ select to_jsonb(t) from public.${table} t; $$;`,
+      "do $$ begin execute format('grant execute on function %s to %I', unknown_function, unknown_role); end $$;",
+    ]) {
+      const exposed = new Map(migrations);
+      exposed.set("999_synthetic_exposure.sql", exposure);
+      assert.throws(() => assertPrivateReceipt(exposed, table), exposure);
+    }
+    for (const signature of review.functions) {
+      const changed = new Map(migrations);
+      const at = source.indexOf(`create or replace function public.${signature.name}(`);
+      assert.ok(at >= 0, signature.name);
+      changed.set(review.migration, source.slice(0, at) + source.slice(at).replace("security definer", "security invoker"));
+      assert.throws(() => assertPrivateReceipt(changed, table), `each RPC must be protected: ${signature.name}`);
+    }
+    for (const signature of review.privateFunctions ?? []) {
+      const exposed = new Map(migrations);
+      exposed.set("999_synthetic_helper_exposure.sql", `grant execute on function public.${signature.name}(${signature.args.join(",")}) to service_role;`);
+      assert.throws(() => assertPrivateReceipt(exposed, table), `closed helper ${signature.name}`);
+    }
+    for (const trigger of review.triggers ?? []) {
+      for (const sql of [
+        `alter table public.${trigger.table} disable trigger ${trigger.name};`,
+        `drop trigger ${trigger.name} on public.${trigger.table};`,
+      ]) {
+        const changed = new Map(migrations);
+        changed.set("999_synthetic_trigger_exposure.sql", sql);
+        assert.throws(() => assertPrivateReceipt(changed, table), sql);
+      }
+    }
   });
 }
+
+test("26c 093 requires read-only SELECT and every immutable/deferred trigger event", () => {
+  const table = "crm_site_consent_receipts";
+  const file = "093_site_consent_receipts.sql";
+  const source = migrations.get(file)!;
+  assert.doesNotThrow(() => assertPrivateReceipt(migrations, table));
+  for (const [from, to] of [
+    [`grant select on public.${table} to service_role;`, `revoke select on public.${table} from service_role;`],
+    ["before insert or update on public.crm_site_consent_receipts", "before insert on public.crm_site_consent_receipts"],
+    ["deferrable initially deferred for each row", "not deferrable for each row"],
+  ]) {
+    assert.ok(source.includes(from), from);
+    const changed = new Map(migrations);
+    changed.set(file, source.replace(from, to));
+    assert.throws(() => assertPrivateReceipt(changed, table), from);
+  }
+  const inaccessible = new Map(migrations);
+  inaccessible.set("999_synthetic_read_revoke.sql", `revoke select on public.${table} from service_role;`);
+  assert.throws(() => assertPrivateReceipt(inaccessible, table));
+});
 
 test("26 every new application table is reachable by the server that owns it", () => {
   // The routes run as service_role on a table created by postgres, which grants

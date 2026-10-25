@@ -31,7 +31,7 @@ function compile(source: string) {
 }
 function evaluate(code: Script, imports: Record<string, unknown> = {}) {
   const exports: Record<string, any> = {};
-  code.runInNewContext({ exports, require(name: string) {
+  code.runInNewContext({ exports, document: { body: {} }, require(name: string) {
     if (name in imports) return imports[name];
     if (name === "react/jsx-runtime") return {
       jsx: (type: unknown, props: Node["props"], key?: unknown) => ({ type, props, key }),
@@ -74,6 +74,11 @@ function setup(surface: Surface, patch: Partial<Auth> = {}, previous = false, al
   const navigations: string[] = [];
   let cursor = 0, dirty = true, tree: any, location = "/leads", signOuts = 0, switches = 0;
   const hooks = {
+    useRef(initial: unknown) {
+      const slot = cursor++;
+      if (!(slot in states)) states[slot] = { current: initial };
+      return states[slot];
+    },
     useState(initial: unknown) {
       const slot = cursor++;
       if (!(slot in states)) states[slot] = typeof initial === "function" ? initial() : initial;
@@ -92,6 +97,8 @@ function setup(surface: Surface, patch: Partial<Auth> = {}, previous = false, al
   };
   const module = evaluate(compiled[previous ? `${surface}:previous` : surface], {
     react: hooks,
+    "react-dom": { createPortal: (children: unknown) => children },
+    "@/lib/supabase": { hasSupabaseFrontendEnv: false, supabase: null },
     wouter: { Link: "Link", useLocation: () => [location, (href: string) => { location = href; navigations.push(href); }] },
     "@/contexts/AuthContext": { useAuth: () => ({ ...auth,
       signOut: () => { signOuts++; }, clearWorkspaceSelection: () => { switches++; },
@@ -224,7 +231,14 @@ test("profile/password dialog unmounts on context change on both surfaces and ca
     };
     open(); assert.equal(fixture.hasProfile(), true); assert.equal(fixture.hasDrawer(), false);
     fixture.change(change); assert.equal(fixture.hasProfile(), false);
-    open(); assert.equal(fixture.hasProfile(), true);
+    if (surface === "MobileNav" && change.user === null) {
+      fixture.openDrawer();
+      assert.equal(fixture.hasDrawer(), false, "signed-out mobile controls must not reopen a drawer");
+      assert.equal(fixture.hasProfile(), false, "signed-out mobile controls must not reopen a profile");
+      continue;
+    }
+    open();
+    assert.equal(fixture.hasProfile(), true);
     fixture.nodes().find((node) => node.type === "ProfileDialog")!.props.onClose();
     fixture.paint(); assert.equal(fixture.hasProfile(), false);
   }
@@ -237,7 +251,9 @@ test("unchanged identity preserves overlays", () => {
     fixture.change({ user: { id: "account-a", email: "local@example.test", user_metadata: { full_name: "Updated name" } } });
     if (surface === "MobileNav") assert.equal(fixture.hasDrawer(), true);
     fixture.click(surface === "MobileNav" ? "Профиль и пароль" : "Открыть профиль");
-    fixture.change({ rolePermissions: { crm: true } }); assert.equal(fixture.hasProfile(), true);
+    fixture.change({ rolePermissions: { crm: true } });
+    assert.equal(fixture.hasProfile(), surface !== "MobileNav",
+      "a changed mobile permission snapshot must invalidate its open profile");
   }
 });
 

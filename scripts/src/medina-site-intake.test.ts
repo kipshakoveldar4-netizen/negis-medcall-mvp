@@ -49,13 +49,18 @@ afterEach(async () => {
 
 // Exercise the production persistence adapter, not a fake successful save callback.
 async function formFixture() {
+  // Keep the direct 058 foundation tests below, but exercise the current form
+  // against its actual receipt migration inside this test's rollback boundary.
+  await db.exec((await readFile(path.join(root, "migrations/093_site_consent_receipts.sql"), "utf8"))
+    .replace(/^begin;\s*$/m, "").replace(/^commit;\s*$/m, ""));
   supabase.setSupabaseServerClientFactoryForTests(() => ({
     async rpc(name: string, args: Record<string, unknown>) {
-      assert.equal(name, "accept_crm_site_inquiry");
+      assert.equal(name, "accept_crm_site_inquiry_with_consent");
       await db.exec("savepoint form_write");
       try {
-        const result = await row("select public.accept_crm_site_inquiry($1,$2,$3::jsonb) as result",
-          [args.p_site_key, args.p_request_key, JSON.stringify(args.p_inquiry)]);
+        const result = await row("select public.accept_crm_site_inquiry_with_consent($1,$2,$3::jsonb,$4::jsonb) as result",
+          [args.p_site_key, args.p_request_key, JSON.stringify(args.p_inquiry), JSON.stringify(args.p_consent_receipt)]);
+        await db.exec("set constraints all immediate; set constraints all deferred");
         await db.exec("release savepoint form_write");
         return { data: result.result, error: null };
       } catch (error) {
@@ -93,6 +98,8 @@ test("public form success means a persisted lead and consent; retries do not dup
   assert.equal(saved.phone, valid.phone);
   assert.equal(saved.source, "website");
   assert.ok((await row("select consent_received_at from public.crm_site_inquiries")).consent_received_at);
+  assert.deepEqual((await row("select notice_snapshot from public.crm_site_consent_receipts")).notice_snapshot,
+    syntheticSiteConsent()(valid.consentVersion));
   assert.deepEqual(await send({ ...valid, name: "Changed" }),
     { status: 409, payload: { success: false, code: "request_conflict" } });
 });

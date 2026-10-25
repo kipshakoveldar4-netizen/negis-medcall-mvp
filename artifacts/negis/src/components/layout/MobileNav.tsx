@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 import { useLocation } from "wouter";
 import {
   BadgeDollarSign,
@@ -92,7 +93,10 @@ export function MobileNav() {
   const isCurrent = () => lifetime.current.mounted && lifetime.current.revision === revision && Boolean(user?.id) && !isSigningOut
     && (!hasSupabaseFrontendEnv || lifetime.current.sdkActor === user?.id);
   const sheet = useRef<HTMLElement>(null);
+  const backdrop = useRef<HTMLDivElement>(null);
   const moreButton = useRef<HTMLButtonElement>(null);
+  const releaseModal = useRef<(() => void) | null>(null);
+  const restoreDrawerFocus = useRef(false);
   const drawerOpen = useRef(open);
   drawerOpen.current = open;
 
@@ -111,6 +115,7 @@ export function MobileNav() {
       // SDK events invalidate captured actions before React can batch A/B/A.
       lifetime.current.sdkActor = next;
       lifetime.current.revision++;
+      releaseModal.current?.();
       setSessionRevision(value => value + 1);
       drawerOpen.current = false;
       setOpen(false);
@@ -126,20 +131,103 @@ export function MobileNav() {
   }, [contextKey]);
 
   useLayoutEffect(() => {
-    if (open && isCurrent()) sheet.current?.querySelectorAll<HTMLButtonElement>("button:not([disabled])")[0]?.focus();
-  }, [open]);
+    const panel = sheet.current, overlay = backdrop.current;
+    if (!open || !drawerOpen.current || !isCurrent() || !panel || !overlay) return;
+    const doc = panel.ownerDocument, view = doc.defaultView;
+    if (!view) return;
+    const desktop = view.matchMedia("(min-width: 1024px)");
+    if (desktop.matches) { drawerOpen.current = false; setOpen(false); return; }
+    let active = true;
+    const trigger = moreButton.current;
+    const outside = new Map<Element, { inert: string | null; hidden: string | null }>();
+    const scroll = { x: view.scrollX, y: view.scrollY };
+    const styles: Array<{ element: HTMLElement; property: string; value: string; priority: string; owned: string }> = [];
+    function lockStyle(element: HTMLElement, property: string, value: string) {
+      styles.push({ element, property, value: element.style.getPropertyValue(property),
+        priority: element.style.getPropertyPriority(property), owned: value });
+      element.style.setProperty(property, value, "important");
+    }
+    function isolateBackground() {
+      if (!active) return;
+      for (const element of Array.from(doc.body.children)) {
+        if (element === overlay || element.contains(overlay) || outside.has(element)) continue;
+        outside.set(element, { inert: element.getAttribute("inert"), hidden: element.getAttribute("aria-hidden") });
+        element.setAttribute("inert", "");
+        element.setAttribute("aria-hidden", "true");
+      }
+    }
+    function focusInside() {
+      const button = panel!.querySelector<HTMLButtonElement>("button:not([disabled])");
+      (button ?? panel!).focus({ preventScroll: true });
+    }
+    function containFocus(event: FocusEvent) {
+      if (active && isCurrent() && drawerOpen.current && !panel!.contains(event.target as Node)) focusInside();
+    }
+    function containKeys(event: globalThis.KeyboardEvent) {
+      if (active) drawerKeyDown(event);
+    }
+    function desktopChanged(event: MediaQueryListEvent) {
+      if (!event.matches || !active || !isCurrent()) return;
+      drawerOpen.current = false;
+      setOpen(false);
+    }
+    // The body portal stays outside the inert application root, including when
+    // another background portal mounts while the drawer is open.
+    const observer = new view.MutationObserver(isolateBackground);
+    observer.observe(doc.body, { childList: true });
+    doc.addEventListener("focusin", containFocus, true);
+    doc.addEventListener("keydown", containKeys, true);
+    desktop.addEventListener("change", desktopChanged);
+    focusInside();
+    isolateBackground();
+    lockStyle(doc.documentElement, "overflow", "hidden");
+    lockStyle(doc.documentElement, "overscroll-behavior", "none");
+    lockStyle(doc.body, "overflow", "hidden");
+    lockStyle(doc.body, "position", "fixed");
+    lockStyle(doc.body, "top", `${-scroll.y}px`);
+    lockStyle(doc.body, "left", `${-scroll.x}px`);
+    lockStyle(doc.body, "width", "100%");
+    const release = () => {
+      if (!active) return;
+      active = false;
+      observer.disconnect();
+      doc.removeEventListener("focusin", containFocus, true);
+      doc.removeEventListener("keydown", containKeys, true);
+      desktop.removeEventListener("change", desktopChanged);
+      for (const [element, previous] of outside) {
+        if (element.getAttribute("inert") === "") {
+          if (previous.inert === null) element.removeAttribute("inert"); else element.setAttribute("inert", previous.inert);
+        }
+        if (element.getAttribute("aria-hidden") === "true") {
+          if (previous.hidden === null) element.removeAttribute("aria-hidden"); else element.setAttribute("aria-hidden", previous.hidden);
+        }
+      }
+      for (const { element, property, value, priority, owned } of styles) {
+        if (element.style.getPropertyValue(property) !== owned || element.style.getPropertyPriority(property) !== "important") continue;
+        if (value) element.style.setProperty(property, value, priority); else element.style.removeProperty(property);
+      }
+      view.scrollTo(scroll.x, scroll.y);
+      const restore = restoreDrawerFocus.current;
+      restoreDrawerFocus.current = false;
+      if (releaseModal.current === release) releaseModal.current = null;
+      if (restore && isCurrent() && trigger?.isConnected && !trigger.closest("[inert]")) trigger.focus({ preventScroll: true });
+    };
+    releaseModal.current = release;
+    return release;
+  }, [open, contextKey]);
 
   function closeDrawer() {
     if (!isCurrent() || !drawerOpen.current) return;
+    restoreDrawerFocus.current = true;
     drawerOpen.current = false;
     setOpen(false);
-    moreButton.current?.focus();
   }
-  function drawerKeyDown(event: KeyboardEvent<HTMLElement>) {
+  function drawerKeyDown(event: KeyboardEvent<HTMLElement> | globalThis.KeyboardEvent) {
     if (!isCurrent() || !drawerOpen.current) return;
     if (event.key === "Escape") { event.preventDefault(); closeDrawer(); return; }
     if (event.key !== "Tab" || !sheet.current) return;
-    // This drawer has only buttons. This is not global focus containment or background isolation.
+    // All drawer controls are native buttons; document capture also handles
+    // focus moved outside by code before the browser's next key event.
     const buttons = sheet.current.querySelectorAll<HTMLButtonElement>("button:not([disabled])");
     const first = buttons[0], last = buttons[buttons.length - 1];
     if (!first || !last) return;
@@ -176,10 +264,10 @@ export function MobileNav() {
 
   return (
     <>
-      {open && (
-        <div className="mobile-nav-backdrop lg:hidden" onClick={closeDrawer}>
+      {open && createPortal(
+        <div ref={backdrop} className="mobile-nav-backdrop lg:hidden" onClick={closeDrawer}>
           <section ref={sheet} id="mobile-nav-drawer" className="mobile-nav-sheet" role="dialog"
-            aria-label="Разделы Medina OS" onKeyDown={drawerKeyDown} onClick={(event) => event.stopPropagation()}>
+            aria-modal="true" tabIndex={-1} aria-label="Разделы Medina OS" onKeyDown={drawerKeyDown} onClick={(event) => event.stopPropagation()}>
             <div className="mb-4 flex items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--negis-muted)" }}>Меню</p>
@@ -245,7 +333,7 @@ export function MobileNav() {
               Выйти
             </button>
           </section>
-        </div>
+        </div>, document.body
       )}
 
       {showProfile && <ProfileDialog onClose={() => { if (isCurrent()) setShowProfile(false); }} />}

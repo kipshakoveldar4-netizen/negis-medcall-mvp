@@ -15,7 +15,8 @@ type Inquiry = {
   pagePath: string; consentVersion: string; consent: true;
 };
 type Envelope = { requestKey: string; inquiry: Inquiry; challengeToken: string };
-type RpcArgs = { p_site_key: string; p_request_key: string; p_inquiry: Inquiry };
+type RpcArgs = { p_site_key: string; p_request_key: string; p_inquiry: Inquiry;
+  p_consent_receipt: NonNullable<ReturnType<ConsentResolver>> };
 const page = await load("lib/crm/site-page.ts") as { createSitePageHandler(deps: { resolveConsent: ConsentResolver; renderPages: unknown }): Handler };
 const intake = await load("lib/crm/site-intake-handler.ts") as {
   createSiteIntakeHandler(deps: { env(): NodeJS.ProcessEnv; verify(): Promise<boolean>; resolveConsent: ConsentResolver }): Handler;
@@ -103,8 +104,9 @@ function fixture(t: TestContext) {
       return query;
     },
     async rpc(name: string, args: RpcArgs) {
-      assert.equal(name, "accept_crm_site_inquiry");
+      assert.equal(name, "accept_crm_site_inquiry_with_consent");
       assert.equal(args.p_site_key, env.MEDINA_SITE_INTAKE_KEY);
+      assert.deepEqual(args.p_consent_receipt, resolveConsent(args.p_inquiry.consentVersion));
       attempts.push(structuredClone(args));
       // Model only the configured version/path check in migration 058, not a
       // policy registry or execution of the SQL/database integration itself.

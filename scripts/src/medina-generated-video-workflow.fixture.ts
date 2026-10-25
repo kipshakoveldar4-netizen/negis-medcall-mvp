@@ -188,7 +188,8 @@ async function fixture(t: TestContext, options: Row = {}) {
       }
       if (url.includes("/content?")) { providerDownloads++; return new Response(new Uint8Array(RAW), { headers: { "content-type": "video/mp4" } }); }
       providerReads++;
-      return new Response(JSON.stringify({ id: "synthetic_provider_job_090", status: options.providerStatus ?? "completed", progress: 100 }));
+      const requestedJob = decodeURIComponent(new URL(url).pathname.split("/").at(-1)!);
+      return new Response(JSON.stringify({ id: requestedJob, status: options.providerStatus ?? "completed", progress: 100 }));
     }
     assert.ok(url.startsWith(`${origin}/storage/v1/object/`), `Unapproved network destination ${url}`);
     assert.equal(init.redirect, "error"); assert.equal(init.credentials, "omit");

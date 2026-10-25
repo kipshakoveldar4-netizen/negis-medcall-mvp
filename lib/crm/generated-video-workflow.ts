@@ -51,6 +51,22 @@ const size = (value: unknown, max = MAX_INPUT_BYTES): value is number => Number.
 const hash = (value: unknown): value is string => typeof value === "string" && SHA256.test(value);
 type Envelope = { operation: Row; job: Row | null; asset: Row | null; dispatchAccepted?: boolean };
 
+function terminalProviderFailure(op: Row): boolean {
+  if (op.provider_failure_receipt == null) return false;
+  const proof = object(op.provider_failure_receipt);
+  const fields = ["kind", "provider", "status", "providerJobId", "generationKey", "requestDigest", "keyDigest", "acknowledgedAt", "staffUserId", "authUserId"];
+  if (Object.keys(proof).length !== fields.length || fields.some(field => !Object.hasOwn(proof, field))
+    || proof.kind !== "provider-terminal-failure-v1" || proof.provider !== "openai" || proof.status !== "failed"
+    || proof.providerJobId !== op.provider_job_id || proof.generationKey !== op.generation_key
+    || proof.requestDigest !== op.request_digest || proof.keyDigest !== op.key_digest || !validTime(proof.acknowledgedAt)
+    || typeof proof.staffUserId !== "string" || !UUID.test(proof.staffUserId)
+    || typeof proof.authUserId !== "string" || !UUID.test(proof.authUserId)
+    || op.status !== "cancelled" || typeof op.provider_job_id !== "string" || !op.provider_job_id
+    || op.input_size !== null || op.input_sha256 !== null || op.raw_bucket !== null || op.raw_path !== null || op.result !== null
+    || (String(op.generation_key).startsWith("v2:") && op.dispatch_id === null)) throw unavailable();
+  return true;
+}
+
 /** Read at call time; importing this module never initializes a client or an external connection. */
 export function generatedVideoWorkflowConfig(): GeneratedVideoWorkflowConfig {
   const supabase = getSupabaseServerClient();
@@ -204,6 +220,8 @@ function envelope(config: GeneratedVideoWorkflowConfig, actor: GeneratedVideoAct
     if (op.status === "ready" && job.status !== "ready") throw unavailable();
   } else if (op.input_sha256 !== null || op.raw_bucket !== null || op.raw_path !== null || job !== null || asset !== null
     || !["reserved", "dispatching", "rendering", "cancelled"].includes(op.status)) throw unavailable();
+  const providerFailed = terminalProviderFailure(op);
+  if (op.status === "cancelled" && op.provider_job_id !== null && !providerFailed) throw unavailable();
   if (body.dispatchAccepted !== undefined && typeof body.dispatchAccepted !== "boolean") throw unavailable();
   return { operation: op, job, asset, ...(body.dispatchAccepted === undefined ? {} : { dispatchAccepted: body.dispatchAccepted as boolean }) };
 }
@@ -221,6 +239,7 @@ function normalize(value: Envelope): GeneratedVideoWorkflowState {
     providerJobId: op.provider_job_id as string | null, validationJobId: job ? String(op.job_id) : null,
     progress: job ? Math.min(95, Number(job.progress)) : 0, result: null,
     needInput: status === "rendering" || status === "awaiting_upload",
+    ...(terminalProviderFailure(op) ? { failureCode: "generated_video_provider_failed" } : {}),
     ...(status === "failed" ? { failureCode: "generated_video_validation_failed" } : {}),
     ...(value.dispatchAccepted === undefined ? {} : { dispatchAccepted: value.dispatchAccepted }) };
 }
@@ -291,6 +310,23 @@ export async function cancelGeneratedVideoWorkflow(config: GeneratedVideoWorkflo
     ...actorArgs(actor), p_generation_key: key, p_dispatch_id: dispatchId ?? null, p_known_failure: knownFailure,
   }));
   if (reply.operation.status !== "cancelled") throw unavailable();
+  return normalize(reply);
+}
+
+/** Call only after an authenticated provider GET returns failed for the signed, already-linked job. */
+export async function ackGeneratedVideoProviderFailure(config: GeneratedVideoWorkflowConfig, actor: GeneratedVideoActor, key: string,
+  providerJob: { id: string; status: "failed" }): Promise<GeneratedVideoWorkflowState> {
+  validateConfig(config); identity(actor, key);
+  if (!providerJob || providerJob.status !== "failed" || typeof providerJob.id !== "string"
+    || providerJob.id.length < 1 || providerJob.id.length > 512 || providerJob.id.trim() !== providerJob.id
+    || /[\u0000-\u001f\u007f]/.test(providerJob.id)) throw invalid();
+  const providerJobId = providerJob.id;
+  await liveActor(config, actor);
+  const reply = envelope(config, actor, key, await rpc(config, "ack_generated_video_provider_failure", {
+    ...actorArgs(actor), p_generation_key: key, p_provider_job_id: providerJobId, p_provider_status: "failed",
+  }));
+  if (!terminalProviderFailure(reply.operation) || reply.operation.provider_job_id !== providerJobId) throw unavailable();
+  await liveActor(config, actor);
   return normalize(reply);
 }
 
