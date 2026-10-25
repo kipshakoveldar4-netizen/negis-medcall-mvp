@@ -4609,6 +4609,96 @@ Linux/container sandbox и настоящая изолированная Storage
 1 fail**: прежний M2 duplicate в чужой dirty 065; 059/065 не менялись и не
 включаются в commit, исключения/allowlist не добавлялись.
 
+### Продолжение G5-C55/C56: освобождение raw и безопасный повтор — локальный кандидат, 25 октября
+
+Предыдущий turn был progress (`656aa23`), не no-progress: private upload
+действительно подключён к API/страницам. Здесь main ведёт SQL, API admission
+и общую проверку. Шесть разных scopes: browser replay/resume, reclaimer,
+независимые adversarial tests, native SQL races, extensionless handoff и
+ограничения worker config. Не создавались новые проекты или задачи вне G1–G8.
+
+- Ранее выданный `upsert:false` token нельзя считать отозванным при logout
+  или по локальному таймеру. Вместо удаления свободного имени новый reclaimer
+  заменяет **текущий private raw** известным маленьким JPEG/PNG/WebP и оставляет
+  этот ключ занятым. Сервис не вызывает `remove`, не читает оригинал до замены
+  и не меняет public canonical asset. В актуальном исходнике Supabase non-upsert
+  запись отвергается и на финальном commit, когда live key уже существует;
+  это основание fence-модели, **не доказательство версии облачного проекта**.
+  [Supabase uploader](https://github.com/supabase/storage/blob/master/src/storage/uploader.ts).
+- **089 только локально**, после 088: claim выбирает только signed операции,
+  уже finalized/rejected либо с истёкшим manifest; активный valid reserved не
+  выбирается. Lease 120 s, batch API максимум 1, SQL максимум 2. Timestamp ACK
+  проверяется **после** ожидания guard и operation locks. Exact ACK replay
+  уже подтверждённого receipt допускается после expiry без изменения данных.
+- Для потерянного claim ACK есть отдельный закрытый append-only журнал batch
+  identity. Workspace MVCC guard сериализует одинаковые конкурентные claim.
+  Старый claim не приобретает новую запись после того, как его строка перешла
+  другому lease. Таблица не выдаёт браузеру table/column grants; service имеет
+  только SELECT/INSERT, с явным снятием default UPDATE/DELETE privileges.
+  Непустые claims сохраняются, пустые не создают лишних history rows.
+- Worker выводит точный private path из проверенных workspace/operation/MIME,
+  пишет только фиксированную заглушку <=2 KiB и сверяет private GET: MIME,
+  точный size/hash, origin, redirect и stream budget. SDK/RPC waits ограничены,
+  тела имеют deadline 10 s; позднее тело и зависшая отмена не продлевают ожидание.
+  Lost upload ACK не равен успеху: без byte proof + точного DB receipt квота
+  не освобождается. Явно включённое/приостановленное versioning отказано;
+  отсутствие поля трактуется как legacy API и требует cloud-проверки.
+- При P8805 API заново проверяет actor, пытается вернуть **один** eligible raw
+  budget и повторяет **тот же** admission key один раз. Не меняются тарифы,
+  подписки, роли или правила pending/recent quotas. Большой raw charge 100 MiB
+  заменяется только подтверждённым размером заглушки; технический live-object
+  budget не равен учёту физических backend versions или стоимости Storage.
+- Исправлен настоящий повтор загрузки: private lookup различает отсутствие,
+  существующий original и неопределённый ответ. Existing original даёт handle
+  без нового token/upload, затем native finalize. Completed replay сверяет
+  сохранённый public объект и возвращает подтверждённый asset без private mint.
+  Client проверяет requestKey/operation/tenant/hash path и session lifetime для
+  обеих веток. Ticket lifetime 2 h сохранён, бессрочный upload replay не обещан.
+  [SDK create-only upload contract](https://supabase.com/docs/reference/javascript/file-buckets-createsigneduploadurl).
+- Из G5-C56 закрыт **только extensionless own-Storage handoff**: dot-free object
+  name может использовать проверенные filename/MIME, explicit unknown extension
+  не может. Действуют прежние HTTPS/tenant/redirect/header/stream/deadline guards;
+  URL/ID по-прежнему не дают readiness без native upload/worker проверки.
+- Worker config теперь отвергает дробные/безразмерные/неверные значения, а не
+  увеличивает нагрузку: poll 1–60 s, attempts 1–10, concurrency 1–4, CRF 0–51,
+  whitelist preset, even dimensions 2–3840, FPS 1–60. Unset/blank defaults
+  сохранены, ошибки содержат key, не значение. Worker не запускался и его
+  облачные settings не менялись.
+
+Actual 089 поверх 015 table-only/082/085/087/088 на собственном native PostgreSQL
+17.11: **29/29**, включая journal ACL/RLS, потерянные ACK, конкурентный same-claim
+replay, lease takeover/ABA, обе lock-wait expiry races, точную границу live budget,
+RR/Serializable и неизменность чужих строк. Storage здесь — synthetic schema;
+это не HTTP/backend GC тест. Собственная БД остановлена и каталог удалён.
+SHA-256 проверенной 089:
+`f065ba86c31e640cd4db68b7b6f8a16f85371cf5be724e476df1c93d37d8c1c0`.
+Fixture: `scripts/fixtures/staged-creative-reclamation-postgres.test.mjs`.
+
+Общий интегрированный runtime/regression: **3325/3325**, без skips/cancelled.
+Focused runs не прибавляются повторно. Включены 18 actual client→server→native
+image сценариев и actual reclaimer/capacity/account/timeout controls с явно
+поддельными SDK/RPC/network. Actual Sharp декодирует все три статические
+заглушки; это не облачная Storage-приёмка. Логи общего прогона:
+`node_modules/.cache/g5c55-reclamation-{accepted,pipeline,focused,worker-final,`
+`worker-contract,smoke-source,build-final,migration-chain}.log`.
+Полные workspace/API typechecks (оба resolution modes), production build и
+115 isolated cold-start checks прошли. Tooltip sourcemap warning прежний.
+Общий migration-chain: **3 pass / 1 fail**, только прежний duplicate 064/065;
+allowlist не ослаблялся. Ни один ожидаемый тестовый процесс не оставлен.
+
+Остатки не скрываются: physical backend GC/old versions и private/public
+orphans не подтверждены удалёнными. Permanent tombstones и append-only claim
+history автоматически не удаляются; срок их хранения — отдельная retention
+политика. Нет общей гарантии completion до 60 s Vercel deadline: частные
+ожидания bounded, crash/unknown ACK должен восстанавливаться повтором, что ещё
+нужно проверить в Preview. Требуются реальный Storage API/versioning/fence и
+mobile upload матрица, ранее выданные public tokens, generated provider-video
+pipeline/durable video admission, Linux/container sandbox. Extensionless fix
+не объявляется готовностью всего G5-C56. 087/088/089 не применялись в Supabase;
+новых Preview, облачных файлов, реальных генераций/отправок/рекламы/расходов нет.
+Production, Baspana, салоны, WhatsApp, домены, аккаунты и настройки нетронуты.
+Прежний M2 duplicate 064/foreign dirty 065 сохраняется; 059/065 не менялись.
+
 ### Цикл G7-C21: шесть независимых направлений — интеграция локально, 25 октября
 
 После замечания владельца write scopes разделены: G1 operator requests,

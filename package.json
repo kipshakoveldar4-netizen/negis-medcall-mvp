@@ -7,6 +7,7 @@
     "test:staged-creatives": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:staged-creatives",
     "test:staged-creatives-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:staged-creatives-postgres",
     "test:video-worker-media": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:video-worker-media",
+    "test:video-worker-config": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:video-worker-config",
     "test:video-worker-contract": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:video-worker-contract",
     "test:video-job-promotion-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:video-job-promotion-postgres",
     "test:legal-notices": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:legal-notices",

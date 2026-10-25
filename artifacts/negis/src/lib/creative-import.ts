@@ -42,12 +42,19 @@ function checkedSource(input: CreativeImportInput) {
   if (parts.some((part) => !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(part) || part.includes(".."))) return fail();
   const tenantIndex = parts[0] === "optimized" ? 1 : 0;
   if (parts[tenantIndex] !== input.workspaceId || parts.length <= tenantIndex + 1) return fail();
-  const extension = parts.at(-1)!.split(".").at(-1)!.toLowerCase();
-  const mimeType = Object.hasOwn(mimeByExtension, extension) ? mimeByExtension[extension]! : "";
-  const nameExtension = typeof input.fileName === "string" ? input.fileName.split(".").at(-1)!.toLowerCase() : "";
-  if (!mimeType || input.mimeType !== mimeType || !Object.hasOwn(mimeByExtension, nameExtension)
-    || mimeByExtension[nameExtension] !== mimeType || !input.fileName || new TextEncoder().encode(input.fileName).length > 255
+  if (typeof input.fileName !== "string" || !input.fileName || input.fileName !== input.fileName.trim()
+    || new TextEncoder().encode(input.fileName).length > 255 || input.fileName.includes("..")
     || /[\\/%?#\u0000-\u001f\u007f]/.test(input.fileName)) return fail();
+  const nameDot = input.fileName.lastIndexOf(".");
+  const nameExtension = input.fileName.slice(nameDot + 1).toLowerCase();
+  if (nameDot <= 0 || !input.fileName.slice(0, nameDot).trim() || !Object.hasOwn(mimeByExtension, nameExtension)) return fail();
+  const mimeType = mimeByExtension[nameExtension]!;
+  if (input.mimeType !== mimeType) return fail();
+  // Generated keys may omit an extension. Only a dot-free final component can
+  // borrow the validated handoff type; an explicit unknown extension must fail.
+  const objectName = parts.at(-1)!;
+  const extension = objectName.includes(".") ? objectName.split(".").at(-1)!.toLowerCase() : nameExtension;
+  if (!Object.hasOwn(mimeByExtension, extension) || mimeByExtension[extension] !== mimeType) return fail();
   return { mimeType, cap: mimeType.startsWith("image/") ? CREATIVE_IMPORT_IMAGE_MAX_BYTES : CREATIVE_IMPORT_VIDEO_MAX_BYTES };
 }
 
@@ -58,6 +65,9 @@ function cancelQuietly(body?: ReadableStream<Uint8Array> | null, reader?: Readab
   } catch { /* Cancellation must not extend the import deadline. */ }
 }
 
+// Even own-workspace URLs and matching headers are not proof of media validity
+// or readiness. Return bounded bytes only; native upload/worker validation stays
+// authoritative and must issue any canonical asset identity or ready receipt.
 export async function downloadCreativeImport(input: CreativeImportInput): Promise<File> {
   input = { ...input };
   const { mimeType, cap } = checkedSource(input);

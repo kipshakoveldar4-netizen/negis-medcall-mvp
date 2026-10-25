@@ -414,6 +414,29 @@ upload и DB commit не атомарны между сервисами: вал�
 Прежние public tokens/legacy assets требуют отдельного плана перед выпуском.
 Никаких рабочих данных, внешних подключений, рекламы или расходов не меняли.
 
+G5-C55/C56, следующее продолжение: локальная 089 и reclaimer возвращают live raw
+budget только после замены terminal/expired private original фиксированной
+маленькой заглушкой и проверки bytes/DB ACK. Ключ не удаляется: он остаётся
+fence для старого create-only token. Браузер не получает RPC/table/column access,
+batch history append-only. Проверены lease expiry после ожидания и защита от
+ABA-повтора; claim history и tombstones не стираются автоматически. Это не
+доказательство физического удаления версий/S3 orphans и не универсальная
+retention-политика. Предпосылка версии Storage требует отдельной cloud приёмки:
+[create-only commit в Supabase](https://github.com/supabase/storage/blob/master/src/storage/uploader.ts).
+Actual native PostgreSQL 17.11: 29/29 поверх зависимостей; Storage schema
+synthetic, не физическое удаление. Проверенная 089 SHA-256:
+`f065ba86c31e640cd4db68b7b6f8a16f85371cf5be724e476df1c93d37d8c1c0`.
+
+API делает один same-key cleanup fallback при capacity отказе и безопасно
+возобновляет существующий private upload/completed receipt без нового mint.
+Ограничены worker config ресурсы; extensionless handoff остаётся bounded input,
+не доказательством готового креатива. Общая runtime регрессия 3325/3325.
+Полная сборка/types и 115 cold-start checks прошли; общий migration-chain
+по-прежнему имеет один отдельный M2 fail в чужой dirty 065, без новых исключений.
+Ни рабочий выпуск, ни новая схема в Supabase, ни реальные расходы не включались.
+Generated provider-video, physical cleanup/retention, Linux sandbox, настоящая
+Preview/mobile/Storage матрица и юридическое согласование остаются отдельно.
+
 Нет основания выставлять «100% защиты» или «100% юридической готовности».
 Изменение исходников не меняет уже опубликованную версию. Отдельно фиксируются
 локальные тесты, проверки Preview, юридическое согласование и рабочий выпуск.

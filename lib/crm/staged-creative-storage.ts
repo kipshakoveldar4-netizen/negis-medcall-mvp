@@ -48,23 +48,48 @@ export async function prepareStagedCreativeUpload(config: Config, input: StagedC
   return prepareReservedStagedCreativeUpload(config, ticket, now);
 }
 
-export async function prepareReservedStagedCreativeUpload(config: Config, ticket: StagedCreativeTicket, now = Date.now()) {
+function uploadInfo(config: Config, ticket: StagedCreativeTicket, now: number) {
+  return { bucket: STAGED_CREATIVE_BUCKET, storageBucket: STAGED_CREATIVE_BUCKET, storagePath: stagedCreativePath(ticket),
+    uploadHandle: sealStagedCreativeTicket(ticket, config.serviceRoleKey, now), expiresAt: ticket.expiresAt,
+    fileName: ticket.fileName, fileType: stagedCreativeKind(ticket), mimeType: ticket.mimeType, fileSize: ticket.fileSize };
+}
+
+async function mintReservedUpload(config: Config, ticket: StagedCreativeTicket, now: number,
+  bucket: ReturnType<Config["supabase"]["storage"]["from"]>) {
   const origin = originOf(config);
-  const handle = sealStagedCreativeTicket(ticket, config.serviceRoleKey, now);
-  await privateBucket(config, ticket);
-  const storagePath = stagedCreativePath(ticket);
+  const info = uploadInfo(config, ticket, now), storagePath = info.storagePath;
   try {
-    const { data, error } = await storageCall(() => config.supabase.storage.from(STAGED_CREATIVE_BUCKET).createSignedUploadUrl(storagePath, { upsert: false }));
+    const { data, error } = await storageCall(() => bucket.createSignedUploadUrl(storagePath, { upsert: false }));
     if (error || !data || data.path !== storagePath || typeof data.token !== "string" || !data.token
       || typeof data.signedUrl !== "string") throw new Error();
     const url = new URL(data.signedUrl);
     if (url.origin !== origin || url.username || url.password || url.hash
       || url.pathname !== `/storage/v1/object/upload/sign/${STAGED_CREATIVE_BUCKET}/${storagePath}`
       || [...url.searchParams].length !== 1 || url.searchParams.get("token") !== data.token) throw new Error();
-    return { bucket: STAGED_CREATIVE_BUCKET, storageBucket: STAGED_CREATIVE_BUCKET, storagePath,
-      signedUrl: data.signedUrl, token: data.token, uploadHandle: handle, expiresAt: ticket.expiresAt,
-      fileName: ticket.fileName, fileType: stagedCreativeKind(ticket), mimeType: ticket.mimeType, fileSize: ticket.fileSize };
+    return { ...info, signedUrl: data.signedUrl, token: data.token };
   } catch { throw new StagedCreativeStorageError("creative_staging_ticket_unconfirmed"); }
+}
+
+export async function prepareReservedStagedCreativeUpload(config: Config, ticket: StagedCreativeTicket, now = Date.now()) {
+  originOf(config);
+  await privateBucket(config, ticket);
+  return mintReservedUpload(config, ticket, now, config.supabase.storage.from(STAGED_CREATIVE_BUCKET));
+}
+
+/** An existing private object is resumable input, never a ready asset. */
+export async function prepareOrResumeStagedCreativeUpload(config: Config, ticket: StagedCreativeTicket, now = Date.now()) {
+  originOf(config);
+  const info = uploadInfo(config, ticket, now);
+  await privateBucket(config, ticket);
+  const bucket = config.supabase.storage.from(STAGED_CREATIVE_BUCKET);
+  const split = info.storagePath.lastIndexOf("/"), folder = info.storagePath.slice(0, split), name = info.storagePath.slice(split + 1);
+  try {
+    const { data, error } = await storageCall(() => bucket.list(folder, { limit: 2, search: name }));
+    if (error || !Array.isArray(data) || data.length > 1 || data.some(row => row.name !== name
+      || typeof row.id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(row.id))) throw new Error();
+    if (data.length === 1) return { ...info, uploadRequired: false as const };
+  } catch { throw new StagedCreativeStorageError("creative_staging_listing_unconfirmed"); }
+  return mintReservedUpload(config, ticket, now, bucket);
 }
 
 /** The image API may buffer only its bounded image. Videos belong to the worker. */

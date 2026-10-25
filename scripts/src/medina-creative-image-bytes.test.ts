@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { Buffer } from "node:buffer";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -117,6 +118,7 @@ for (const [id, file] of [
   ["./staged-creative-ticket", "lib/crm/staged-creative-ticket.ts"],
   ["./staged-creative-storage", "lib/crm/staged-creative-storage.ts"],
   ["./generated-storage-verification", "lib/crm/generated-storage-verification.ts"],
+  ["./staged-creative-reclamation", "lib/crm/staged-creative-reclamation.ts"],
   ["./staged-creative-workflow", "lib/crm/staged-creative-workflow.ts"],
 ]) {
   runtimeCode.set(id, compile(await readFile(path.join(root, file), "utf8")));
@@ -242,7 +244,7 @@ function fixture(helper: ImageHelper = actualHelper) {
   };
   const modules = new Map<string, Json>([["./creative-image", helper as unknown as Json]]);
   function loadRuntime(id: string): Json {
-    if (id === "node:crypto") return requireFromRoot(id) as Json;
+    if (id === "node:crypto") return { createHash, createHmac, randomUUID, timingSafeEqual };
     const cached = modules.get(id);
     if (cached) return cached;
     const code = runtimeCode.get(id);

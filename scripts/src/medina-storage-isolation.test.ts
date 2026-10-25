@@ -101,7 +101,7 @@ function dbSpy(rows: Record<string, unknown[]>, log: QueryLog[], errors: Record<
 }
 
 /** Storage data is held only in memory; canonical public verification reads it back. */
-function storageSpy(calls: StorageCall[], replies: StorageReplies = {}, published = new Map<string, Buffer>()) {
+function storageSpy(calls: StorageCall[], replies: StorageReplies = {}, published = new Map<string, Buffer>(), staged = new Map<string, Buffer>()) {
   return {
     async getBucket(bucket: string) {
       calls.push({ op: "getBucket", bucket, key: "" });
@@ -112,6 +112,12 @@ function storageSpy(calls: StorageCall[], replies: StorageReplies = {}, publishe
     },
     from(bucket: string) {
       return {
+        list: async (folder: string, options: { limit: number; search: string }) => {
+          assert.equal(bucket, STAGING_BUCKET); assert.equal(options.limit, 2);
+          const key = `${folder}/${options.search}`;
+          calls.push({ op: "list", bucket, key, options });
+          return { data: staged.has(key) ? [{ id: OWN_ASSET, name: options.search }] : [], error: null };
+        },
         upload: async (key: string, bytes: Buffer, options: unknown) => {
           calls.push({ op: "upload", bucket, key, options });
           published.set(`${bucket}/${key}`, Buffer.from(bytes));
@@ -209,7 +215,7 @@ async function loadRouter(rows: Record<string, unknown[]> = {}) {
     row.id === args.p_staff_user_id && row.workspace_id === args.p_workspace_id
     && row.auth_user_id === args.p_auth_user_id && row.status === "active" && ["owner", "admin", "marketer"].includes(row.role));
   supabaseModule.setSupabaseServerClientFactoryForTests(() => ({
-    from: dbSpy(clientRows, queries, errors), storage: storageSpy(storage, storageReplies, published),
+    from: dbSpy(clientRows, queries, errors), storage: storageSpy(storage, storageReplies, published, staged),
     async rpc(name: string, args: Row) {
       rpcs.push({ name, args: structuredClone(args) });
       check(live(args), "admission/commit must bind the active workspace, staff and auth user");
@@ -476,8 +482,8 @@ for (const { name, mutate } of signingMutations) {
       const profiles = profileQueries(queries);
       assert.deepEqual(queries.filter((entry) => entry.table !== "staff_users" && !profiles.includes(entry)), [],
         "only authorization and workspace profile reads may occur");
-      assert.equal(storage.length, 2, "only private-bucket verification and one signing attempt may occur");
-      assert.deepEqual(storage.map((call) => call.op), ["getBucket", "createSignedUploadUrl"]);
+      assert.equal(storage.length, 3, "only private-bucket verification, exact-key lookup and one signing attempt may occur");
+      assert.deepEqual(storage.map((call) => call.op), ["getBucket", "list", "createSignedUploadUrl"]);
       for (const call of storage) assert.equal(call.bucket, STAGING_BUCKET);
       assert.ok(storage[1].key.startsWith(`${WORKSPACE_A}/staged/`));
       assert.deepEqual(rpcs.map((call) => call.name), ["reserve_creative_upload"]);

@@ -23,38 +23,64 @@ function readString(key: string, fallback = ""): string {
   return process.env[key]?.trim() || fallback;
 }
 
-function readPositiveNumber(key: string, fallback: number): number {
-  const value = Number(process.env[key]?.trim() ?? "");
-  return Number.isFinite(value) && value > 0 ? value : fallback;
+function invalidConfig(key: string): Error {
+  return new Error(`Invalid video worker configuration: ${key}`);
+}
+
+// Defaults apply only to unset/blank values; explicit invalid settings fail closed.
+function readInteger(key: string, fallback: number, min: number, max: number, step = 1): number {
+  const raw = readString(key);
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < min || value > max || value % step !== 0) {
+    throw invalidConfig(key);
+  }
+  return value;
+}
+
+const presets = new Set(["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]);
+
+function readPreset(): string {
+  const preset = readString("VIDEO_WORKER_PRESET", "medium");
+  if (!presets.has(preset)) throw invalidConfig("VIDEO_WORKER_PRESET");
+  return preset;
+}
+
+function readExecutablePath(key: string, fallback: string): string {
+  const value = readString(key, fallback);
+  // execFile uses a single binary path, without a shell. Preserve spaces in paths.
+  if (/[\x00-\x1f\x7f]/.test(value)) throw invalidConfig(key);
+  return value;
 }
 
 export function loadWorkerConfig(): WorkerConfig {
-  const supabaseUrl = readString("SUPABASE_URL").replace(/\/+$/, "");
+  const supabaseUrl = readString("SUPABASE_URL").replace(/\/$/, "");
   const serviceRoleKey = readString("SUPABASE_SERVICE_ROLE_KEY");
-  if (!supabaseUrl || !serviceRoleKey) {
-    throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for the video worker");
-  }
+  if (!supabaseUrl) throw invalidConfig("SUPABASE_URL");
+  if (!serviceRoleKey) throw invalidConfig("SUPABASE_SERVICE_ROLE_KEY");
   try {
     const url = new URL(supabaseUrl);
-    if (url.protocol !== "https:" || url.origin !== supabaseUrl) throw new Error();
-  } catch { throw new Error("Video worker requires an HTTPS Supabase origin"); }
+    if (url.protocol !== "https:" || url.username || url.password || url.origin !== supabaseUrl) throw new Error();
+  } catch { throw invalidConfig("SUPABASE_URL"); }
 
+  // Scheduling caps limit polling pressure, retry amplification and parallel work.
+  // Even 3840-side output stays below ffmpeg's 4096-side and VIDEO_MEDIA_LIMITS pixel caps.
   return {
     supabaseUrl,
     serviceRoleKey,
-    pollIntervalMs: readPositiveNumber("VIDEO_WORKER_POLL_INTERVAL_MS", 5000),
+    pollIntervalMs: readInteger("VIDEO_WORKER_POLL_INTERVAL_MS", 5000, 1000, 60_000),
     workerId: readString("VIDEO_WORKER_ID", `video-worker-${os.hostname()}-${process.pid}`),
-    maxAttempts: readPositiveNumber("VIDEO_WORKER_MAX_ATTEMPTS", 3),
-    maxConcurrentJobs: readPositiveNumber("VIDEO_WORKER_MAX_CONCURRENT_JOBS", 1),
+    maxAttempts: readInteger("VIDEO_WORKER_MAX_ATTEMPTS", 3, 1, 10),
+    maxConcurrentJobs: readInteger("VIDEO_WORKER_MAX_CONCURRENT_JOBS", 1, 1, 4),
     tmpDir: readString("VIDEO_WORKER_TMP_DIR", os.tmpdir() || "/tmp"),
     rawBucket: readString("VIDEO_OPTIMIZATION_RAW_BUCKET", "ad-creatives-raw"),
     outputBucket: readString("VIDEO_OPTIMIZATION_OUTPUT_BUCKET", "ad-creatives"),
-    ffmpegPath: readString("FFMPEG_PATH", "ffmpeg"),
-    ffprobePath: readString("FFPROBE_PATH", "ffprobe"),
-    crf: readPositiveNumber("VIDEO_WORKER_CRF", 23),
-    preset: readString("VIDEO_WORKER_PRESET", "medium"),
-    maxWidth: readPositiveNumber("VIDEO_WORKER_MAX_WIDTH", 1080),
-    maxHeight: readPositiveNumber("VIDEO_WORKER_MAX_HEIGHT", 1920),
-    fps: readPositiveNumber("VIDEO_WORKER_FPS", 30),
+    ffmpegPath: readExecutablePath("FFMPEG_PATH", "ffmpeg"),
+    ffprobePath: readExecutablePath("FFPROBE_PATH", "ffprobe"),
+    crf: readInteger("VIDEO_WORKER_CRF", 23, 0, 51),
+    preset: readPreset(),
+    maxWidth: readInteger("VIDEO_WORKER_MAX_WIDTH", 1080, 2, 3840, 2),
+    maxHeight: readInteger("VIDEO_WORKER_MAX_HEIGHT", 1920, 2, 3840, 2),
+    fps: readInteger("VIDEO_WORKER_FPS", 30, 1, 60),
   };
 }

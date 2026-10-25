@@ -70,13 +70,23 @@ async function fixture(t: import("node:test").TestContext, options: Row = {}) {
       async getBucket(id: string) { assert.equal(id, "ad-creatives-staging"); return { data: { id, public: false,
         file_size_limit: 100 * 1024 * 1024, allowed_mime_types: ["image/jpeg"] }, error: null }; },
       from(bucket: string) { return {
+        async list(folder: string, opts: Row) {
+          assert.equal(bucket, "ad-creatives-staging"); assert.equal(opts.limit, 2);
+          const key = `${folder}/${opts.search}`;
+          if (options.listError) return { data: null, error: { message: secret } };
+          if (options.foreignListKey) return { data: [{ id: randomUUID(), name: "foreign.jpg" }], error: null };
+          if (options.multipleListKeys) return { data: [{ id: randomUUID(), name: opts.search }, { id: randomUUID(), name: opts.search }], error: null };
+          return { data: raw.has(key) ? [{ id: randomUUID(), name: opts.search }] : [], error: null };
+        },
         async createSignedUploadUrl(key: string, opts: Row) {
           assert.equal(bucket, "ad-creatives-staging"); assert.deepEqual(opts, { upsert: false }); events.push("mint:private");
+          assert.equal(raw.has(key), false, "Storage refuses a new create-only ticket for an occupied key");
           return { data: { path: key, token: "SYNTHETIC_TOKEN", signedUrl: `${origin}/storage/v1/object/upload/sign/${bucket}/${key}?token=SYNTHETIC_TOKEN` }, error: null };
         },
         async upload(key: string, buffer: Buffer, opts: Row) {
           assert.equal(bucket, "ad-creatives"); assert.deepEqual(opts, { contentType: "image/jpeg", upsert: false });
           events.push("upload:public");
+          if (published.has(key)) return { data: null, error: { message: "Already exists" } };
           if (!options.noPublicCommit) published.set(key, Buffer.from(buffer));
           if (options.revokeAfterPublic) member.status = "inactive";
           if (options.lostPublicAck || options.noPublicCommit) throw new Error(secret);
@@ -139,6 +149,7 @@ test("actual client/server/native pipeline publishes only canonical bytes and ex
   assert.equal((await browser.uploadVerifiedCreativeImage(f.input)).id, saved.id);
   assert.equal(f.events.filter(event => event === "upload:public").length, 1); assert.equal(f.counts().commits, 1);
   assert.equal(f.events.filter(event => event === "fetch:private").length, fetched, "Replay must not decode/re-upload an existing receipt");
+  assert.equal(f.events.filter(event => event === "mint:private").length, 1, "Completed replay must not mint against the occupied original key");
   assert.ok(f.raw.size, "Private source is retained until signed-token/cleanup reconciliation");
 });
 
@@ -159,6 +170,34 @@ test("two lost DB commit responses remain uncertain, but the next client retry r
   assert.equal(f.events.filter(event => event === "upload:public").length, 1);
 });
 
+test("a reserved upload resumes the occupied private key without another token or byte upload", async t => {
+  const options = { finalizeDenied: true }, f = await fixture(t, options);
+  await assert.rejects(browser.uploadVerifiedCreativeImage(f.input));
+  assert.equal(f.raw.size, 1); assert.equal(f.assets.size, 0); assert.equal(f.published.size, 1);
+  options.finalizeDenied = false;
+  const asset = await browser.uploadVerifiedCreativeImage(f.input);
+  assert.equal(f.events.filter(event => event === "mint:private").length, 1);
+  assert.equal(f.events.filter(event => event === "upload:private").length, 1);
+  assert.equal(f.counts().commits, 1); assert.equal(f.assets.size, 1); assert.equal(f.published.size, 1);
+  assert.ok(asset.publicUrl);
+});
+
+test("completed replay refuses changed public bytes without minting or uploading again", async t => {
+  const f = await fixture(t), asset = await browser.uploadVerifiedCreativeImage(f.input);
+  f.published.set(asset.storagePath, Buffer.from("corrupt stored public bytes"));
+  await assert.rejects(browser.uploadVerifiedCreativeImage(f.input));
+  assert.equal(f.events.filter(event => event === "mint:private").length, 1);
+  assert.equal(f.events.filter(event => event === "upload:private").length, 1);
+  assert.equal(f.events.filter(event => event === "upload:public").length, 1);
+});
+
+for (const option of ["listError", "foreignListKey", "multipleListKeys"] as const) test(`${option} never turns an uncertain private lookup into a fresh token`, async t => {
+  const f = await fixture(t, { [option]: true });
+  await assert.rejects(browser.uploadVerifiedCreativeImage(f.input), /creative_staging_listing_unconfirmed/);
+  assert.equal(f.events.some(event => event === "mint:private" || event === "upload:private" || event === "upload:public"), false);
+  assert.equal(f.assets.size, 0);
+});
+
 for (const option of ["corruptPrivate", "revokeAfterPrivate", "noPublicCommit", "revokeAfterPublic", "finalizeDenied"] as const) test(`${option} never becomes a verified asset response`, async t => {
   const f = await fixture(t, { [option]: true }); await assert.rejects(browser.uploadVerifiedCreativeImage(f.input));
   assert.equal(f.assets.size, 0); assert.equal(f.counts().commits, 0);
@@ -168,7 +207,9 @@ for (const option of ["corruptPrivate", "revokeAfterPrivate", "noPublicCommit", 
 
 test("an admission refusal cannot mint a signed token or upload either private/public bytes", async t => {
   const f = await fixture(t, { reserveError: "P8805" }); await assert.rejects(browser.uploadVerifiedCreativeImage(f.input), /creative_upload_capacity_exhausted/);
-  assert.deepEqual(f.events, ["rpc:reserve_creative_upload"]); assert.equal(f.raw.size, 0); assert.equal(f.published.size, 0);
+  assert.equal(f.events.filter(event => event === "rpc:reserve_creative_upload").length, 2);
+  assert.equal(f.events.some(event => event === "mint:private" || event === "upload:public"), false);
+  assert.equal(f.raw.size, 0); assert.equal(f.published.size, 0);
 });
 
 test("actual inline normalization uses the same durable receipt on replay without minting any Storage token", async t => {

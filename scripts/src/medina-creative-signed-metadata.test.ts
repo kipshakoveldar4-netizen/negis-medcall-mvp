@@ -69,7 +69,7 @@ const ticketScript = await actualDeclarations("lib/crm/staged-creative-ticket.ts
   "issueStagedCreativeTicket", "readStagedCreativeTicket", "sealStagedCreativeTicket", "stagedCreativePath",
   "stagedCreativeKind", "STAGED_CREATIVE_BUCKET", "STAGED_CREATIVE_LIFETIME_MS"]);
 const storageScript = await actualDeclarations("lib/crm/staged-creative-storage.ts",
-  ["StagedCreativeStorageError", "prepareReservedStagedCreativeUpload"]);
+  ["StagedCreativeStorageError", "prepareOrResumeStagedCreativeUpload"]);
 const workflowScript = await actualDeclarations("lib/crm/staged-creative-workflow.ts",
   ["CreativeUploadWorkflowError", "prepareCreativeImageUpload"]);
 
@@ -142,6 +142,9 @@ class FakeSdk {
     from: (bucket: string) => {
       this.buckets.push(bucket);
       return {
+        list: async (_folder: string, options: Json) => {
+          assert.equal(options.limit, 2); return { data: [], error: null };
+        },
         createSignedUploadUrl: async (...args: unknown[]) => {
           this.tickets.push({ bucket, args: clone(args) });
           return {

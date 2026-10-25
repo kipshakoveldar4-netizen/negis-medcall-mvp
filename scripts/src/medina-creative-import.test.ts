@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Script } from "node:vm";
 
 // Real downloader and actual Ads import/upload closures; synthetic HTTP, streams,
@@ -19,6 +19,8 @@ const W = "11111111-1111-4111-8111-111111111111";
 const B = "22222222-2222-4222-8222-222222222222";
 const origin = "https://storage.fixture.invalid";
 const base = `${origin}/storage/v1/object/public/ad-creatives/`;
+const generatedKey = "1".repeat(64);
+const generatedUrl = `${base}${W}/generated/${generatedKey}`;
 const imageCap = 10 * 1024 * 1024, videoCap = 500 * 1024 * 1024;
 type Bag = Record<string, any>;
 type Input = { url: string; fileName: string; mimeType: string; storageOrigin: string; workspaceId: string;
@@ -95,8 +97,9 @@ const code = (expected: string) => (error: unknown) => {
   assert.equal((error as { code?: string }).code, expected); return true;
 };
 
-for (const [extension, mimeType] of [["jpg", "image/jpeg"], ["jpeg", "image/jpeg"], ["png", "image/png"],
-  ["webp", "image/webp"], ["mp4", "video/mp4"], ["mov", "video/quicktime"], ["webm", "video/webm"]]) {
+const supportedTypes = [["jpg", "image/jpeg"], ["jpeg", "image/jpeg"], ["png", "image/png"],
+  ["webp", "image/webp"], ["mp4", "video/mp4"], ["mov", "video/quicktime"], ["webm", "video/webm"]];
+for (const [extension, mimeType] of supportedTypes) {
   for (const layout of ["tenant", "optimized"]) {
     test(`bounded ${layout} ${extension} import returns bytes, never asset identity`, async () => {
       const f = fixture(extension, mimeType);
@@ -114,6 +117,31 @@ for (const [extension, mimeType] of [["jpg", "image/jpeg"], ["jpeg", "image/jpeg
   }
 }
 
+for (const [extension, mimeType] of supportedTypes) for (const layout of ["tenant", "optimized"]) {
+  test(`extensionless ${layout} ${extension} imports all bytes using the validated handoff type`, async () => {
+    const f = fixture(extension, mimeType);
+    f.input.url = layout === "optimized" ? `${base}optimized/${W}/${generatedKey}` : generatedUrl;
+    f.response.url = f.input.url;
+    const file = await f.start();
+    assert.deepEqual([...new Uint8Array(await file.arrayBuffer())], [1, 2, 3]);
+    assert.equal(file.name, f.input.fileName); assert.equal(file.type, mimeType); assert.equal(file.size, 3);
+    for (const field of ["id", "assetId", "publicUrl", "status", "ready"]) assert.equal((file as unknown as Bag)[field], undefined);
+    assert.equal(f.calls.length, 1); assert.equal(f.calls[0].url, f.input.url);
+    assert.equal(f.calls[0].init.credentials, "omit"); assert.equal(f.calls[0].init.redirect, "error");
+    assert.equal(f.calls[0].init.referrerPolicy, "no-referrer"); assert.equal(f.calls[0].init.cache, "no-store");
+    assert.equal(f.calls[0].init.headers, undefined); assert.equal(f.counters.timers, 0); assert.equal(f.counters.files, 1);
+  });
+}
+
+test("only the final object component determines whether an extension is absent", async () => {
+  for (const url of [`${base}${W}/generated.v1/${generatedKey}`, `${base}optimized/${W}/source.exe/jpg`]) {
+    const f = fixture("png", "image/png");
+    const file = await f.start({ url, fileName: "Generated image.PNG" });
+    assert.equal(file.name, "Generated image.PNG"); assert.equal(file.type, "image/png");
+    assert.deepEqual([...new Uint8Array(await file.arrayBuffer())], [1, 2, 3]);
+  }
+});
+
 const badSources: Record<string, string> = {
   external: "https://arbitrary.invalid/image.jpg", lookalike: `${origin}.evil.invalid/storage/v1/object/public/ad-creatives/${W}/a.jpg`,
   http: `${base}${W}/a.jpg`.replace("https:", "http:"), otherTenant: `${base}${B}/a.jpg`,
@@ -127,12 +155,73 @@ const badSources: Record<string, string> = {
   dot: `${base}${W}/./a.jpg`, emptySegment: `${base}${W}//a.jpg`, backslash: `${base}${W}/a\\b.jpg`,
   whitespace: ` ${base}${W}/a.jpg`, newline: `${base}${W}/a\n.jpg`, wrongPrefix: `${origin}/public/ad-creatives/${W}/a.jpg`,
   missingObject: `${base}${W}/`, wrongExtension: `${base}${W}/a.svg`,
-  extensionlessGenerated: `${base}${W}/generated/${"1".repeat(64)}`,
 };
 for (const [name, url] of Object.entries(badSources)) {
   test(`unsupported ${name} source never fetches`, async () => {
     const f = fixture(); await assert.rejects(f.start({ url }), code("creative_import_source_untrusted"));
     assert.equal(f.calls.length, 0); assert.equal(f.counters.files, 0); assert.equal(f.counters.timers, 0);
+  });
+}
+
+test("extensionlessGenerated source without a filename extension never fetches", async () => {
+  const f = fixture();
+  await assert.rejects(f.start({ url: generatedUrl, fileName: "handoff" }), code("creative_import_source_untrusted"));
+  assert.equal(f.calls.length, 0); assert.equal(f.counters.files, 0); assert.equal(f.counters.timers, 0);
+});
+
+for (const [name, url] of Object.entries(badSources).filter(([name]) => name !== "wrongExtension")) {
+  test(`extensionless ${name} source still never fetches`, async () => {
+    const f = fixture();
+    await assert.rejects(f.start({ url: url.replace(/\.(?:jpg|mp4)/g, "") }), code("creative_import_source_untrusted"));
+    assert.equal(f.calls.length, 0); assert.equal(f.counters.files, 0); assert.equal(f.counters.timers, 0);
+  });
+}
+
+for (const suffix of [".html", ".exe", ".weird", ".jpg.html", ".", ".JPG.exe", ".toString", ".constructor"])
+  for (const prefix of [`${base}${W}/generated/`, `${base}optimized/${W}/`]) {
+    test(`explicit object suffix ${suffix} under ${prefix} cannot borrow the handoff type`, async () => {
+      const f = fixture();
+      await assert.rejects(f.start({ url: `${prefix}${generatedKey}${suffix}` }), code("creative_import_source_untrusted"));
+      assert.equal(f.calls.length, 0); assert.equal(f.counters.files, 0);
+    });
+  }
+
+for (const url of [`${base}${W}`, `${base}optimized/${W}`, `${base}optimized/${B}/${W}/${generatedKey}`,
+  `${base}optimized-extra/${W}/${generatedKey}`, `${base}${W}/.hidden`, `${origin}:444/storage/v1/object/public/ad-creatives/${W}/${generatedKey}`]) {
+  test(`extensionless scope or malformed final component ${url} fails before HTTP`, async () => {
+    const f = fixture(); await assert.rejects(f.start({ url }), code("creative_import_source_untrusted"));
+    assert.equal(f.calls.length, 0); assert.equal(f.counters.files, 0);
+  });
+}
+
+for (const fileName of ["", "jpg", "handoff", ".jpg", " .jpg", "..jpg", "handoff..jpg", "handoff.", "handoff.html", "handoff.exe",
+  "handoff.weird", "../handoff.jpg", "folder/handoff.jpg", "folder\\handoff.jpg", "handoff%2ejpg", "handoff?.jpg", "handoff#.jpg",
+  "handoff\n.jpg", "handoff\u0000.jpg", "handoff\u007f.jpg", " handoff.jpg", "handoff.jpg ", `${"a".repeat(252)}.jpg`,
+  `${"\u00e9".repeat(126)}.jpg`, null, 123, {}, []]) {
+  test(`malformed handoff filename ${JSON.stringify(fileName)} cannot type an extensionless object`, async () => {
+    for (const url of [generatedUrl, `${base}${W}/file.jpg`]) {
+      const f = fixture();
+      await assert.rejects(f.start({ url, fileName: fileName as string }), code("creative_import_source_untrusted"));
+      assert.equal(f.calls.length, 0); assert.equal(f.counters.files, 0); assert.equal(f.counters.timers, 0);
+    }
+  });
+}
+
+test("extensionless handoff filename byte limit accepts exactly 255 UTF-8 bytes", async () => {
+  for (const fileName of [`${"a".repeat(251)}.jpg`, `${"\u00e9".repeat(125)}a.jpg`]) {
+    const f = fixture(); const file = await f.start({ url: generatedUrl, fileName });
+    assert.equal(file.name, fileName); assert.equal(new TextEncoder().encode(file.name).length, 255);
+  }
+});
+
+for (const overrides of [{ mimeType: "image/png" }, { mimeType: "video/mp4" }, { mimeType: "text/html" },
+  { mimeType: "application/octet-stream" }, { mimeType: "image/svg+xml" }, { mimeType: "image/jpeg; charset=utf-8" },
+  { mimeType: "IMAGE/JPEG" }, { mimeType: "" }, { fileName: "handoff.png" }, { fileName: "handoff.mp4" },
+  { fileName: "handoff.constructor" }, { fileName: "handoff.toString" }]) {
+  test(`extensionless mismatched or unsupported handoff ${JSON.stringify(overrides)} never fetches`, async () => {
+    const f = fixture();
+    await assert.rejects(f.start({ url: generatedUrl, ...overrides }), code("creative_import_source_untrusted"));
+    assert.equal(f.calls.length, 0); assert.equal(f.counters.files, 0);
   });
 }
 
@@ -248,6 +337,64 @@ test("stale intent after a body await prevents publishing the downloaded file", 
   await assert.rejects(pending, { name: "AbortError" }); assert.equal(f.counters.files, 0); assert.equal(f.counters.readerCancels, 1);
 });
 
+for (const [extension, mimeType, cap] of [["jpg", "image/jpeg", imageCap], ["mp4", "video/mp4", videoCap]] as const) {
+  for (const type of [null, "text/html", "application/octet-stream", "image/png", mimeType === "image/jpeg" ? "video/mp4" : "image/jpeg"]) {
+    test(`extensionless ${extension} response MIME ${type} is rejected before reading bytes`, async () => {
+      const f = fixture(extension, mimeType);
+      if (type === null) f.headers.delete("Content-Type"); else f.headers.set("Content-Type", type);
+      await assert.rejects(f.start({ url: generatedUrl }), code("creative_import_mime_mismatch"));
+      assert.equal(f.counters.reads, 0); assert.equal(f.counters.bodyCancels, 1); assert.equal(f.counters.files, 0);
+    });
+  }
+  for (const length of [null, "0", "-1", "1.5", "1e3", "+3", "03", "3, 3", "9007199254740992", String(cap + 1)]) {
+    test(`extensionless ${extension} invalid Content-Length ${length} is rejected before reading bytes`, async () => {
+      const f = fixture(extension, mimeType);
+      if (length === null) f.headers.delete("Content-Length"); else f.headers.set("Content-Length", length);
+      f.hangCancellation();
+      await assert.rejects(f.start({ url: generatedUrl }), code("creative_import_size_invalid"));
+      assert.equal(f.counters.reads, 0); assert.equal(f.counters.bodyCancels, 1); assert.equal(f.counters.files, 0);
+    });
+  }
+  test(`extensionless ${extension} retains its exact cap and rejects a streamed overflow`, async () => {
+    const f = fixture(extension, mimeType); f.headers.set("Content-Length", String(cap));
+    const oversized = new Uint8Array(1); Object.defineProperty(oversized, "byteLength", { value: cap + 1 });
+    f.chunks([oversized]);
+    await assert.rejects(f.start({ url: generatedUrl }), code("creative_import_size_exceeded"));
+    assert.equal(f.counters.reads, 1); assert.equal(f.counters.readerCancels, 1); assert.equal(f.counters.files, 0);
+  });
+  test(`extensionless ${extension} requires the full declared body, not just matching headers`, async () => {
+    for (const chunks of [[], [new Uint8Array([1])], [new Uint8Array([1, 2, 3]), new Uint8Array([4])]]) {
+      const f = fixture(extension, mimeType); f.chunks(chunks);
+      await assert.rejects(f.start({ url: generatedUrl }), code(chunks.length === 2 ? "creative_import_size_exceeded" : "creative_import_size_mismatch"));
+      assert.equal(f.counters.files, 0); assert.equal(f.counters.readerCancels, 1); assert.equal(f.counters.timers, 0);
+    }
+  });
+}
+
+for (const change of [{ ok: false }, { redirected: true }, { url: `${base}${W}/elsewhere` },
+  { url: `${base}${B}/generated/${generatedKey}` }, { url: `${generatedUrl}?token=x` }, { body: null }]) {
+  test(`extensionless untrusted response ${JSON.stringify(change)} fails closed`, async () => {
+    const f = fixture(); Object.assign(f.response, change);
+    await assert.rejects(f.start({ url: generatedUrl }), code(change.body === null ? "creative_import_stream_missing" : "creative_import_response_untrusted"));
+    assert.equal(f.counters.reads, 0); assert.equal(f.counters.files, 0); assert.equal(f.counters.timers, 0);
+  });
+}
+
+for (const phase of ["headers", "body"]) for (const change of ["abort", "deadline", "selection"]) {
+  test(`extensionless ${phase} wait retains the ${change} guard`, async () => {
+    const f = fixture(); f.input.url = generatedUrl; f.hangCancellation();
+    if (phase === "headers") f.holdHeaders(); else f.holdRead();
+    const pending = f.start(); await flush();
+    if (change === "abort") f.controller.abort();
+    else if (change === "deadline") f.advance(20_000);
+    else { f.expire(); f.releaseHeaders(); f.releaseRead(); }
+    await assert.rejects(pending, { name: change === "deadline" ? "TimeoutError" : "AbortError" });
+    f.releaseHeaders(); f.releaseRead(); await flush();
+    assert.equal(f.counters.files, 0); assert.equal(f.counters.timers, 0); assert.equal(f.calls[0].init.signal?.aborted, true);
+    assert.equal(f.counters.bodyCancels + f.counters.readerCancels, 1);
+  });
+}
+
 const pagePath = "artifacts/negis/src/pages/AdsAutomation.tsx";
 const pageSource = await readFile(path.join(root, pagePath), "utf8");
 const pageAst = ts.createSourceFile(pagePath, pageSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -273,6 +420,8 @@ const componentCode = ts.transpileModule([
 function component(f: ReturnType<typeof fixture>, enabled: boolean | null = false) {
   const state: Bag = { creative: null, uploadStatus: "idle", loading: null };
   const writes: string[] = [], verified: File[] = [], worker: File[] = [];
+  const verificationGate = deferred<void>();
+  let holdVerification = false, failVerification = false;
   const controller = new AbortController(), sessionRef = { current: controller };
   const intentRef = { current: { revision: 0, file: null, videoJobId: "", requestKeys: new WeakMap() } };
   const metaSummaryRef = { current: { videoOptimization: enabled === null ? undefined : { enabled, maxInputMb: 500 } } };
@@ -292,7 +441,10 @@ function component(f: ReturnType<typeof fixture>, enabled: boolean | null = fals
     VIDEO_OPTIMIZATION_CONFIG_LOADING_MESSAGE: "Worker configuration pending", VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE: "Worker required",
     toast: { success() {}, error() {}, warning() {} }, checkHealth() {}, goToStep() {},
     async uploadVerifiedImage(_session: unknown, _intent: unknown, file: File) {
-      verified.push(file); return { id: "canonical-verified-id", fileName: file.name, fileType: "image", mimeType: file.type,
+      verified.push(file);
+      if (holdVerification) await verificationGate.promise;
+      if (failVerification) throw new Error("Synthetic native media validation refused the bytes");
+      return { id: "canonical-verified-id", fileName: file.name, fileType: "image", mimeType: file.type,
         fileSize: file.size, storageBucket: "ad-creatives", storagePath: `${W}/verified/server.jpg`, publicUrl: `${base}${W}/verified/server.jpg` };
     },
     async uploadLargeVideo(file: File) { worker.push(file); },
@@ -300,6 +452,8 @@ function component(f: ReturnType<typeof fixture>, enabled: boolean | null = fals
   });
   return { state, writes, verified, worker, api: exports.api,
     start() { return exports.api.importCreativeFromUrl(f.input.url, f.input.fileName, f.input.mimeType); },
+    holdVerification() { holdVerification = true; }, releaseVerification() { verificationGate.resolve(); },
+    failVerification() { failVerification = true; },
     replace() { exports.api.beginCreativeIntent(null); },
     abortABA() { controller.abort(); sessionRef.current = new AbortController(); },
     disableWorker() { metaSummaryRef.current.videoOptimization = { enabled: false, maxInputMb: 500 }; },
@@ -340,3 +494,67 @@ test("worker disabled while the imported video body is pending cannot be bypasse
   assert.equal(c.worker.length, 0); assert.equal(c.verified.length, 0); assert.equal(c.state.creative.publicUrl, undefined);
   assert.equal(c.state.creative.status, "needs_optimization"); assert.notEqual(c.state.uploadStatus, "ready");
 });
+
+for (const [extension, mimeType] of [["jpg", "image/jpeg"], ["mp4", "video/mp4"]]) {
+  test(`actual extensionless ${extension} importer hands the complete file to native validation before readiness`, async () => {
+    const f = fixture(extension, mimeType); f.input.url = generatedUrl;
+    const bytes = Uint8Array.from({ length: 64 * 1024 + 7 }, (_, i) => i % 251);
+    f.headers.set("Content-Length", String(bytes.length));
+    f.chunks([bytes.subarray(0, 1), new Uint8Array(), bytes.subarray(1, 65_537), bytes.subarray(65_537)]);
+    const c = component(f, true); c.holdVerification();
+    const pending = c.start(); await flush();
+    const received = extension === "jpg" ? c.verified : c.worker;
+    assert.equal(received.length, 1); assert.equal(received[0].size, bytes.length);
+    assert.equal(received[0].name, f.input.fileName); assert.equal(received[0].type, mimeType);
+    assert.deepEqual(new Uint8Array(await received[0].arrayBuffer()), bytes);
+    assert.equal(c.state.creative.id, undefined); assert.equal(c.state.creative.publicUrl, undefined);
+    assert.notEqual(c.state.uploadStatus, "ready");
+    c.releaseVerification(); await pending;
+    if (extension === "jpg") {
+      assert.equal(c.worker.length, 0); assert.equal(c.state.creative.id, "canonical-verified-id");
+      assert.notEqual(c.state.creative.publicUrl, f.input.url); assert.equal(c.state.uploadStatus, "ready");
+    } else {
+      assert.equal(c.verified.length, 0); assert.equal(c.state.creative.id, undefined);
+      assert.equal(c.state.creative.publicUrl, undefined); assert.notEqual(c.state.uploadStatus, "ready");
+    }
+  });
+}
+
+test("matching own-URL image headers cannot overrule native validation of malformed media bytes", async () => {
+  const f = fixture(); f.input.url = generatedUrl;
+  const bytes = new TextEncoder().encode("<html>not an image</html>");
+  f.headers.set("Content-Length", String(bytes.length)); f.chunks([bytes]);
+  const c = component(f); c.failVerification(); await c.start();
+  assert.equal(c.verified.length, 1); assert.deepEqual(new Uint8Array(await c.verified[0].arrayBuffer()), bytes);
+  assert.equal(c.worker.length, 0); assert.equal(c.state.creative.id, undefined); assert.equal(c.state.creative.publicUrl, undefined);
+  assert.equal(c.state.creative.status, "failed"); assert.equal(c.state.uploadStatus, "failed");
+});
+
+test("complete extensionless downloads remain subject to the real native full-image decoder", async () => {
+  const { validateCreativeImageBytes } = await import(pathToFileURL(path.join(root, "lib/crm/creative-image.ts")).href) as {
+    validateCreativeImageBytes(input: { buffer: Buffer; fileName: string; mimeType: string }): Promise<string[]>;
+  };
+  // Local 2x2 JPEG; the truncated scan retains readable metadata, not pixels.
+  const jpeg = Buffer.from("/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYyLjI4LjEwMgD/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABMAAEBAAAAAAAAAAAAAAAAAAAABAEBAQAAAAAAAAAAAAAAAAAABAYQAQAAAAAAAAAAAAAAAAAAAAARAQAAAAAAAAAAAAAAAAAAAAD/wAARCAACAAIDASIAAhEAAxEA/9oADAMBAAIRAxEAPwCMABEP/9k=", "base64");
+  for (const bytes of [jpeg, jpeg.subarray(0, jpeg.length - 4), Buffer.from("<html>not an image</html>")]) {
+    const f = fixture(); f.headers.set("Content-Length", String(bytes.length));
+    f.chunks([bytes.subarray(0, 1), bytes.subarray(1)]);
+    const file = await f.start({ url: generatedUrl });
+    const buffer = Buffer.from(await file.arrayBuffer());
+    assert.deepEqual(buffer, bytes);
+    const details = await validateCreativeImageBytes({ buffer, fileName: file.name, mimeType: file.type });
+    assert.equal(details.length === 0, bytes === jpeg, "only complete decodable pixels satisfy native validation");
+    assert.equal((file as unknown as Bag).id, undefined); assert.equal((file as unknown as Bag).publicUrl, undefined);
+  }
+});
+
+for (const enabled of [false, true, null]) {
+  test(`actual extensionless video importer with worker ${enabled} cannot trust the source URL or generated key as readiness`, async () => {
+    const f = fixture("mp4", "video/mp4"); f.input.url = `${base}optimized/${W}/${generatedKey}`;
+    const c = component(f, enabled); await c.start();
+    assert.equal(c.verified.length, 0); assert.equal(c.worker.length, enabled ? 1 : 0);
+    assert.equal(c.state.creative.id, undefined); assert.equal(c.state.creative.publicUrl, undefined);
+    assert.notEqual(c.state.uploadStatus, "ready");
+    if (enabled === false) assert.equal(c.state.creative.status, "needs_optimization");
+  });
+}

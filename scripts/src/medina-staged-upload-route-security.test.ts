@@ -170,6 +170,10 @@ async function withRouter(options: { memberships?: Json[]; authOk?: boolean; vid
           },
           from(bucket: string) {
             return {
+              async list(_folder: string, options: Json) {
+                assert.equal(bucket, "ad-creatives-staging"); assert.equal(options.limit, 2);
+                return { data: [], error: null };
+              },
               async createSignedUploadUrl(key: string, uploadOptions?: unknown) {
                 storage.push({ op: "createSignedUploadUrl", bucket, key, options: uploadOptions });
                 return { data: { path: key, token: "SYNTHETIC_UPLOAD_TOKEN",

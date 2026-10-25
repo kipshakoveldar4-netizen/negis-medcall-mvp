@@ -57,7 +57,8 @@ function fixture(extension = "jpg", mimeType = "image/jpeg") {
     publicUrl: `${storageOrigin}/storage/v1/object/public/ad-creatives/${path}`, status: "uploaded" };
   const ticket: Row = { bucket: "ad-creatives-staging", storageBucket: "ad-creatives-staging",
     storagePath: `${workspaceId}/staged/${nonce}/original.${extension.toLowerCase()}`,
-    uploadHandle, token, fileName, fileType: "image", mimeType, fileSize: file.size };
+    uploadHandle, token, uploadRequired: true, operationId: nonce, requestKey, workspaceId,
+    fileName, fileType: "image", mimeType, fileSize: file.size };
   const replies: { signed: any; finalize: any } = { signed: envelope(ticket), finalize: envelope({ asset }) };
   const calls: Array<{ stage: Stage; url?: string; init?: RequestInit; args?: unknown[] }> = [];
   const events: string[] = [];
@@ -102,6 +103,17 @@ function fixture(extension = "jpg", mimeType = "image/jpeg") {
     },
   };
 }
+
+type ResumeMode = "resume" | "completed";
+function resumeFixture(mode: ResumeMode, extension = "jpg", mimeType = "image/jpeg") {
+  const f = fixture(extension, mimeType);
+  if (mode === "completed") f.replies.signed = envelope({ finalized: true, operationId: nonce, requestKey,
+    asset: f.asset, item: { ...f.asset } });
+  else { f.ticket.uploadRequired = false; delete f.ticket.token; }
+  return f;
+}
+const resumeModes: ResumeMode[] = ["resume", "completed"];
+const resumedStages = (mode: ResumeMode): Stage[] => mode === "completed" ? ["signed"] : ["signed", "finalize"];
 
 for (const [extension, mimeType] of [["jpg", "image/jpeg"], ["jpeg", "image/jpeg"], ["PNG", "image/png"], ["webp", "image/webp"]]) {
   test(`verified ${extension} uses the exact two POSTs and one create-only SDK upload`, async () => {
@@ -199,6 +211,8 @@ const badTickets: Record<string, Row> = {
   wrongWorkspace: { storagePath: `${other}/staged/${nonce}/original.jpg` },
   notStaged: { storagePath: `${workspaceId}/verified/${nonce}/original.jpg` },
   notUuid: { storagePath: `${workspaceId}/staged/not-a-uuid/original.jpg` },
+  uuidV1: { storagePath: `${workspaceId}/staged/bbbbbbbb-bbbb-1bbb-8bbb-bbbbbbbbbbbb/original.jpg` },
+  uuidV5: { storagePath: `${workspaceId}/staged/bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb/original.jpg` },
   traversal: { storagePath: `${workspaceId}/staged/${nonce}/../original.jpg` },
   wrongExtension: { storagePath: `${workspaceId}/staged/${nonce}/original.png` },
   noHandle: { uploadHandle: undefined }, malformedHandle: { uploadHandle: "u1.bad" }, longHandle: { uploadHandle: "u1." + "x".repeat(2048) },
@@ -206,6 +220,9 @@ const badTickets: Record<string, Row> = {
   wrongName: { fileName: "other.jpg" }, wrongMime: { mimeType: "image/png" }, wrongKind: { fileType: "video" },
   wrongSize: { fileSize: 1 }, stringSize: { fileSize: "51" }, missingName: { fileName: undefined },
   wrongEchoWorkspace: { workspaceId: other }, wrongEchoRequestKey: { requestKey: other },
+  wrongOperationId: { operationId: other }, malformedOperationId: { operationId: 123 },
+  invalidUploadFlag: { uploadRequired: "false" }, nullUploadFlag: { uploadRequired: null },
+  invalidFinalizedFlag: { finalized: "true" }, nullFinalizedFlag: { finalized: null },
   publicUrl: { publicUrl: "https://untrusted.fixture.invalid/old.jpg" },
   ready: { ready: true }, readyStatus: { status: "ready" }, embeddedAsset: { asset: {} },
 };
@@ -248,10 +265,11 @@ test("an explicitly ready finalized asset is accepted", async () => {
   assert.equal(await uploadVerifiedCreativeImage(f.input), f.asset);
 });
 
-for (const path of [`${other}/verified/${nonce}/${digest}.jpg`, `${workspaceId}/verified/${other}/${digest}.jpg`,
+const badPaths = [`${other}/verified/${nonce}/${digest}.jpg`, `${workspaceId}/verified/${other}/${digest}.jpg`,
   `${workspaceId}/staged/${nonce}/original.jpg`, `${workspaceId}/verified/${nonce}/${digest.slice(1)}.jpg`,
   `${workspaceId}/verified/${nonce}/${"A".repeat(64)}.jpg`, `${workspaceId}/verified/${nonce}/${digest}.png`,
-  `${workspaceId}/verified/${nonce}/../${digest}.jpg`, `${workspaceId}/verified/${nonce}/${digest}.jpg/extra`]) {
+  `${workspaceId}/verified/${nonce}/../${digest}.jpg`, `${workspaceId}/verified/${nonce}/${digest}.jpg/extra`];
+for (const path of badPaths) {
   test(`unverified storage path refuses even with a matching trusted URL: ${path}`, async () => {
     const f = fixture(); f.asset.storagePath = path;
     f.asset.publicUrl = `${storageOrigin}/storage/v1/object/public/ad-creatives/${path}`;
@@ -259,8 +277,9 @@ for (const path of [`${other}/verified/${nonce}/${digest}.jpg`, `${workspaceId}/
   });
 }
 
-for (const wrapper of [null, [], {}, { ready: true }, { publicUrl: "blob:fake", ready: true },
-  { asset: null }, { asset: [] }, { item: { id: nonce } }]) {
+const badAssetWrappers = [null, [], {}, { ready: true }, { publicUrl: "blob:fake", ready: true },
+  { asset: null }, { asset: [] }, { item: { id: nonce } }];
+for (const wrapper of badAssetWrappers) {
   test(`finalization requires a complete actual asset/item: ${JSON.stringify(wrapper)}`, async () => {
     const f = fixture(); f.replies.finalize = envelope(wrapper);
     await assert.rejects(uploadVerifiedCreativeImage(f.input), /creative_upload_asset_unconfirmed/);
@@ -323,7 +342,7 @@ for (const version of [1, 5]) {
 }
 
 for (const stage of stages) {
-  for (const kind of ["actor", "workspace", "signout", "unmount", "ABA"]) {
+  for (const kind of ["actor", "workspace", "role", "signout", "unmount", "ABA"]) {
     test(`${kind} change while ${stage} awaits refuses further work or publication`, async () => {
       const f = fixture();
       f.stageHook(async reached => { if (reached === stage) { await Promise.resolve(); f.expire(kind); } });
@@ -361,4 +380,267 @@ for (const stage of ["signed", "finalize"] as const) {
     assert.equal(f.events.at(-1), "guard");
     assert.deepEqual(f.calls.map(call => call.stage), stage === "signed" ? ["signed"] : stages);
   });
+}
+
+test("legacy private tickets still upload once when uploadRequired and optional echoes are omitted", async () => {
+  const f = fixture();
+  for (const key of ["uploadRequired", "operationId", "requestKey", "workspaceId"]) delete f.ticket[key];
+  f.ticket.signedUrl = "https://unused.fixture.invalid/signed-upload";
+  assert.equal(await uploadVerifiedCreativeImage(f.input), f.asset);
+  assert.deepEqual(f.calls.map(call => call.stage), stages);
+  assert.equal(f.calls[1].args![2], token);
+});
+
+for (const mode of resumeModes) {
+  for (const [extension, mimeType] of [["jpg", "image/jpeg"], ["jpeg", "image/jpeg"], ["PNG", "image/png"], ["webp", "image/webp"]]) {
+    test(`${mode} ${extension} uses only its required POSTs without any SDK upload`, async () => {
+      const f = resumeFixture(mode, extension, mimeType);
+      assert.equal(await uploadVerifiedCreativeImage(f.input), f.asset);
+      assert.deepEqual(f.calls.map(call => call.stage), resumedStages(mode));
+      assert.deepEqual(f.events, mode === "completed" ? ["guard", "signed", "guard"]
+        : ["guard", "signed", "guard", "guard", "finalize", "guard"]);
+      for (const call of f.calls) {
+        assert.equal(call.init!.method, "POST"); assert.equal(call.init!.cache, "no-store");
+        assert.deepEqual(call.init!.headers, { "Content-Type": "application/json" });
+      }
+      assert.deepEqual(JSON.parse(String(f.calls[0].init!.body)), {
+        fileName: f.input.fileName, fileType: "image", mimeType, fileSize: f.input.file.size, requestKey,
+      });
+      if (mode === "resume") assert.deepEqual(JSON.parse(String(f.calls[1].init!.body)), { uploadHandle });
+      assert.notEqual(f.asset.fileSize, f.input.file.size);
+      assert.equal(Object.hasOwn(f.asset, "previewUrl"), false);
+    });
+  }
+
+  for (const status of ["uploaded", "ready"]) {
+    for (const wrapper of ["asset", "item", "both"]) {
+      test(`${mode} accepts a complete ${status} ${wrapper} receipt`, async () => {
+        const f = resumeFixture(mode); f.asset.status = status;
+        const data = mode === "completed" ? f.replies.signed.data : f.replies.finalize.data;
+        delete data.asset; delete data.item;
+        if (wrapper !== "item") data.asset = f.asset;
+        if (wrapper !== "asset") data.item = { ...f.asset };
+        assert.deepEqual(await uploadVerifiedCreativeImage(f.input), f.asset);
+        assert.deepEqual(f.calls.map(call => call.stage), resumedStages(mode));
+      });
+    }
+  }
+
+  for (const [name, patch] of Object.entries(badAssets)) {
+    test(`${mode} refuses invalid asset ${name}`, async () => {
+      const f = resumeFixture(mode); Object.assign(f.asset, patch);
+      await assert.rejects(uploadVerifiedCreativeImage(f.input), /creative_upload_asset_unconfirmed/);
+      assert.deepEqual(f.calls.map(call => call.stage), resumedStages(mode));
+    });
+  }
+
+  for (const storagePath of badPaths) {
+    test(`${mode} refuses an unverified hash path even with its matching trusted URL: ${storagePath}`, async () => {
+      const f = resumeFixture(mode);
+      Object.assign(f.asset, { storagePath, publicUrl: `${storageOrigin}/storage/v1/object/public/ad-creatives/${storagePath}` });
+      await assert.rejects(uploadVerifiedCreativeImage(f.input), /creative_upload_asset_unconfirmed/);
+      assert.deepEqual(f.calls.map(call => call.stage), resumedStages(mode));
+    });
+  }
+
+  for (const wrapper of badAssetWrappers) {
+    test(`${mode} refuses an incomplete asset receipt: ${JSON.stringify(wrapper)}`, async () => {
+      const f = resumeFixture(mode);
+      if (mode === "completed") f.replies.signed.data = { ...wrapper, finalized: true, operationId: nonce, requestKey };
+      else f.replies.finalize = envelope(wrapper);
+      await assert.rejects(uploadVerifiedCreativeImage(f.input), /creative_upload_(ticket|asset)_unconfirmed/);
+      assert.deepEqual(f.calls.map(call => call.stage), resumedStages(mode));
+    });
+  }
+
+  for (const patch of [{ fileSize: 1 }, { status: "ready" }, { id: other }, { storagePath: `${workspaceId}/verified/${other}/${digest}.jpg` }]) {
+    test(`${mode} refuses conflicting asset/item wrappers: ${Object.keys(patch).join(",")}`, async () => {
+      const f = resumeFixture(mode);
+      const data = mode === "completed" ? f.replies.signed.data : f.replies.finalize.data;
+      Object.assign(data, { asset: f.asset, item: { ...f.asset, ...patch } });
+      await assert.rejects(uploadVerifiedCreativeImage(f.input), /creative_upload_asset_unconfirmed/);
+      assert.deepEqual(f.calls.map(call => call.stage), resumedStages(mode));
+    });
+  }
+
+  test(`${mode} refuses a receipt with no status`, async () => {
+    const f = resumeFixture(mode); delete f.asset.status;
+    await assert.rejects(uploadVerifiedCreativeImage(f.input), /creative_upload_asset_unconfirmed/);
+    assert.deepEqual(f.calls.map(call => call.stage), resumedStages(mode));
+  });
+
+  for (const patch of [{ success: false }, { success: "true" }, { mode: "demo" }, { mode: undefined }]) {
+    test(`${mode} refuses invalid prepare flags even with an otherwise complete receipt: ${JSON.stringify(patch)}`, async () => {
+      const f = resumeFixture(mode); Object.assign(f.replies.signed, patch);
+      await assert.rejects(uploadVerifiedCreativeImage(f.input), /creative_upload_ticket_unconfirmed/);
+      assert.deepEqual(f.calls.map(call => call.stage), ["signed"]);
+    });
+  }
+
+  test(`${mode} captures metadata, request key, callbacks and query workspace once`, async () => {
+    const f = resumeFixture(mode);
+    f.stageHook(stage => {
+      if (stage === "signed") Object.assign(f.input, { workspaceId: other, requestKey: other,
+        fileName: "replaced.png", mimeType: "image/png", file: new Blob(["replaced"]), storageOrigin: "https://other.fixture.invalid",
+        request: async () => { throw new Error("retargeted_request"); },
+        upload: async () => { throw new Error("retargeted_upload"); },
+        assertCurrent: async () => { throw new Error("retargeted_guard"); } });
+    });
+    assert.equal(await uploadVerifiedCreativeImage(f.input), f.asset);
+    assert.deepEqual(f.calls.map(call => call.stage), resumedStages(mode));
+    assert.equal(JSON.parse(String(f.calls[0].init!.body)).requestKey, requestKey);
+  });
+
+  for (const stage of resumedStages(mode)) {
+    for (const kind of ["actor", "workspace", "role", "signout", "unmount", "ABA"]) {
+      test(`${mode} ${kind} change while ${stage} awaits refuses dispatch/publication`, async () => {
+        const f = resumeFixture(mode);
+        f.stageHook(async reached => { if (reached === stage) { await Promise.resolve(); f.expire(kind); } });
+        await assert.rejects(uploadVerifiedCreativeImage(f.input), error => error === f.expired);
+        assert.deepEqual(f.calls.map(call => call.stage), resumedStages(mode).slice(0, resumedStages(mode).indexOf(stage) + 1));
+        assert.equal(f.events.at(-1), "guard");
+      });
+    }
+
+    test(`${mode} rejected ${stage} still runs its post-await authorization guard`, async () => {
+      const f = resumeFixture(mode); f.failures[stage] = new Error("synthetic_transport_failure");
+      f.stageHook(reached => { if (reached === stage) f.expire("ABA"); });
+      await assert.rejects(uploadVerifiedCreativeImage(f.input), error => error === f.expired);
+      assert.equal(f.events.at(-1), "guard");
+      assert.deepEqual(f.calls.map(call => call.stage), resumedStages(mode).slice(0, resumedStages(mode).indexOf(stage) + 1));
+    });
+
+    test(`${mode} ${stage} transport failure never retries or synthesizes success`, async () => {
+      const f = resumeFixture(mode), failure = new Error("synthetic_transport_failure"); f.failures[stage] = failure;
+      await assert.rejects(uploadVerifiedCreativeImage(f.input), error => error === failure);
+      assert.equal(f.events.at(-1), "guard");
+      assert.deepEqual(f.calls.map(call => call.stage), resumedStages(mode).slice(0, resumedStages(mode).indexOf(stage) + 1));
+    });
+  }
+
+  for (let check = 1; check <= resumedStages(mode).length * 2; check++) {
+    for (const kind of ["role", "signout", "ABA"]) {
+      test(`${mode} ${kind} invalidation in asynchronous guard ${check} blocks its dispatch/result`, async () => {
+        const f = resumeFixture(mode);
+        f.guardHook(async reached => { if (reached === check) { await Promise.resolve(); f.expire(kind); } });
+        await assert.rejects(uploadVerifiedCreativeImage(f.input), error => error === f.expired);
+        assert.deepEqual(f.calls.map(call => call.stage), resumedStages(mode).slice(0, Math.floor(check / 2)));
+      });
+    }
+  }
+}
+
+for (const [name, patch] of Object.entries(badTickets)) {
+  if (name === "noToken") continue;
+  test(`private resume ${name} refuses before SDK or finalization`, async () => {
+    const f = resumeFixture("resume"); Object.assign(f.ticket, patch);
+    await assert.rejects(uploadVerifiedCreativeImage(f.input), /creative_upload_ticket_unconfirmed/);
+    assert.deepEqual(f.calls.map(call => call.stage), ["signed"]);
+  });
+}
+
+for (const patch of [{ token }, { token: "" }, { token: null }, { signedUrl: "https://unused.fixture.invalid/signed-upload" },
+  { signedUrl: "" }, { signedUrl: null }, { item: {} }, { finalized: true }, { uploadRequired: true }, { uploadRequired: undefined }]) {
+  test(`private resume refuses contradictory upload/public receipt: ${JSON.stringify(patch)}`, async () => {
+    const f = resumeFixture("resume"); Object.assign(f.ticket, patch);
+    await assert.rejects(uploadVerifiedCreativeImage(f.input), /creative_upload_ticket_unconfirmed/);
+    assert.deepEqual(f.calls.map(call => call.stage), ["signed"]);
+  });
+}
+
+test("private resume accepts either bucket alias with absent upload credentials and optional legacy echoes", async () => {
+  for (const alias of ["bucket", "storageBucket"]) {
+    const f = resumeFixture("resume");
+    for (const key of [alias, "operationId", "workspaceId", "requestKey"]) delete f.ticket[key];
+    f.ticket.finalized = false;
+    assert.equal(await uploadVerifiedCreativeImage(f.input), f.asset);
+    assert.deepEqual(f.calls.map(call => call.stage), ["signed", "finalize"]);
+  }
+});
+
+test("private resume captures its validated handle and nonce before the finalization guard awaits", async () => {
+  const f = resumeFixture("resume");
+  f.guardHook(async check => {
+    if (check === 3) {
+      await Promise.resolve();
+      Object.assign(f.ticket, { uploadRequired: true, token, operationId: other, requestKey: other,
+        uploadHandle: "u1.changed", storagePath: `${other}/staged/${other}/original.jpg` });
+    }
+  });
+  assert.equal(await uploadVerifiedCreativeImage(f.input), f.asset);
+  assert.deepEqual(f.calls.map(call => call.stage), ["signed", "finalize"]);
+  assert.deepEqual(JSON.parse(String(f.calls[1].init!.body)), { uploadHandle });
+});
+
+for (const patch of [{ finalized: false }, { finalized: undefined }, { finalized: "true" },
+  { operationId: undefined }, { operationId: other }, { operationId: "not-a-uuid" }, { operationId: 123 },
+  { operationId: "bbbbbbbb-bbbb-1bbb-8bbb-bbbbbbbbbbbb" }, { operationId: "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb" },
+  { requestKey: undefined }, { requestKey: other }, { requestKey: requestKey.toUpperCase() },
+  { workspaceId: other }, { uploadRequired: true }, { uploadRequired: "false" }, { uploadRequired: null },
+  { token }, { token: null }, { signedUrl: "https://unused.fixture.invalid/signed-upload" },
+  { uploadHandle }, { bucket: "ad-creatives-staging" }, { storageBucket: "ad-creatives" },
+  { storagePath: `${workspaceId}/staged/${nonce}/original.jpg` }, { publicUrl: "blob:fake" }]) {
+  test(`completed prepare refuses a wrong identity or contradictory branch: ${JSON.stringify(patch)}`, async () => {
+    const f = resumeFixture("completed"); Object.assign(f.replies.signed.data, patch);
+    await assert.rejects(uploadVerifiedCreativeImage(f.input), /creative_upload_(ticket|asset)_unconfirmed/);
+    assert.deepEqual(f.calls.map(call => call.stage), ["signed"]);
+  });
+}
+
+for (const version of [1, 5]) {
+  test(`completed prepare refuses a self-consistent UUID v${version} operation nonce`, async () => {
+    const f = resumeFixture("completed"), operationId = `bbbbbbbb-bbbb-${version}bbb-8bbb-bbbbbbbbbbbb`;
+    const storagePath = `${workspaceId}/verified/${operationId}/${digest}.jpg`;
+    Object.assign(f.asset, { id: operationId, storagePath, publicUrl: `${storageOrigin}/storage/v1/object/public/ad-creatives/${storagePath}` });
+    Object.assign(f.replies.signed.data, { operationId, item: { ...f.asset } });
+    await assert.rejects(uploadVerifiedCreativeImage(f.input), /creative_upload_ticket_unconfirmed/);
+    assert.deepEqual(f.calls.map(call => call.stage), ["signed"]);
+  });
+}
+
+test("completed prepare may explicitly confirm no upload and replay repeatedly without SDK or finalization", async () => {
+  const f = resumeFixture("completed"); f.replies.signed.data.uploadRequired = false;
+  f.replies.signed.data.workspaceId = workspaceId;
+  for (let attempt = 0; attempt < 2; attempt++) assert.equal(await uploadVerifiedCreativeImage(f.input), f.asset);
+  assert.deepEqual(f.calls.map(call => call.stage), ["signed", "signed"]);
+});
+
+test("a lost fresh acknowledgement recovers through private resume and completed replay with only one SDK upload", async () => {
+  const f = fixture(), unavailable = new Error("synthetic_finalize_unavailable");
+  delete f.ticket.uploadRequired;
+  f.failures.upload = new Error("synthetic_lost_sdk_acknowledgement");
+  f.failures.finalize = unavailable;
+  await assert.rejects(uploadVerifiedCreativeImage(f.input), error => error === unavailable);
+
+  delete f.failures.finalize;
+  f.ticket.uploadRequired = false; delete f.ticket.token;
+  assert.equal(await uploadVerifiedCreativeImage(f.input), f.asset);
+
+  f.asset.status = "ready";
+  f.replies.signed = envelope({ finalized: true, operationId: nonce, requestKey, asset: f.asset, item: { ...f.asset } });
+  assert.equal(await uploadVerifiedCreativeImage(f.input), f.asset);
+  assert.deepEqual(f.calls.map(call => call.stage), ["signed", "upload", "finalize", "signed", "finalize", "signed"]);
+  const prepares = f.calls.filter(call => call.stage === "signed");
+  assert.equal(prepares.length, 3);
+  for (const call of prepares) assert.equal(JSON.parse(String(call.init!.body)).requestKey, requestKey);
+});
+
+for (const mode of ["fresh", "resume"] as const) {
+  for (const version of [1, 5]) {
+    test(`${mode} private prepare refuses a self-consistent UUID v${version} operation nonce`, async () => {
+      const f = mode === "fresh" ? fixture() : resumeFixture(mode);
+      const operationId = `bbbbbbbb-bbbb-${version}bbb-8bbb-bbbbbbbbbbbb`;
+      Object.assign(f.ticket, { operationId, storagePath: `${workspaceId}/staged/${operationId}/original.jpg` });
+      await assert.rejects(uploadVerifiedCreativeImage(f.input), /creative_upload_ticket_unconfirmed/);
+      assert.deepEqual(f.calls.map(call => call.stage), ["signed"]);
+    });
+  }
+  for (const patch of [{ operationId: other }, { requestKey: other }, { workspaceId: other }]) {
+    test(`${mode} finalization refuses conflicting identity echoes: ${JSON.stringify(patch)}`, async () => {
+      const f = mode === "fresh" ? fixture() : resumeFixture(mode);
+      Object.assign(f.replies.finalize.data, patch);
+      await assert.rejects(uploadVerifiedCreativeImage(f.input), /creative_upload_asset_unconfirmed/);
+      assert.deepEqual(f.calls.map(call => call.stage), mode === "fresh" ? stages : resumedStages(mode));
+    });
+  }
 }

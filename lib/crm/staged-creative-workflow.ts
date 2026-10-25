@@ -5,8 +5,9 @@ import { CreativeImageValidationUnavailable, normalizeCreativeImageBytes } from 
 import { verifyGeneratedStorageBytes } from "./generated-storage-verification";
 import { issueStagedCreativeTicket, readStagedCreativeTicket, sealStagedCreativeTicket, verifiedCreativeIdentity,
   type StagedCreativeActor, type StagedCreativeTicket } from "./staged-creative-ticket";
-import { prepareReservedStagedCreativeUpload, readAndNormalizeStagedCreativeImage, StagedCreativeStorageError,
+import { prepareOrResumeStagedCreativeUpload, readAndNormalizeStagedCreativeImage, StagedCreativeStorageError,
   type StagedCreativeStorageConfig } from "./staged-creative-storage";
+import { reclaimStagedCreativeUploads } from "./staged-creative-reclamation";
 
 type Row = Record<string, unknown>;
 export type CreativeUploadWorkflowConfig = Omit<StagedCreativeStorageConfig, "supabase"> & { supabase: SupabaseClient };
@@ -62,28 +63,45 @@ export async function requireLiveCreativeUploadActor(config: CreativeUploadWorkf
 
 export async function reserveCreativeUpload(config: CreativeUploadWorkflowConfig, input: StagedCreativeActor & {
   requestKey: string; fileName: string; mimeType: string; fileSize: number;
-}, source: "signed" | "inline" = "signed"): Promise<StagedCreativeTicket> {
+}, source: "signed" | "inline" = "signed"): Promise<{ ticket: StagedCreativeTicket; status: "reserved" | "finalized" }> {
   if (!uuid4.test(input.requestKey)) throw new CreativeUploadWorkflowError(400, "creative_upload_request_key_required");
   // Validate all metadata before the admission RPC; the actual nonce/time comes from that RPC.
   issueStagedCreativeTicket(input, config.serviceRoleKey);
   if (!input.mimeType.startsWith("image/")) throw new CreativeUploadWorkflowError(409, "creative_video_worker_required");
-  const result = object(await rpc(config, "reserve_creative_upload", { ...actorArgs(input), p_request_key: input.requestKey,
-    p_file_name: input.fileName, p_mime_type: input.mimeType, p_file_size: input.fileSize, p_source: source }));
+  const args = { ...actorArgs(input), p_request_key: input.requestKey,
+    p_file_name: input.fileName, p_mime_type: input.mimeType, p_file_size: input.fileSize, p_source: source };
+  let result: Row;
+  try { result = object(await rpc(config, "reserve_creative_upload", args)); }
+  catch (error) {
+    if (!(error instanceof CreativeUploadWorkflowError) || error.code !== "creative_upload_capacity_exhausted") throw error;
+    await requireLiveCreativeUploadActor(config, input);
+    try { await reclaimStagedCreativeUploads(config, input.workspaceId); }
+    catch { /* A lost cleanup ACK is reconciled by the exact same admission, never a new key. */ }
+    result = object(await rpc(config, "reserve_creative_upload", args));
+  }
   const ticket = object(result.ticket) as unknown as StagedCreativeTicket;
   try {
     const verified = readStagedCreativeTicket(sealStagedCreativeTicket(ticket, config.serviceRoleKey), input, config.serviceRoleKey);
     if (result.requestKey !== input.requestKey.toLowerCase() || !["reserved", "finalized"].includes(String(result.status))
       || verified.fileName !== input.fileName || verified.mimeType !== input.mimeType || verified.fileSize !== input.fileSize) throw unavailable();
-    return verified;
+    return { ticket: verified, status: result.status as "reserved" | "finalized" };
   } catch { throw unavailable(); }
 }
 
 export async function prepareCreativeImageUpload(config: CreativeUploadWorkflowConfig, input: StagedCreativeActor & {
   requestKey: string; fileName: string; mimeType: string; fileSize: number;
 }) {
-  const ticket = await reserveCreativeUpload(config, input);
+  const { ticket, status } = await reserveCreativeUpload(config, input);
   await requireLiveCreativeUploadActor(config, input);
-  return prepareReservedStagedCreativeUpload(config, ticket);
+  if (status === "finalized") {
+    const row = await operation(config, ticket, "signed"), asset = await replay(config, ticket, row);
+    if (!asset) throw unavailable();
+    const receipt = { id: asset.id, workspaceId: asset.workspace_id, fileName: asset.file_name, fileType: asset.file_type,
+      mimeType: asset.mime_type, fileSize: asset.file_size, storageBucket: asset.storage_bucket, storagePath: asset.storage_path,
+      publicUrl: asset.public_url, status: asset.status };
+    return { finalized: true as const, operationId: ticket.id, requestKey: input.requestKey.toLowerCase(), asset: receipt, item: receipt };
+  }
+  return prepareOrResumeStagedCreativeUpload(config, ticket);
 }
 
 function resultFor(config: CreativeUploadWorkflowConfig, ticket: StagedCreativeTicket, sha256: string, size: number): Row {
@@ -183,7 +201,7 @@ export async function finalizeCreativeImageUpload(config: CreativeUploadWorkflow
 export async function finalizeInlineCreativeImage(config: CreativeUploadWorkflowConfig, input: StagedCreativeActor & {
   requestKey: string; fileName: string; mimeType: string; buffer: Buffer;
 }): Promise<Row> {
-  const ticket = await reserveCreativeUpload(config, { ...input, fileSize: input.buffer.length }, "inline");
+  const { ticket } = await reserveCreativeUpload(config, { ...input, fileSize: input.buffer.length }, "inline");
   const row = await operation(config, ticket, "inline");
   const prior = await replay(config, ticket, row); if (prior) return prior;
   let buffer: Buffer;

@@ -65,22 +65,43 @@ function privateTicket(value: unknown, input: VerifiedCreativeUploadInput, exten
   if ((ticket.bucket !== stagingBucket && ticket.storageBucket !== stagingBucket)
     || (ticket.bucket !== undefined && ticket.bucket !== stagingBucket)
     || (ticket.storageBucket !== undefined && ticket.storageBucket !== stagingBucket)
-    || parts.length !== 4 || parts[0] !== input.workspaceId || parts[1] !== "staged" || !uuid.test(parts[2]!)
+    || parts.length !== 4 || parts[0] !== input.workspaceId || parts[1] !== "staged" || !uuid4.test(parts[2]!)
     || parts[3] !== `original.${extension}`
     || typeof ticket.uploadHandle !== "string" || ticket.uploadHandle.length > 2048
     || !/^u1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(ticket.uploadHandle)
-    || typeof ticket.token !== "string" || !ticket.token.trim() || ticket.token !== ticket.token.trim()
+    || (ticket.uploadRequired !== undefined && typeof ticket.uploadRequired !== "boolean")
+    || (ticket.finalized !== undefined && ticket.finalized !== false)
+    || (ticket.uploadRequired === false
+      ? ticket.token !== undefined || ticket.signedUrl !== undefined
+      : typeof ticket.token !== "string" || !ticket.token.trim() || ticket.token !== ticket.token.trim())
     || ticket.fileName !== input.fileName || ticket.fileType !== "image"
     || ticket.mimeType !== input.mimeType || ticket.fileSize !== input.file.size
     || (ticket.workspaceId !== undefined && ticket.workspaceId !== input.workspaceId)
     || (ticket.requestKey !== undefined && ticket.requestKey !== input.requestKey)
+    || (ticket.operationId !== undefined && ticket.operationId !== parts[2])
     || ticket.publicUrl !== undefined || ticket.asset !== undefined || ticket.item !== undefined
     || ticket.ready === true || ticket.status === "ready") throw new Error(code);
-  return { nonce: parts[2]!, storagePath: ticket.storagePath as string, token: ticket.token, uploadHandle: ticket.uploadHandle };
+  return { nonce: parts[2]!, storagePath: ticket.storagePath as string, uploadHandle: ticket.uploadHandle,
+    token: ticket.uploadRequired === false ? null : ticket.token as string };
+}
+
+function completedReplay(value: unknown, input: VerifiedCreativeUploadInput, extension: string): VerifiedCreativeAsset | null {
+  const code = "creative_upload_ticket_unconfirmed", data = confirmedData(value, code);
+  if (data.finalized !== true) return null;
+  if (typeof data.operationId !== "string" || !uuid4.test(data.operationId) || data.requestKey !== input.requestKey
+    || (data.workspaceId !== undefined && data.workspaceId !== input.workspaceId)
+    || (data.uploadRequired !== undefined && data.uploadRequired !== false)
+    || data.token !== undefined || data.signedUrl !== undefined || data.uploadHandle !== undefined
+    || data.bucket !== undefined || data.storageBucket !== undefined || data.storagePath !== undefined
+    || data.publicUrl !== undefined) throw new Error(code);
+  return verifiedAsset(value, input, data.operationId, extension);
 }
 
 function verifiedAsset(value: unknown, input: VerifiedCreativeUploadInput, nonce: string, extension: string): VerifiedCreativeAsset {
   const code = "creative_upload_asset_unconfirmed", data = confirmedData(value, code);
+  if ((data.operationId !== undefined && data.operationId !== nonce)
+    || (data.requestKey !== undefined && data.requestKey !== input.requestKey)
+    || (data.workspaceId !== undefined && data.workspaceId !== input.workspaceId)) throw new Error(code);
   const validate = (value: unknown): VerifiedCreativeAsset => {
     const asset = record(value);
     const prefix = `${input.workspaceId}/verified/${nonce}/`;
@@ -97,7 +118,7 @@ function verifiedAsset(value: unknown, input: VerifiedCreativeUploadInput, nonce
   const asset = validate(data.asset !== undefined ? data.asset : data.item);
   if (data.asset !== undefined && data.item !== undefined) {
     const item = validate(data.item);
-    for (const key of ["id", "workspaceId", "fileName", "fileType", "mimeType", "fileSize", "storageBucket", "storagePath", "publicUrl"]) {
+    for (const key of ["id", "workspaceId", "fileName", "fileType", "mimeType", "fileSize", "storageBucket", "storagePath", "publicUrl", "status"]) {
       if (asset[key] !== item[key]) throw new Error(code);
     }
   }
@@ -118,15 +139,19 @@ export async function uploadVerifiedCreativeImage(input: VerifiedCreativeUploadI
     signed = await request(`/api/crm/ad-creatives/signed-upload${query}`,
       init({ fileName, fileType: "image", mimeType, fileSize: file.size, requestKey }));
   } finally { await assertCurrent(); }
+  const completed = completedReplay(signed, attempt, extension);
+  if (completed) return completed;
   const ticket = privateTicket(signed, attempt, extension);
 
-  await assertCurrent();
-  try {
-    await upload(stagingBucket, ticket.storagePath, ticket.token, file, { contentType: mimeType, upsert: false });
-  } catch {
-    // A lost SDK acknowledgement does not prove the private object is absent.
-    // Finalization is the only authority; never upload again here.
-  } finally { await assertCurrent(); }
+  if (ticket.token !== null) {
+    await assertCurrent();
+    try {
+      await upload(stagingBucket, ticket.storagePath, ticket.token, file, { contentType: mimeType, upsert: false });
+    } catch {
+      // A lost SDK acknowledgement does not prove the private object is absent.
+      // Finalization is the only authority; never upload again here.
+    } finally { await assertCurrent(); }
+  }
 
   let finalized: unknown;
   await assertCurrent();
