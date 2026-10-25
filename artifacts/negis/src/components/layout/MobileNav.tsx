@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState } from "react";
+import { useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useLocation } from "wouter";
 import {
   BadgeDollarSign,
@@ -23,6 +23,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 import { workspaceAllowsRoute } from "@/lib/workspaceRoutes";
 import { capitalize, termsFor } from "../../../../../lib/vertical/terms";
 import { ProfileDialog } from "./ProfileDialog";
@@ -77,14 +78,75 @@ export function MobileNav() {
   const [open, setOpen] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [location, setLocation] = useLocation();
-  const { signOut, user, clinicId, userRole, rolePermissions, vertical, workspacePurpose } = useAuth();
+  const { signOut, user, clinicId, userRole, rolePermissions, vertical, workspacePurpose, isSigningOut, isImpersonation } = useAuth();
   const terms = termsFor(vertical);
+  const contextKey = JSON.stringify([user?.id, clinicId, userRole, workspacePurpose, vertical, isSigningOut, isImpersonation,
+    Object.entries(rolePermissions).sort(([left], [right]) => left.localeCompare(right))]);
+  const lifetime = useRef({ key: contextKey, revision: 0, mounted: false, sdkActor: user?.id || "" });
+  if (lifetime.current.key !== contextKey) {
+    lifetime.current.key = contextKey;
+    lifetime.current.revision++;
+  }
+  const revision = lifetime.current.revision;
+  const isCurrent = () => lifetime.current.mounted && lifetime.current.revision === revision && Boolean(user?.id) && !isSigningOut
+    && (!hasSupabaseFrontendEnv || lifetime.current.sdkActor === user?.id);
+  const sheet = useRef<HTMLElement>(null);
+  const moreButton = useRef<HTMLButtonElement>(null);
+  const drawerOpen = useRef(open);
+  drawerOpen.current = open;
 
-  // Closing the profile also discards its unsaved password fields.
   useLayoutEffect(() => {
+    lifetime.current.mounted = true;
+    return () => { lifetime.current.mounted = false; };
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!hasSupabaseFrontendEnv) return;
+    let active = true;
+    const subscription = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!active) return;
+      const next = session?.user.id || "";
+      if (lifetime.current.sdkActor === next) return;
+      // SDK events invalidate captured actions before React can batch A/B/A.
+      lifetime.current.sdkActor = next;
+      lifetime.current.revision++;
+      drawerOpen.current = false;
+      setOpen(false);
+      setShowProfile(false);
+    }).data.subscription;
+    return () => { active = false; subscription.unsubscribe(); };
+  }, []);
+
+  useLayoutEffect(() => {
+    drawerOpen.current = false;
     setOpen(false);
     setShowProfile(false);
-  }, [user?.id, clinicId, userRole, workspacePurpose]);
+  }, [contextKey]);
+
+  useLayoutEffect(() => {
+    if (open && isCurrent()) sheet.current?.querySelectorAll<HTMLButtonElement>("button:not([disabled])")[0]?.focus();
+  }, [open]);
+
+  function closeDrawer() {
+    if (!isCurrent() || !drawerOpen.current) return;
+    drawerOpen.current = false;
+    setOpen(false);
+    moreButton.current?.focus();
+  }
+  function drawerKeyDown(event: KeyboardEvent<HTMLElement>) {
+    if (!isCurrent() || !drawerOpen.current) return;
+    if (event.key === "Escape") { event.preventDefault(); closeDrawer(); return; }
+    if (event.key !== "Tab" || !sheet.current) return;
+    // This drawer has only buttons. This is not global focus containment or background isolation.
+    const buttons = sheet.current.querySelectorAll<HTMLButtonElement>("button:not([disabled])");
+    const first = buttons[0], last = buttons[buttons.length - 1];
+    if (!first || !last) return;
+    const outside = !sheet.current.contains(document.activeElement);
+    if (event.shiftKey ? document.activeElement === first || outside : document.activeElement === last || outside) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
+  }
 
   const canUse = (item: MobileNavItem) =>
     workspaceAllowsRoute(workspacePurpose, userRole, item.href) && (userRole === "lead_manager"
@@ -104,24 +166,31 @@ export function MobileNav() {
   const visiblePrimary = (workspacePurpose === 'mortgage_leads' ? mortgagePrimary : primaryItems).filter(canUse);
   const visibleDrawer = (workspacePurpose === 'mortgage_leads' ? mortgageDrawer : drawerItems).filter(canUse);
   const moreActive = visibleDrawer.some((item) => isActive(location, item.href));
+  function navigate(item: MobileNavItem, fromDrawer = false) {
+    if (!isCurrent() || !canUse(item)) return;
+    if (fromDrawer) { drawerOpen.current = false; setOpen(false); }
+    setLocation(item.href);
+  }
 
   return (
     <>
       {open && (
-        <div className="mobile-nav-backdrop lg:hidden" onClick={() => setOpen(false)}>
-          <section className="mobile-nav-sheet" aria-label="Разделы Medina OS" onClick={(event) => event.stopPropagation()}>
+        <div className="mobile-nav-backdrop lg:hidden" onClick={closeDrawer}>
+          <section ref={sheet} id="mobile-nav-drawer" className="mobile-nav-sheet" role="dialog"
+            aria-label="Разделы Medina OS" onKeyDown={drawerKeyDown} onClick={(event) => event.stopPropagation()}>
             <div className="mb-4 flex items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--negis-muted)" }}>Меню</p>
                 <h2 className="mt-1 text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Разделы Medina OS</h2>
               </div>
-              <button type="button" className="neu-icon-btn" onClick={() => setOpen(false)} aria-label="Закрыть меню">
+              <button type="button" className="neu-icon-btn" onClick={closeDrawer} aria-label="Закрыть меню">
                 <X size={18} />
               </button>
             </div>
 
             <div className="grid grid-cols-2 gap-2">
-              {visibleDrawer.map(({ href, label: staticLabel, icon: Icon }) => {
+              {visibleDrawer.map((item) => {
+                const { href, label: staticLabel, icon: Icon } = item;
                 const label = href === "/staff-schedule"
                   ? `${capitalize(terms.specialistPlural)} и график`
                   : href === "/admin"
@@ -133,10 +202,7 @@ export function MobileNav() {
                     type="button"
                     className="mobile-nav-drawer-item"
                     aria-current={isActive(location, href) ? "page" : undefined}
-                    onClick={() => {
-                      setOpen(false);
-                      setLocation(href);
-                    }}
+                    onClick={() => navigate(item, true)}
                   >
                     <Icon size={18} />
                     <span>{label}</span>
@@ -153,6 +219,8 @@ export function MobileNav() {
               type="button"
               className="mobile-nav-drawer-item mt-2 w-full"
               onClick={() => {
+                if (!isCurrent()) return;
+                drawerOpen.current = false;
                 setOpen(false);
                 setShowProfile(true);
               }}
@@ -165,6 +233,8 @@ export function MobileNav() {
               type="button"
               className="mobile-nav-logout"
               onClick={() => {
+                if (!isCurrent()) return;
+                drawerOpen.current = false;
                 setOpen(false);
                 void signOut();
               }}
@@ -176,10 +246,11 @@ export function MobileNav() {
         </div>
       )}
 
-      {showProfile && <ProfileDialog onClose={() => setShowProfile(false)} />}
+      {showProfile && <ProfileDialog onClose={() => { if (isCurrent()) setShowProfile(false); }} />}
 
       <nav className="mobile-bottom-nav lg:hidden" aria-label="Основная мобильная навигация">
-        {visiblePrimary.map(({ href, label, icon: Icon }) => {
+        {visiblePrimary.map((item) => {
+          const { href, label, icon: Icon } = item;
           const active = isActive(location, href);
           return (
             <button
@@ -187,7 +258,7 @@ export function MobileNav() {
               type="button"
               className={`mobile-bottom-nav-item ${active ? "is-active" : ""}`}
               aria-current={active ? "page" : undefined}
-              onClick={() => setLocation(href)}
+              onClick={() => navigate(item)}
             >
               <Icon size={20} />
               <span>{label}</span>
@@ -196,10 +267,12 @@ export function MobileNav() {
         })}
         <button
           type="button"
+          ref={moreButton}
           className={`mobile-bottom-nav-item ${open || moreActive ? "is-active" : ""}`}
           aria-expanded={open}
+          aria-controls="mobile-nav-drawer"
           aria-label="Ещё разделы"
-          onClick={() => setOpen(true)}
+          onClick={() => { if (isCurrent()) setOpen(true); }}
         >
           <Menu size={20} />
           <span>Ещё</span>

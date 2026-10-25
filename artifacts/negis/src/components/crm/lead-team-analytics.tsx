@@ -93,8 +93,8 @@ function readAnalytics(body: unknown, days: number): Analytics {
   })) } as Analytics;
   const ids = new Set(result.members.map((member) => member.staffId));
   if (ids.size !== result.members.length
-    || Date.parse(result.period.from) > Date.parse(result.period.to)
-    || Date.parse(result.period.to) > Date.parse(result.generatedAt)
+    || Date.parse(result.period.to) - Date.parse(result.period.from) !== days * 86_400_000
+    || Date.parse(result.period.to) !== Date.parse(result.generatedAt)
     || result.members.some((member) => safeSum(ASSIGNED_FIELDS.filter((key) => key !== "total").map((key) => member.assigned[key])) !== member.assigned.total)
     || safeSum([result.unassignedLeads, result.otherAssigneeLeads, ...result.members.map((member) => member.assigned.total)]) !== result.totalLeads) {
     throw new Error("Inconsistent team analytics response");
@@ -117,12 +117,27 @@ export function LeadTeamAnalytics({ access, initiallyExpanded = false, heading =
   const [refresh, setRefresh] = useState(0);
   const [state, setState] = useState<LoadState>({ kind: "idle" });
   const revision = useRef(0);
+  const lifetime = useRef({ mounted: true, invalidated: false });
+  const isCurrent = () => {
+    if (!lifetime.current.mounted || lifetime.current.invalidated) return false;
+    // Observed access loss expires this pinned lifetime, even if identity returns.
+    if (!sessionAccess.isCurrent()) lifetime.current.invalidated = true;
+    return !lifetime.current.invalidated;
+  };
 
   useEffect(() => {
-    if (!expanded || !sessionAccess.isCurrent()) return;
+    lifetime.current.mounted = true;
+    return () => {
+      lifetime.current.mounted = false;
+      revision.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!expanded || !isCurrent()) return;
     const requestRevision = ++revision.current;
     let cancelled = false;
-    const current = () => !cancelled && revision.current === requestRevision && sessionAccess.isCurrent();
+    const current = () => !cancelled && revision.current === requestRevision && isCurrent();
     setState({ kind: "loading" });
     void (async () => {
       try {
@@ -146,7 +161,7 @@ export function LeadTeamAnalytics({ access, initiallyExpanded = false, heading =
     };
   }, [sessionAccess, expanded, days, refresh]);
 
-  if (!sessionAccess.isCurrent()) return null;
+  if (!isCurrent()) return null;
   const analytics = state.kind === "ready" ? state.analytics : null;
   const assignedTotal = analytics?.members.reduce((sum, member) => sum + member.assigned.total, 0) ?? 0;
   const bookedTotal = analytics?.members.reduce((sum, member) => sum + member.assigned.booked, 0) ?? 0;
@@ -158,7 +173,7 @@ export function LeadTeamAnalytics({ access, initiallyExpanded = false, heading =
     <details className="min-w-0 max-w-full border-y py-3" style={{ borderColor: "var(--negis-border)" }} open={expanded}
       onToggle={(event) => {
         const next = event.currentTarget.open;
-        if (next === expanded || !sessionAccess.isCurrent()) return;
+        if (next === expanded || !isCurrent()) return;
         revision.current += 1;
         setState({ kind: next ? "loading" : "idle" });
         setExpanded(next);
@@ -172,7 +187,7 @@ export function LeadTeamAnalytics({ access, initiallyExpanded = false, heading =
               style={{ borderColor: "var(--negis-border)", background: "var(--negis-surface)", color: "var(--negis-text)" }}
               onChange={(event) => {
                 const next = Number(event.target.value);
-                if (!PERIODS.some((period) => period === next) || next === days || !sessionAccess.isCurrent()) return;
+                if (!PERIODS.some((period) => period === next) || next === days || !isCurrent()) return;
                 revision.current += 1;
                 setState({ kind: "loading" });
                 setDays(next);
@@ -184,7 +199,7 @@ export function LeadTeamAnalytics({ access, initiallyExpanded = false, heading =
             style={{ borderColor: "var(--negis-border)", color: "var(--negis-text)" }}
             title="Обновить работу команды" aria-label="Обновить работу команды" disabled={loading}
             onClick={() => {
-              if (!sessionAccess.isCurrent()) return;
+              if (!isCurrent()) return;
               revision.current += 1;
               setState({ kind: "loading" });
               setRefresh((value) => value + 1);

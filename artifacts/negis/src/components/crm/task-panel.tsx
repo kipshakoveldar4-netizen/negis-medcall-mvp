@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, ListTodo, Loader2, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { crmErrorMessage, crmFetch } from "@/lib/api";
 import { readWorkspaceId } from "@/lib/demoStorage";
+import { useAuth } from "@/contexts/AuthContext";
+import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
+import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 
 // Задачи по одной записи.
 //
@@ -38,6 +41,20 @@ type Task = {
 type StaffOption = { id: string; name: string };
 
 type LoadState = "loading" | "ready" | "failed";
+
+type PanelScope = {
+  key: string;
+  mounted: boolean;
+  invalidated: boolean;
+  run: number;
+  read: number;
+  signOutRevision: number;
+  controller: AbortController;
+  creating: boolean;
+  closing: string;
+  ready: boolean;
+  tasks: Task[];
+};
 
 const OPEN_STATUSES = new Set(["new", "in_progress"]);
 
@@ -127,9 +144,19 @@ function isOverdue(value: string): boolean {
 
 /** `datetime-local` даёт время без зоны; в базу уходит момент. */
 function toIso(local: string): string {
-  if (!local) return "";
-  const at = Date.parse(local);
-  return Number.isFinite(at) ? new Date(at).toISOString() : "";
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/.exec(local);
+  if (!match || Number(match[1]) < 1) return "";
+  const date = new Date(local);
+  if (!Number.isFinite(date.getTime()) || date.getFullYear() !== Number(match[1])
+    || date.getMonth() + 1 !== Number(match[2]) || date.getDate() !== Number(match[3])
+    || date.getHours() !== Number(match[4]) || date.getMinutes() !== Number(match[5])
+    || date.getSeconds() !== Number(match[6] || 0)) return "";
+  return date.toISOString();
+}
+
+function failureStatus(error: unknown): number {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" ? status : 0;
 }
 
 /** Причина отказа словами оператора, а не одним текстом на все случаи. */
@@ -149,6 +176,22 @@ export function TaskPanel({
   /** Заявка почти всегда «про пациента»: связь ставится обеими, когда она известна. */
   clientId?: string;
 }) {
+  const { user, clinicId, userRole, rolePermissions, isSigningOut, isImpersonation } = useAuth();
+  const actorId = user?.id || "";
+  const workspaceId = readWorkspaceId();
+  const contextKey = JSON.stringify([actorId, workspaceId, clinicId, userRole, isSigningOut, isImpersonation,
+    Object.entries(rolePermissions).sort(([a], [b]) => a.localeCompare(b)), entityType, entityId, clientId]);
+  const lifetime = useRef<PanelScope | null>(null);
+  if (!lifetime.current || lifetime.current.key !== contextKey) {
+    lifetime.current = { key: contextKey, mounted: false, invalidated: false, run: 0, read: 0,
+      signOutRevision: getSignOutRevision(), controller: new AbortController(), creating: false,
+      closing: "", ready: false, tasks: [] };
+  }
+  const scope = lifetime.current;
+  const viewScope = useRef(scope);
+  const isCurrent = (run = scope.run) => lifetime.current === scope && scope.mounted && !scope.invalidated
+    && scope.run === run && Boolean(actorId && entityId) && !isSigningOut && !isSignOutPending()
+    && getSignOutRevision() === scope.signOutRevision && readWorkspaceId() === workspaceId;
   const [state, setState] = useState<LoadState>("loading");
   const [failureText, setFailureText] = useState("");
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -159,77 +202,122 @@ export function TaskPanel({
   const [saving, setSaving] = useState(false);
   const [closingId, setClosingId] = useState("");
 
-  /**
-   * Номер поколения запроса.
-   *
-   * Два закрытия подряд запускают два перечитывания, и ответ первого может
-   * прийти последним — тогда только что закрытая задача снова нарисуется
-   * открытой. Ответ более старого поколения просто игнорируется. Тот же
-   * механизм закрывает и переключение между карточками.
-   */
-  const generation = useRef(0);
-
   const filterParam = entityType === "lead" ? "leadId" : "clientId";
 
+  const clear = () => {
+    scope.tasks = [];
+    scope.ready = false;
+    scope.creating = false;
+    scope.closing = "";
+    setTasks([]);
+    setStaff([]);
+    setTitle("");
+    setDue("");
+    setAssignee("");
+    setSaving(false);
+    setClosingId("");
+  };
+  const retire = (status: number, run = scope.run) => {
+    if (!isCurrent(run)) return;
+    scope.invalidated = true;
+    scope.controller.abort();
+    clear();
+    setFailureText(refusalText(status));
+    setState("failed");
+  };
+  const denied = (status: number, run: number) => {
+    if (![401, 403, 404].includes(status)) return false;
+    retire(status, run);
+    return true;
+  };
+  const fetchFor = (path: string, run: number, init: RequestInit = {}) => crmFetch(path, {
+    ...init, cache: "no-store", expectedUserId: actorId, signal: scope.controller.signal,
+    dispatchGuard: () => isCurrent(run),
+  });
+
+  useLayoutEffect(() => {
+    scope.run++;
+    scope.mounted = true;
+    scope.controller = new AbortController();
+    viewScope.current = scope;
+    clear();
+    setFailureText("");
+    setState("loading");
+    // Retire this lifetime permanently on SDK A/B/A, even if context updates batch.
+    const subscription = hasSupabaseFrontendEnv ? supabase.auth.onAuthStateChange((_event, session) => {
+      if ((session?.user.id || "") !== actorId) retire(401);
+    }).data.subscription : null;
+    return () => {
+      scope.mounted = false;
+      scope.run++;
+      scope.controller.abort();
+      subscription?.unsubscribe();
+    };
+  }, [scope]);
+
   const load = useCallback(async (options: { quiet?: boolean } = {}) => {
-    if (!entityId) {
-      setTasks([]);
-      setState("ready");
-      return;
-    }
-    const mine = ++generation.current;
+    const run = scope.run;
+    if (!isCurrent(run)) return;
+    const mine = ++scope.read;
     // Перечитывание после записи не гасит список: иначе одно нажатие галочки
     // стирало бы всю панель до спиннера вместе с формой и набранным текстом.
     if (!options.quiet) setState("loading");
     try {
-      const workspaceId = readWorkspaceId();
       const query = `${filterParam}=${encodeURIComponent(entityId)}`
         + (workspaceId ? `&workspaceId=${encodeURIComponent(workspaceId)}` : "");
-      const response = await crmFetch(`/api/crm/tasks?${query}`);
+      const response = await fetchFor(`/api/crm/tasks?${query}`, run);
+      if (!isCurrent(run) || mine !== scope.read) return;
+      if (denied(response.status, run)) return;
       const body = (await response.json()) as { success?: boolean; details?: string[]; data?: { tasks?: unknown[] } };
-      if (mine !== generation.current) return;
+      if (!isCurrent(run) || mine !== scope.read) return;
       // Отказ базы приходит как 502. Показать его пустым списком значило бы
       // соврать: запись без задач и запись, задачи которой не удалось
       // прочитать, выглядели бы одинаково.
-      if (!response.ok || body.success !== true) {
+      if (!response.ok || body.success !== true || !Array.isArray(body.data?.tasks)) {
+        scope.ready = false;
         setFailureText(refusalText(response.status, body.details));
         setState("failed");
         return;
       }
-      setTasks((Array.isArray(body.data?.tasks) ? body.data.tasks : []).map(taskFromRecord));
+      scope.tasks = body.data.tasks.map(taskFromRecord);
+      scope.ready = true;
+      setTasks(scope.tasks);
       setState("ready");
     } catch (error) {
-      if (mine !== generation.current) return;
-      const status = typeof (error as { status?: unknown })?.status === "number" ? (error as { status: number }).status : 0;
+      if (!isCurrent(run) || mine !== scope.read) return;
+      const status = failureStatus(error);
+      if (denied(status, run)) return;
+      scope.ready = false;
       setFailureText(refusalText(status));
       setState("failed");
     }
-  }, [entityId, filterParam]);
+  }, [scope, entityId, filterParam, workspaceId, actorId]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
   useEffect(() => {
-    let cancelled = false;
+    const run = scope.run;
+    if (!isCurrent(run)) return;
     void (async () => {
       try {
-        const workspaceId = readWorkspaceId();
-        const response = await crmFetch(`/api/crm/staff?workspaceId=${encodeURIComponent(workspaceId)}`);
+        const response = await fetchFor(`/api/crm/staff?workspaceId=${encodeURIComponent(workspaceId)}`, run);
+        if (!isCurrent(run)) return;
+        if (response.status === 401) { retire(401, run); return; }
+        if (!response.ok) return;
         const body = (await response.json()) as { success?: boolean; data?: { staff?: unknown[] } };
-        if (cancelled || !response.ok || body.success !== true) return;
+        if (!isCurrent(run) || body.success !== true) return;
         setStaff((Array.isArray(body.data?.staff) ? body.data.staff : []).map(staffFromRecord).filter(Boolean) as StaffOption[]);
-      } catch {
+      } catch (error) {
+        if (failureStatus(error) === 401) retire(401, run);
         // Список сотрудников читается правом manage_staff, которого нет ни у
         // ресепшн, ни у врача, ни у маркетолога, ни у менеджера. Для них поле
         // «Исполнитель» просто не появится — пустой выпадающий список выглядел
         // бы так, будто в клинике нет сотрудников.
       }
     })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  }, [scope, workspaceId, actorId]);
 
   const { open, closed } = useMemo(() => {
     const openTasks: Task[] = [];
@@ -250,25 +338,32 @@ export function TaskPanel({
   }, [tasks]);
 
   const create = async () => {
+    const run = scope.run;
     const trimmed = title.trim();
-    if (!trimmed || saving) return;
+    if (!isCurrent(run) || !scope.ready || !trimmed || scope.creating) return;
+    const deadline = due ? toIso(due) : "";
+    if (due && !deadline) { toast.error("Укажите корректный срок задачи."); return; }
+    scope.creating = true;
     setSaving(true);
     try {
-      const response = await crmFetch("/api/crm/tasks", {
+      const response = await fetchFor("/api/crm/tasks", run, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          workspaceId: readWorkspaceId(),
+          workspaceId,
           title: trimmed,
           status: "new",
           priority: "medium",
-          ...(due ? { deadline: toIso(due) } : {}),
+          ...(due ? { deadline } : {}),
           ...(assignee ? { assigneeUserId: assignee } : {}),
           [entityType === "lead" ? "leadId" : "clientId"]: entityId,
           ...(entityType === "lead" && clientId ? { clientId } : {}),
         }),
       });
+      if (!isCurrent(run)) return;
+      if (denied(response.status, run)) return;
       const body = (await response.json()) as { success?: boolean; error?: string; details?: string[] };
+      if (!isCurrent(run)) return;
       if (!response.ok || body.success !== true) {
         // Разобранное тело называет, какое именно поле не прошло проверку.
         // Выбрасывать его и логировать один код ответа значило бы оставить
@@ -283,27 +378,34 @@ export function TaskPanel({
       toast.success("Задача поставлена");
       await load({ quiet: true });
     } catch (error) {
+      if (!isCurrent(run) || denied(failureStatus(error), run)) return;
       console.warn("tasks: create failed", error instanceof Error ? error.message : String(error));
       toast.error("Не удалось поставить задачу. Проверьте список перед повтором.");
     } finally {
-      setSaving(false);
+      if (isCurrent(run)) { scope.creating = false; setSaving(false); }
     }
   };
 
   const close = async (task: Task) => {
-    if (closingId) return;
+    const run = scope.run;
+    if (!isCurrent(run) || !scope.ready || scope.closing
+      || !task.id || !scope.tasks.some(item => item.id === task.id && OPEN_STATUSES.has(statusKey(item.status)))) return;
+    scope.closing = task.id;
     setClosingId(task.id);
     try {
-      const response = await crmFetch("/api/crm/tasks", {
+      const response = await fetchFor("/api/crm/tasks", run, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: task.id,
-          workspaceId: readWorkspaceId(),
+          workspaceId,
           updates: { status: "done" },
         }),
       });
+      if (!isCurrent(run)) return;
+      if (denied(response.status, run)) return;
       const body = (await response.json()) as { success?: boolean; error?: string; details?: string[] };
+      if (!isCurrent(run)) return;
       if (!response.ok || body.success !== true) {
         console.warn("tasks: close refused", response.status, body.error ?? "", (body.details ?? []).join("; "));
         toast.error(refusalText(response.status, body.details));
@@ -311,14 +413,16 @@ export function TaskPanel({
       }
       await load({ quiet: true });
     } catch (error) {
+      if (!isCurrent(run) || denied(failureStatus(error), run)) return;
       console.warn("tasks: close failed", error instanceof Error ? error.message : String(error));
-      toast.error("Не удалось закрыть задачу. Изменение отменено.");
+      toast.error("Не удалось подтвердить закрытие задачи. Проверьте список перед повтором.");
     } finally {
-      setClosingId("");
+      if (isCurrent(run)) { scope.closing = ""; setClosingId(""); }
     }
   };
 
-  const showList = state === "ready" || (state === "loading" && tasks.length > 0);
+  const sameView = viewScope.current === scope;
+  const showList = sameView && isCurrent() && (state === "ready" || (state === "loading" && tasks.length > 0));
 
   return (
     <section className="neu-sm p-4" aria-label="Задачи">
@@ -337,14 +441,14 @@ export function TaskPanel({
         ) : null}
       </div>
 
-      {state === "loading" && tasks.length === 0 ? (
+      {!sameView || (state === "loading" && tasks.length === 0) ? (
         <div className="flex items-center gap-2 py-2" style={{ color: "var(--negis-muted-2)" }}>
           <Loader2 className="animate-spin" size={14} />
           <span className="text-xs">Загружаем…</span>
         </div>
       ) : null}
 
-      {state === "failed" ? (
+      {sameView && state === "failed" ? (
         <p className="text-xs" style={{ color: "var(--negis-error)" }}>
           {failureText || "Не удалось загрузить задачи."} Это не значит, что задач нет.
         </p>
@@ -366,7 +470,7 @@ export function TaskPanel({
                 title="Закрыть задачу"
                 className="grid h-9 w-9 shrink-0 place-items-center rounded-full"
                 style={{ background: "var(--negis-ground)", color: "var(--negis-ink-2)" }}
-                disabled={closingId === task.id}
+                disabled={Boolean(closingId)}
                 onClick={() => void close(task)}
               >
                 {closingId === task.id ? <Loader2 className="animate-spin" size={15} /> : <CheckCircle2 size={16} />}
@@ -408,7 +512,8 @@ export function TaskPanel({
             placeholder="Что нужно сделать"
             value={title}
             maxLength={200}
-            onChange={(event) => setTitle(event.target.value)}
+            disabled={saving}
+            onChange={(event) => { if (isCurrent() && scope.ready && !scope.creating) setTitle(event.target.value); }}
             data-testid="task-title-input"
           />
           <div className="flex flex-col gap-2 sm:flex-row">
@@ -416,14 +521,16 @@ export function TaskPanel({
               type="datetime-local"
               className="neu-input text-xs sm:flex-1"
               value={due}
-              onChange={(event) => setDue(event.target.value)}
+              disabled={saving}
+              onChange={(event) => { if (isCurrent() && scope.ready && !scope.creating) setDue(event.target.value); }}
               aria-label="Срок"
             />
             {staff.length > 0 ? (
               <select
                 className="neu-input text-xs sm:flex-1"
                 value={assignee}
-                onChange={(event) => setAssignee(event.target.value)}
+                disabled={saving}
+                onChange={(event) => { if (isCurrent() && scope.ready && !scope.creating) setAssignee(event.target.value); }}
                 aria-label="Исполнитель"
               >
                 <option value="">Без исполнителя</option>

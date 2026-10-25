@@ -1,6 +1,8 @@
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { Check, X, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
 import { operatorApi, OperatorApiError, useOperatorList } from "@/lib/operatorApi";
+import { getSupabaseAccessToken } from "@/lib/serverAuth";
+import { supabase } from "@/lib/supabase";
 import { OperatorLeads } from "./OperatorLeads";
 import { OperatorServiceCatalog } from "./OperatorServiceCatalog";
 import { OperatorArrivals } from "./OperatorArrivals";
@@ -32,6 +34,11 @@ export function OperatorRequests({
   const [openCatalog, setOpenCatalog] = useState<string | null>(null);
   const [openArrivals, setOpenArrivals] = useState<string | null>(null);
   const mounted = useRef(false);
+  const scope = useRef({ path, actorId, expired: false });
+  if (scope.current.path !== path || scope.current.actorId !== actorId) {
+    scope.current = { path, actorId, expired: false };
+  }
+  const renderedScope = scope.current;
   // A mutation belongs to its visible list snapshot, including refreshes/pages.
   const currentView = useRef({ path, actorId, offset: list.offset, data: list.data });
   const scopeChanged =
@@ -53,17 +60,47 @@ export function OperatorRequests({
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
-  const invalidateAccess = useCallback(() => {
-    if (!mounted.current || currentView.current.path !== path || currentView.current.actorId !== actorId) return;
+  const isScopeCurrent = useCallback(() => {
+    if (!mounted.current || scope.current !== renderedScope || renderedScope.expired) return false;
+    if (isSessionCurrent?.() === false) {
+      renderedScope.expired = true;
+      return false;
+    }
+    return true;
+  }, [renderedScope, isSessionCurrent]);
+  const isActorCurrent = useCallback(async (allowSignedOut = false) => {
+    if (!isScopeCurrent()) return false;
+    let token = "";
+    try { token = await getSupabaseAccessToken(actorId); } catch { /* Unknown ownership fails closed. */ }
+    if (!isScopeCurrent()) return false;
+    if (!token) {
+      if (allowSignedOut) {
+        try {
+          const { data, error } = await supabase.auth.getSession();
+          if (!isScopeCurrent()) return false;
+          // A missing session still revokes this view; a different account
+          // must never receive a denial captured by the previous actor.
+          if (!error && !data.session) return true;
+        } catch { /* Unknown ownership still fails closed. */ }
+      }
+      // Once a different/missing actor is observed, A -> B -> A cannot revive
+      // callbacks captured by the old view, even without a parent auth event.
+      renderedScope.expired = true;
+      return false;
+    }
+    return true;
+  }, [actorId, isScopeCurrent, renderedScope]);
+  const invalidateAccess = useCallback(async () => {
+    if (!await isActorCurrent(true)) return;
     setOpenRequest(null);
     setOpenCatalog(null);
     setOpenArrivals(null);
     setError("Доступ оператора изменился.");
     list.refresh();
     onAccessDenied?.();
-  }, [path, actorId, list.refresh, onAccessDenied]);
+  }, [isActorCurrent, list.refresh, onAccessDenied]);
   async function change(id: string, action: string) {
-    const isCurrent = () => mounted.current && isSessionCurrent?.() !== false && currentView.current === renderedView;
+    const isCurrent = () => isScopeCurrent() && currentView.current === renderedView;
     if (!actorId || !isCurrent()) return;
     if (
       action === "end" &&
@@ -73,12 +110,7 @@ export function OperatorRequests({
     )
       return;
     if (!isCurrent()) return;
-    const startedAtView = renderedView;
-    const isSameScope = () =>
-      mounted.current &&
-      isSessionCurrent?.() !== false &&
-      currentView.current.path === startedAtView.path &&
-      currentView.current.actorId === startedAtView.actorId;
+    const isSameScope = isScopeCurrent;
     setBusy(true);
     setError("");
     try {
@@ -90,7 +122,7 @@ export function OperatorRequests({
         actorId,
         isCurrent,
       );
-      if (!isCurrent()) return;
+      if (!isCurrent() || !await isActorCurrent() || !isCurrent()) return;
       setOpenRequest(null);
       setOpenCatalog(null);
       setOpenArrivals(null);
@@ -98,7 +130,8 @@ export function OperatorRequests({
     } catch (err) {
       const accessDenied = err instanceof OperatorApiError && [401, 403].includes(err.status);
       // Refusal invalidates this actor/path even after a newer page or refresh.
-      if (accessDenied ? !isSameScope() : !isCurrent()) return;
+      const ownsReply = accessDenied ? isSameScope : isCurrent;
+      if (!ownsReply() || !await isActorCurrent(accessDenied) || !ownsReply()) return;
       if (accessDenied) {
         setOpenRequest(null);
         setOpenCatalog(null);

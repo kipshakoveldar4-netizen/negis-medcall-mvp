@@ -194,6 +194,9 @@ async function runtime(t: TestContext): Promise<Ui> {
       if (dependency === "lucide-react") return helpers.icons;
       if (dependency.endsWith("/crm/operator-contracts")) return load("contracts");
       if (dependency === "@/lib/serverAuth") return { getSupabaseAccessToken: async () => "synthetic-header-test-token" };
+      if (dependency === "@/lib/supabase") return { supabase: { auth: { getSession: async () => {
+        assert.fail("Unexpected signed-out SDK lookup in header-only fixture");
+      } } } };
       const aliases: Record<string, string> = {
         "@/lib/api": "crm", "@/lib/operatorApi": "api", "@/lib/operatorBookingAttempt": "attempts",
         "./OperatorLeads": "leads", "./OperatorBookingForm": "booking", "./OperatorServiceCatalog": "catalog", "./OperatorArrivals": "arrivals",

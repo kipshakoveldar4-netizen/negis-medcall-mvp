@@ -383,6 +383,7 @@ test("lead manager routes, home and both menus are leads-only; other route permi
         user: null, vertical: "clinic", workspacePurpose: "clinic_services", availableWorkspaces: [] }) },
       "@/lib/workspaceRoutes": workspaceRoutes,
       "@/lib/demoStorage": { isRealWorkspace: () => true },
+      "@/lib/supabase": { hasSupabaseFrontendEnv: false, supabase: {} },
       "../../../../../lib/vertical/terms": { termsFor: () => ({}), capitalize: (word: string) => word },
       "../../../../../lib/auth/staff-logins": { loginFromEmail: () => "" }, "./ProfileDialog": { ProfileDialog: "ProfileDialog" },
     });

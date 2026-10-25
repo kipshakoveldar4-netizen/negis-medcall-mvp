@@ -350,6 +350,12 @@ async function runtime(t: TestContext, queueMutations = false, confirm = () => t
       if (name === "react") return render.hooks;
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment };
       if (name === "lucide-react") return icons;
+      // These older composed cases exercise header/parent ownership, not SDK auth.
+      // The separate request-lifetime suite executes the real serverAuth module.
+      if (name === "@/lib/serverAuth") return { getSupabaseAccessToken: async () => "synthetic-composed-token" };
+      if (name === "@/lib/supabase") return { supabase: { auth: { getSession: async () => {
+        assert.fail("Unexpected signed-out SDK lookup in this composed case");
+      } } } };
       if (name.endsWith("/crm/operator-contracts")) return load("contracts");
       const componentModules: Record<string, string> = {
         "@/components/operators/OperatorRequests": "requests",

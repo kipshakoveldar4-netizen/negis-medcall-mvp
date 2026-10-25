@@ -546,7 +546,7 @@ test("TK27 список задач сужает сервер, а не брауз
     "вопрос «что по этой записи» задаётся серверу параметром",
   );
   assert.ok(
-    /crmFetch\(`\/api\/crm\/tasks\?\$\{query\}`\)/.test(panel),
+    /fetchFor\(`\/api\/crm\/tasks\?\$\{query\}`, run\)/.test(panel),
     "запрос идёт с фильтром",
   );
   // Фильтрация всего массива в браузере — это тот самый механизм, которым
@@ -578,7 +578,8 @@ test("TK29 создание ждёт сервер и не обещает тог�
   const panel = await readFile(panelPath, "utf8");
   const create = panel.slice(panel.indexOf("  const create = async ()"), panel.indexOf("  const close = async ("));
 
-  assert.ok(create.includes("if (!trimmed || saving) return;"), "повторный клик не отправляет второй POST");
+  assert.ok(create.includes("!trimmed || scope.creating) return;"), "синхронный mutex не отправляет второй POST");
+  assert.ok(create.includes("scope.creating = true;"), "mutex ставится до запроса");
   assert.ok(create.includes("await load({ quiet: true })"), "список перечитывается после подтверждения сервером");
   const successAt = create.indexOf('toast.success("Задача поставлена")');
   const guardAt = create.indexOf("if (!response.ok || body.success !== true)");
@@ -670,13 +671,14 @@ test("TK34 в исполнители не попадают уволенные, �
 test("TK35 перечитывание после записи не гасит панель и не путает порядок ответов", async () => {
   const panel = await readFile(panelPath, "utf8");
 
-  assert.ok(panel.includes("const generation = useRef(0)"), "ответ устаревшего запроса должен игнорироваться");
-  assert.ok(panel.includes("if (mine !== generation.current) return;"), "и проверяться после await");
+  assert.ok(panel.includes("const mine = ++scope.read;"), "ответ устаревшего запроса должен игнорироваться");
+  assert.ok(panel.includes("if (!isCurrent(run) || mine !== scope.read) return;"), "scope и порядок проверяются после await");
   assert.ok(
     panel.includes("await load({ quiet: true })"),
     "иначе одно нажатие галочки стирает весь список и форму до спиннера",
   );
-  assert.ok(panel.includes("if (closingId) return;"), "повторный клик по закрытию не отправляет второй PATCH");
+  assert.ok(panel.includes("!scope.ready || scope.closing"), "повторный клик по закрытию не отправляет второй PATCH");
+  assert.ok(panel.includes("scope.closing = task.id;"), "mutex закрытия ставится до запроса");
 });
 
 test("TK36 до применения 031 панель получает пустой список, а не отказ", async () => {

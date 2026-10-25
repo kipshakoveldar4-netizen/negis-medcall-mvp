@@ -289,6 +289,11 @@ async function fixture(t: TestContext, kind: Kind) {
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: Symbol("Fragment") };
       if (name === "lucide-react") return icons;
       if (name === "@/lib/operatorApi") return api;
+      if (name === "@/lib/serverAuth") return { getSupabaseAccessToken: async (expected: string) =>
+        expected === sessionActor ? "synthetic-action-token" : "" };
+      if (name === "@/lib/supabase") return { supabase: { auth: { getSession: async () => ({
+        data: { session: sessionActor ? { user: { id: sessionActor } } : null }, error: null,
+      }) } } };
       if (name === "../../../../../lib/crm/operator-contracts") return contracts;
       if (name === "./OperatorLeads") return { OperatorLeads: boundaries.OperatorLeads };
       if (name === "./OperatorServiceCatalog") return { OperatorServiceCatalog: boundaries.OperatorServiceCatalog };

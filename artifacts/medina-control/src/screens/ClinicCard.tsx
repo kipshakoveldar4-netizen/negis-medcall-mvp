@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { controlFetch } from "../lib/api";
+import { captureControlAccess, controlFetch, verifyControlAccess } from "../lib/api";
 import { formatMinor, PLANS, type PlanKey } from "../../../../lib/billing/plans";
 import { capitalize, termsFor, readVertical } from "../../../../lib/vertical/terms";
 
@@ -204,7 +204,21 @@ function chipState(value: number | null): "on" | "off" | "unknown" {
 }
 
 export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBack: () => void }) {
+  const origin = useRef(captureControlAccess());
+  const mounted = useRef(true);
+  const denied = useRef(false);
+  const [accessDenied, setAccessDenied] = useState(false);
+  const view = useRef({ workspaceId });
+  const viewToken = view.current.workspaceId === workspaceId ? view.current : (view.current = { workspaceId });
+  const current = () => mounted.current && !denied.current && origin.current.isCurrent() && view.current === viewToken;
+  const reissueAttempt = useRef<object | null>(null);
+  const recommendationAttempt = useRef<object | null>(null);
+  const recommendationsRead = useRef<object | null>(null);
+  const numberAttempt = useRef<object | null>(null);
+  const copyAttempt = useRef<object | null>(null);
   const [card, setCard] = useState<Card | null>(null);
+  const latestCard = useRef(card);
+  latestCard.current = card;
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   // null — читаем; error — отказ чтения (не «советов нет»); иначе — данные.
   const [recos, setRecos] = useState<{ items: Recommendation[]; available: boolean } | { error: true } | null>(null);
@@ -219,11 +233,31 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
   const [reissueLink, setReissueLink] = useState("");
   const [reissueError, setReissueError] = useState("");
   const [reissueCopied, setReissueCopied] = useState(false);
+  const latestLink = useRef(reissueLink);
+  latestLink.current = reissueLink;
+
+  async function scopedFetch(path: string, init: RequestInit = {}, live = current) {
+    if (!live()) throw new Error("clinic_card_obsolete");
+    const response = await controlFetch(path, init, { actorId: origin.current.actorId, isCurrent: live });
+    if (!live()) throw new Error("clinic_card_obsolete");
+    if ([401, 403, 404].includes(response.status)) {
+      denied.current = true;
+      clearPrivateState();
+      setAccessDenied(true);
+      throw new Error("clinic_card_access_denied");
+    }
+    return response;
+  }
 
   async function loadRecommendations() {
+    if (!current()) return;
+    const attempt = {};
+    recommendationsRead.current = attempt;
+    const live = () => current() && recommendationsRead.current === attempt;
     try {
-      const response = await controlFetch(`/api/crm/platform-recommendations?workspaceId=${encodeURIComponent(workspaceId)}`);
+      const response = await scopedFetch(`/api/crm/platform-recommendations?workspaceId=${encodeURIComponent(workspaceId)}`, {}, live);
       const body = await response.json().catch(() => null);
+      if (!live()) return;
       if (!response.ok || !body?.data) {
         // Отказ чтения — своё состояние: вечное «Читаю…» при недоданном
         // гранте на таблицу выглядело бы как зависание без причины.
@@ -235,11 +269,12 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
         available: body.data.available !== false,
       });
     } catch {
-      setRecos({ error: true });
+      if (live()) setRecos({ error: true });
     }
   }
 
   function openComposer(prefill: { title: string; body: string; signalKey: string }) {
+    if (!current()) return;
     setRecoFlash(null);
     setComposer({
       open: true,
@@ -251,14 +286,18 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
   }
 
   async function sendRecommendation() {
+    if (!current() || recommendationAttempt.current) return;
     if (!composer.title.trim() || !composer.body.trim()) {
       setRecoFlash({ kind: "error", text: "Нужны заголовок и текст — пустая рекомендация не несёт совета." });
       return;
     }
+    const attempt = {};
+    recommendationAttempt.current = attempt;
+    const live = () => current() && recommendationAttempt.current === attempt;
     setSending(true);
     setRecoFlash(null);
     try {
-      const response = await controlFetch("/api/crm/platform-recommendations", {
+      const response = await scopedFetch("/api/crm/platform-recommendations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -268,8 +307,9 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
           actionPath: composer.actionPath,
           signalKey: composer.signalKey,
         }),
-      });
+      }, live);
       const body = await response.json().catch(() => null);
+      if (!live()) return;
       if (!response.ok) {
         const reason = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean).join(" ");
         setRecoFlash({ kind: "error", text: reason || "Не удалось отправить рекомендацию" });
@@ -279,58 +319,70 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
       setComposer({ open: false, title: "", body: "", actionPath: "", signalKey: "" });
       await loadRecommendations();
     } catch {
-      setRecoFlash({ kind: "error", text: "Сеть не ответила — рекомендация не отправлена." });
+      if (live()) setRecoFlash({ kind: "error", text: "Не удалось подтвердить отправку рекомендации. Проверьте список перед повтором." });
     } finally {
-      setSending(false);
+      if (live()) { recommendationAttempt.current = null; setSending(false); }
     }
   }
 
   async function reissueInvitation() {
-    if (reissueBusy) return;
+    if (!current() || reissueAttempt.current || latestCard.current?.clinic.id !== workspaceId
+      || latestCard.current.access?.staff?.some((person) => person.role === "owner")) return;
+    const attempt = {};
+    reissueAttempt.current = attempt;
+    const live = () => current() && reissueAttempt.current === attempt;
     setReissueBusy(true);
     setReissueError("");
     try {
-      const response = await controlFetch("/api/crm/platform-invitation-reissue", {
+      const response = await scopedFetch("/api/crm/platform-invitation-reissue", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ workspaceId }),
-      });
+      }, live);
       const body = await response.json().catch(() => null);
+      if (!live()) return;
       if (!response.ok || body?.success !== true || typeof body?.data?.acceptUrl !== "string") {
         // Показанная ранее ссылка убирается ПО КОДУ, а не по факту ошибки:
         // reissue_incomplete — сервер отозвал прежние приглашения, а новое не
-        // выписал; owner_already_member — приглашение потеряло смысл. При
-        // сетевом сбое или отказе на шаге revoke старая ссылка остаётся
-        // единственной действующей, и стирать её с экрана было бы враньём.
+        // выписал; owner_already_member — приглашение потеряло смысл. Другой
+        // сбой не доказывает отзыв: показанную ссылку сохраняем, но при потере
+        // ответа не обещаем, что перевыпуска не было.
         const code = typeof body?.code === "string" ? body.code : "";
         if (code === "reissue_incomplete" || code === "owner_already_member") {
+          latestLink.current = "";
           setReissueLink("");
           setReissueCopied(false);
+          copyAttempt.current = null;
+          clearCopiedTimer();
           try {
-            const fresh = await fetchCard();
-            if (fresh) setCard(fresh);
+            const fresh = await fetchCard(live);
+            if (live() && fresh) publishCard(fresh);
           } catch {
             // Карточка обновится при следующем открытии.
           }
         }
+        if (!live()) return;
         const reason = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean).join(" ");
         setReissueError(reason || "Перевыпустить не удалось. Попробуйте ещё раз.");
         return;
       }
+      copyAttempt.current = null;
+      clearCopiedTimer();
+      latestLink.current = body.data.acceptUrl;
       setReissueCopied(false);
       setReissueLink(body.data.acceptUrl);
       // Список приглашений обновляется с сервера: старое стало «отозвано»,
       // новое «ждёт принятия». Сбой обновления ссылку не трогает.
       try {
-        const fresh = await fetchCard();
-        if (fresh) setCard(fresh);
+        const fresh = await fetchCard(live);
+        if (live() && fresh) publishCard(fresh);
       } catch {
         // Карточка обновится при следующем открытии.
       }
     } catch {
-      setReissueError("Сеть не ответила — приглашение не перевыпущено.");
+      if (live()) setReissueError("Не удалось подтвердить перевыпуск приглашения. Проверьте приглашения перед новой попыткой.");
     } finally {
-      setReissueBusy(false);
+      if (live()) { reissueAttempt.current = null; setReissueBusy(false); }
     }
   }
 
@@ -341,16 +393,20 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
   const [numberFlash, setNumberFlash] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
 
   async function linkWhatsappNumber() {
-    if (numberBusy || !numberInput.trim()) return;
+    if (!current() || numberAttempt.current || !numberInput.trim()) return;
+    const attempt = {};
+    numberAttempt.current = attempt;
+    const live = () => current() && numberAttempt.current === attempt;
     setNumberBusy(true);
     setNumberFlash(null);
     try {
-      const response = await controlFetch("/api/crm/platform-whatsapp-number", {
+      const response = await scopedFetch("/api/crm/platform-whatsapp-number", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ workspaceId, phoneNumberId: numberInput.trim() }),
-      });
+      }, live);
       const body = await response.json().catch(() => null);
+      if (!live()) return;
       if (!response.ok || body?.success !== true) {
         const reason = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean).join(" ");
         setNumberFlash({ kind: "error", text: reason || "Не удалось привязать номер" });
@@ -365,15 +421,15 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
       });
       // Счётчик «WhatsApp» в чипах читается с сервера — перечитываем карточку.
       try {
-        const fresh = await fetchCard();
-        if (fresh) setCard(fresh);
+        const fresh = await fetchCard(live);
+        if (live() && fresh) publishCard(fresh);
       } catch {
         // Обновится при следующем открытии.
       }
     } catch {
-      setNumberFlash({ kind: "error", text: "Сеть не ответила — неизвестно, привязался ли номер. Проверьте чип «WhatsApp» ниже." });
+      if (live()) setNumberFlash({ kind: "error", text: "Сеть не ответила — неизвестно, привязался ли номер. Проверьте чип «WhatsApp» ниже." });
     } finally {
-      setNumberBusy(false);
+      if (live()) { numberAttempt.current = null; setNumberBusy(false); }
     }
   }
 
@@ -381,13 +437,46 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
   // наслаивает второй, который погасил бы свежую подпись раньше времени.
   const copiedTimerRef = useRef<number | null>(null);
 
+  function clearCopiedTimer() {
+    if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = null;
+  }
+
+  function clearPrivateState() {
+    reissueAttempt.current = null; recommendationAttempt.current = null;
+    recommendationsRead.current = null; numberAttempt.current = null; copyAttempt.current = null;
+    latestCard.current = null; latestLink.current = "";
+    setCard(null); setRecos(null);
+    setComposer({ open: false, title: "", body: "", actionPath: "", signalKey: "" });
+    setSending(false); setRecoFlash(null);
+    setReissueBusy(false); setReissueLink(""); setReissueError(""); setReissueCopied(false);
+    setNumberInput(""); setNumberBusy(false); setNumberFlash(null);
+    clearCopiedTimer();
+  }
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      reissueAttempt.current = null; recommendationAttempt.current = null;
+      recommendationsRead.current = null; numberAttempt.current = null; copyAttempt.current = null;
+      clearCopiedTimer();
+    };
+  }, []);
+
   async function copyReissueLink() {
-    if (!reissueLink) return;
+    if (!current() || !reissueLink || latestLink.current !== reissueLink) return;
+    const attempt = {};
+    copyAttempt.current = attempt;
+    const live = () => current() && copyAttempt.current === attempt && latestLink.current === reissueLink;
     try {
+      await verifyControlAccess({ actorId: origin.current.actorId, isCurrent: live });
+      if (!live()) return;
       await navigator.clipboard.writeText(reissueLink);
+      if (!live()) return;
       setReissueCopied(true);
-      if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
-      copiedTimerRef.current = window.setTimeout(() => setReissueCopied(false), 2500);
+      clearCopiedTimer();
+      copiedTimerRef.current = window.setTimeout(() => { if (live()) setReissueCopied(false); }, 2500);
     } catch {
       // Буфер недоступен — ссылка выделяется и копируется руками.
     }
@@ -396,37 +485,42 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
   // со списком. Клавиатура и скринридер продолжают с заголовка карточки.
   const titleRef = useRef<HTMLHeadingElement | null>(null);
   useEffect(() => {
-    if (state === "ready") titleRef.current?.focus();
+    if (current() && state === "ready") titleRef.current?.focus();
   }, [state]);
 
-  async function fetchCard(): Promise<Card | null> {
-    const response = await controlFetch(`/api/crm/platform-clinic?workspaceId=${encodeURIComponent(workspaceId)}`);
+  function publishCard(fresh: Card) {
+    latestCard.current = fresh;
+    setCard(fresh);
+  }
+
+  async function fetchCard(live = current): Promise<Card | null> {
+    const response = await scopedFetch(`/api/crm/platform-clinic?workspaceId=${encodeURIComponent(workspaceId)}`, {}, live);
     const body = await response.json().catch(() => null);
-    if (!response.ok || !body?.data) return null;
+    if (!live() || !response.ok || body?.data?.clinic?.id !== workspaceId) return null;
     return body.data as Card;
   }
 
   useEffect(() => {
     let cancelled = false;
+    const live = () => !cancelled && current();
+    if (!live()) return;
+    clearPrivateState();
     setState("loading");
     // Состояние перевыпуска принадлежит клинике: owner-ссылка одной не имеет
     // права пережить переход к другой, даже если компонент не размонтируется.
-    setReissueLink("");
-    setReissueError("");
-    setReissueCopied(false);
     void (async () => {
       try {
-        const data = await fetchCard();
-        if (cancelled) return;
+        const data = await fetchCard(live);
+        if (!live()) return;
         if (!data) {
           setState("error");
           return;
         }
-        setCard(data);
+        publishCard(data);
         setState("ready");
         void loadRecommendations();
       } catch {
-        if (!cancelled) setState("error");
+        if (live()) setState("error");
       }
     })();
     return () => {
@@ -439,14 +533,16 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
   // иначе скринридер после нажатия кнопки слышит тишину.
   const reissueBlockRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    if (reissueLink) reissueBlockRef.current?.focus();
+    if (current() && reissueLink) reissueBlockRef.current?.focus();
   }, [reissueLink]);
 
-  if (state === "loading") return <p className="muted" role="status">Читаю карточку клиники…</p>;
+  if (accessDenied) return <><h1 className="page-title">Страница не найдена</h1><p className="page-sub">Доступ к карточке закрыт.</p></>;
+  if (!origin.current.isCurrent()) return <p role="status">Проверяем доступ…</p>;
+  if (state === "loading" || (card && card.clinic.id !== workspaceId)) return <p className="muted" role="status">Читаю карточку клиники…</p>;
   if (state === "error" || !card) {
     return (
       <>
-        <button type="button" className="btn" onClick={onBack}>← Обзор</button>
+        <button type="button" className="btn" onClick={() => { if (current()) onBack(); }}>← Обзор</button>
         <div className="notice error" style={{ marginTop: 12 }}>
           Не удалось прочитать карточку. Это отказ чтения, а не «данных нет».
         </div>
@@ -483,7 +579,7 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
 
   return (
     <>
-      <button type="button" className="btn" onClick={onBack}>← Обзор</button>
+      <button type="button" className="btn" onClick={() => { if (current()) onBack(); }}>← Обзор</button>
       <h1 ref={titleRef} tabIndex={-1} className="page-title" style={{ marginTop: 14 }}>{card.clinic.name}</h1>
       <p className="page-sub">
         {vertical === "beauty" ? "салон красоты" : vertical === "dental" ? "стоматология" : "клиника"} · {card.clinic.ownerEmail || "почта не указана"} ·{" "}
@@ -766,7 +862,7 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
             inputMode="numeric"
             placeholder="phone_number_id, например 123456789012345"
             value={numberInput}
-            onChange={(event) => setNumberInput(event.target.value)}
+            onChange={(event) => { if (current() && !numberAttempt.current) setNumberInput(event.target.value); }}
             style={{ flex: 1, minWidth: 0 }}
           />
           <button type="button" className="btn-primary" disabled={numberBusy} onClick={() => void linkWhatsappNumber()} style={{ whiteSpace: "nowrap" }}>
@@ -795,16 +891,16 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
           <div className="composer">
             <div className="field">
               <label htmlFor="reco-title">Заголовок</label>
-              <input id="reco-title" value={composer.title} onChange={(event) => setComposer((c) => ({ ...c, title: event.target.value }))} />
+              <input id="reco-title" value={composer.title} onChange={(event) => { if (current() && !recommendationAttempt.current) setComposer((c) => ({ ...c, title: event.target.value })); }} />
             </div>
             <div className="field">
               <label htmlFor="reco-body">Текст совета</label>
-              <textarea id="reco-body" rows={3} value={composer.body} onChange={(event) => setComposer((c) => ({ ...c, body: event.target.value }))} />
+              <textarea id="reco-body" rows={3} value={composer.body} onChange={(event) => { if (current() && !recommendationAttempt.current) setComposer((c) => ({ ...c, body: event.target.value })); }} />
             </div>
             <div className="composer-row">
               <div className="field" style={{ flex: 1 }}>
                 <label htmlFor="reco-action">Кнопка ведёт в раздел</label>
-                <select id="reco-action" value={composer.actionPath} onChange={(event) => setComposer((c) => ({ ...c, actionPath: event.target.value }))}>
+                <select id="reco-action" value={composer.actionPath} onChange={(event) => { if (current() && !recommendationAttempt.current) setComposer((c) => ({ ...c, actionPath: event.target.value })); }}>
                   <option value="">Без кнопки</option>
                   <option value="/appointments">Записи</option>
                   <option value="/staff-schedule">{capitalize(terms.specialistPlural)} и график</option>
@@ -818,7 +914,7 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
                 <button type="button" className="btn-primary" disabled={sending} onClick={() => void sendRecommendation()}>
                   {sending ? "Отправляю…" : "Отправить"}
                 </button>
-                <button type="button" className="btn" onClick={() => setComposer((c) => ({ ...c, open: false }))}>Отмена</button>
+                <button type="button" className="btn" onClick={() => { if (current() && !recommendationAttempt.current) setComposer((c) => ({ ...c, open: false })); }}>Отмена</button>
               </div>
             </div>
             <p className="muted" style={{ fontSize: 12.5, margin: "8px 0 0" }}>
@@ -832,7 +928,7 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
         ) : "error" in recos ? (
           <div className="notice error">
             Не удалось прочитать рекомендации. Это отказ чтения, а не «советов нет».{" "}
-            <button type="button" className="btn" onClick={() => { setRecos(null); void loadRecommendations(); }}>Повторить</button>
+            <button type="button" className="btn" onClick={() => { if (current()) { setRecos(null); void loadRecommendations(); } }}>Повторить</button>
           </div>
         ) : !recos.available ? (
           <p className="muted">
