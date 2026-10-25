@@ -5563,7 +5563,7 @@ test("G5C14 CAS test delivery and content-* draft send do not require a server v
     try {
       await invokeLibraryTelegram(fixture.library(), testOnly ? "test" : "send");
       assert.equal(fixture.dispatches.length, 1); assert.equal(fixture.dispatches[0].method, "POST");
-      assert.deepEqual(fixture.dispatches[0].body, testOnly ? { test: true } : JSON.parse(JSON.stringify(row)));
+      assert.deepEqual(fixture.dispatches[0].body, testOnly ? { test: true, testRequestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } : JSON.parse(JSON.stringify(row)));
       if (testOnly) { assert.deepEqual(libraryState(fixture), before); assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null); }
       else { assert.equal(libraryRows(fixture)[0].status, "telegram_ready"); assertTelegramFence(fixture, "sent", row); }
       assert.equal(fixture.toasts.filter((toast) => toast.kind === (testOnly ? "success" : "warning")).length, 1);
@@ -5716,7 +5716,7 @@ for (const kind of ["test", "send"] as const) {
       assert.equal(fixture.library().key, paused.captured.key); paused.resume(); await paused.work;
       assert.equal(fixture.dispatches.length, kind === "test" ? 1 : 2);
       const call = fixture.dispatches[0]; assert.equal(call.url, `/api/content-studio/send-telegram?workspaceId=${REAL_DEMO_TEST_WORKSPACE}`);
-      assert.equal(call.method, "POST"); assert.deepEqual(call.body, kind === "test" ? { test: true } : LOCAL_LIBRARY_ROW_A);
+      assert.equal(call.method, "POST"); assert.deepEqual(call.body, kind === "test" ? { test: true, testRequestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } : LOCAL_LIBRARY_ROW_A);
       for (let index = 0; index < fixture.dispatches.length; index++) {
         assert.equal(fixture.dispatches[index].headers.get("Authorization"), "Bearer fixture-token-telegram-refreshed");
         assert.equal(fixture.dispatches[index].signal, paused.captured.session.sessionRef.current!.signal);
@@ -5827,7 +5827,8 @@ test("G5C14 confirmed test delivery with an active idea never patches or changes
   const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
   const before = libraryState(fixture), mutations = fixture.mutations.length;
   try {
-    await fixture.library().callbacks.testTelegram(); assert.equal(fixture.dispatches.length, 1); assert.deepEqual(fixture.dispatches[0].body, { test: true });
+    await fixture.library().callbacks.testTelegram(); assert.equal(fixture.dispatches.length, 1);
+    assert.deepEqual(fixture.dispatches[0].body, { test: true, testRequestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
     assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []);
     assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
   } finally { fixture.lifetime!.unmount(); }
@@ -6161,14 +6162,16 @@ for (const dimension of ["package", "actor", "workspace"] as const) {
 type LocalTelegramUpstream = {
   sendTelegramMessage(input: { token: string; chatId: string; text: string;
     safeFetch: (url: string | URL, init?: { method?: string; headers?: Record<string, string>; body?: string }) => Promise<{ ok: boolean; status: number; text: () => Promise<string> }>;
-  }): Promise<{ success: boolean; status: number; telegramDescription?: string; telegramErrorCode?: number; hint?: string }>;
+  }): Promise<{ success: boolean; status: number; acknowledgement?: string; telegramDescription?: string; telegramErrorCode?: number; hint?: string }>;
 };
 const LOCAL_TELEGRAM_MESSAGE = { message_id: 17, date: 0, chat: { id: 12345 }, text: "Synthetic message: Қазақша, русский, plain text." };
-async function actualTelegramUpstream(raw: string, status = 200) {
-  const programs = await generationCallbackPrograms, api = evaluateGenerationFixture<LocalTelegramUpstream>(programs.telegramApi, {});
+async function actualTelegramUpstream(raw: string, status = 200, chatId = String(LOCAL_TELEGRAM_MESSAGE.chat.id)) {
+  const programs = await generationCallbackPrograms, api = evaluateGenerationFixture<LocalTelegramUpstream>(programs.telegramApi, {
+    telegramDeliveryHash: (value: string) => createHash("sha256").update(value).digest("hex"),
+  });
   const calls: { url: string; init?: { method?: string; headers?: Record<string, string>; body?: string } }[] = [];
   let bodyReads = 0;
-  const input = { token: "synthetic-not-a-bot-token", chatId: "synthetic-platform-destination", text: LOCAL_TELEGRAM_MESSAGE.text,
+  const input = { token: "synthetic-not-a-bot-token", chatId, text: LOCAL_TELEGRAM_MESSAGE.text,
     callerChatId: "synthetic-untrusted-caller", payload: { chatId: "synthetic-untrusted-caller", chat_id: "synthetic-untrusted-caller" },
     async safeFetch(url: string | URL, init?: { method?: string; headers?: Record<string, string>; body?: string }) {
       calls.push({ url: String(url), init });
@@ -6200,6 +6203,8 @@ const TELEGRAM_INVALID_UPSTREAM_ACKS: { name: string; raw: string }[] = [
   { name: "unsafe chat ID", raw: JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, chat: { id: Number.MAX_SAFE_INTEGER + 1 } } }) },
   { name: "nonstring message text", raw: JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, text: {} } }) },
   { name: "blank message text", raw: JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, text: "  " } }) },
+  { name: "different recipient", raw: JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, chat: { id: 67890 } } }) },
+  { name: "different message text", raw: JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, text: `${LOCAL_TELEGRAM_MESSAGE.text} changed` } }) },
 ];
 for (const { name, raw } of TELEGRAM_INVALID_UPSTREAM_ACKS) {
   test(`G5C14 upstream ${name} cannot acknowledge delivery`, async () => {
@@ -6211,8 +6216,9 @@ for (const { name, raw } of TELEGRAM_INVALID_UPSTREAM_ACKS) {
 
 for (const chatId of [12345, -1007654321]) {
   test(`G5C14 upstream valid ${chatId > 0 ? "private" : "group"} Message acknowledges Unicode plain-text delivery`, async () => {
-    const result = await actualTelegramUpstream(JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, chat: { id: chatId } } }));
-    assert.deepEqual(JSON.parse(JSON.stringify(result)), { success: true, status: 200 });
+    const result = await actualTelegramUpstream(JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, chat: { id: chatId } } }), 200, String(chatId));
+    assert.deepEqual(JSON.parse(JSON.stringify(result)), { success: true, status: 200,
+      acknowledgement: createHash("sha256").update(JSON.stringify(["telegram-ack-v1", chatId, LOCAL_TELEGRAM_MESSAGE.message_id])).digest("hex") });
   });
 }
 

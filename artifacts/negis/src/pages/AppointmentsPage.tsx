@@ -91,6 +91,7 @@ type AppointmentMutationScope = {
   epoch: number;
   active: boolean;
   deniedIds: Set<string>;
+  deniedCreateKeys: Set<string>;
 };
 
 class AppointmentAccessRefusalError extends Error {
@@ -1315,13 +1316,13 @@ export function AppointmentsPage() {
   const deniedMutationIds = useRef(new Set<string>());
   const currentMutationScope = useRef<AppointmentMutationScope>({
     workspaceId: mutationWorkspaceId, actorId: mutationActorId, role: userRole, epoch: mutationEpoch,
-    active: false, deniedIds: deniedMutationIds.current,
+    active: false, deniedIds: deniedMutationIds.current, deniedCreateKeys: new Set(),
   });
   if (currentMutationScope.current.workspaceId !== mutationWorkspaceId || currentMutationScope.current.actorId !== mutationActorId
     || currentMutationScope.current.role !== userRole || currentMutationScope.current.epoch !== mutationEpoch) {
     currentMutationScope.current = {
       workspaceId: mutationWorkspaceId, actorId: mutationActorId, role: userRole, epoch: mutationEpoch,
-      active: false, deniedIds: deniedMutationIds.current,
+      active: false, deniedIds: deniedMutationIds.current, deniedCreateKeys: new Set(),
     };
   }
   const mutationScope = currentMutationScope.current;
@@ -1405,7 +1406,8 @@ export function AppointmentsPage() {
     setEditingId(null);
     // Legacy receipts have no role provenance. They can be reconciled with
     // the same key, but must not reveal an earlier role's draft in this view.
-    const showDraft = restored.originRole === scope.role;
+    const accessRefused = scope.deniedCreateKeys.has(restored.requestKey);
+    const showDraft = !accessRefused && restored.originRole === scope.role;
     setForm(showDraft ? formFromAppointment(restoredAppointment, clinicTimeZone) : defaultForm(todayKeyAtLoad));
     if (showDraft) setSelectedDate(dateKeyFromStartsAt(restoredAppointment.startsAt, clinicTimeZone));
     setConflictMessage("");
@@ -1414,6 +1416,7 @@ export function AppointmentsPage() {
     setRemoteVisitHistory([]);
     setUnconfirmedCreate(true);
     setModalOpen(true);
+    if (accessRefused) return;
     toast.warning("Найдена незавершённая запись. Проверьте, сохранилась ли она.", { id: "appointment-create-recovery" });
   }, [mutationScope, clinicTimeZone, clinicTimeZoneReady, unconfirmedCreate, createRecoveryRead]);
 
@@ -2137,6 +2140,21 @@ export function AppointmentsPage() {
         body: JSON.stringify({ ...attempt.payload, requestKey: attempt.requestKey }),
       });
       if (!isCurrentMutationScope() || createAttempt.current !== attempt) throw new DOMException("Appointment view changed", "AbortError");
+      if (attempt.uncertain && [401, 403, 404].includes(response.status)) {
+        // A denied replay says nothing about the original commit. Retain its
+        // receipt, but do not leave its private draft visible or restore it
+        // again from storage in this refused view lifetime.
+        scope.deniedCreateKeys.add(attempt.requestKey);
+        setForm(defaultForm(todayKeyAtLoad));
+        setClientMatches([]);
+        setClientSearchAttempted(false);
+        setRemoteVisitHistory([]);
+        setServiceSearch("");
+        setDoctorSearch("");
+        void response.body?.cancel().catch(() => undefined);
+        const message = "Доступ к восстановлению записи закрыт. Результат первого запроса неизвестен; ключ повтора сохранён. Проверьте права доступа перед повтором.";
+        throw new AppointmentCreateRecoveryError(message);
+      }
       body = await safeJson(response);
       if (!isCurrentMutationScope() || createAttempt.current !== attempt) throw new DOMException("Appointment view changed", "AbortError");
 

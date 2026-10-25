@@ -259,13 +259,16 @@ test("request current-scope late 403 still revokes a newer list snapshot", async
   assert.equal(ui.driver.nodes().filter((node) => node.type === "article").length, 0);
   assert.equal(ui.requests.length, count + 1);
 });
-test("request current 409 keeps protected boundaries and permits a subsequent genuine action", async (t) => {
+test("request current 409 clears its private panes and requires a fresh list before a genuine action", async (t) => {
   const ui = await fixture(t);
   const pending = await ui.start(); pending.respond(409, { success: false, error: "CURRENT_CONFLICT" }); await ui.driver.flush();
-  assert.equal(ui.snapshot().cards, 1); assert.equal(ui.snapshot().nested, 3); assert.equal(ui.snapshot().busy, false);
-  assert.equal(ui.requests.length, 2); assert.equal(ui.denied(), 0);
+  assert.equal(ui.driver.nodes().filter((node) => node.type === "article").length, 1);
+  assert.equal(ui.driver.nodes().filter((node) => Object.values(boundaries).includes(node.type as symbol)).length, 0);
+  assert.equal(ui.requests.length, 3); assert.equal(ui.denied(), 0, "a request conflict is not a global account revocation");
+  ui.take("GET").respond(200, ui.list("fresh-authorized")); await ui.driver.flush(); await ui.open();
+  assert.equal(ui.snapshot().nested, 3); assert.equal(ui.snapshot().busy, false);
   (await ui.start()).respond(200, { success: true }); await ui.driver.flush();
-  assert.equal(ui.requests.length, 4);
+  assert.equal(ui.requests.length, 5);
 });
 test("request unmounted deferred completion cannot write state or refresh", async (t) => {
   const ui = await fixture(t); const pending = await ui.start();

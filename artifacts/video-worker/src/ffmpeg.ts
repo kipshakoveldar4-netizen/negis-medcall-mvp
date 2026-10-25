@@ -1,4 +1,7 @@
-import { execFile } from "node:child_process";
+import path from "node:path";
+import { runMediaProcess } from "./media-process.js";
+
+export { mediaProcessEnvironment, runMediaProcess } from "./media-process.js";
 
 export type TranscodeOptions = {
   crf: number;
@@ -67,25 +70,16 @@ export function buildDecodeArgs(inputPath: string): string[] {
     "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-threads", "1", "-f", "null", "-"];
 }
 
-export function mediaProcessEnvironment(source = process.env): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(source).filter(([key]) => /^(path|systemroot|windir|temp|tmp|home|userprofile)$/i.test(key)));
-}
-
-// No shell, inherited credentials, unbounded output, or unbounded child lifetime.
-export function runMediaProcess(binary: string, args: string[], timeoutMs: number): Promise<string> {
-  if (!binary || !integer(timeoutMs, 1, 120_000)) throw new Error("video_media_process_config_invalid");
-  return new Promise((resolve, reject) => {
-    execFile(binary, args, { windowsHide: true, shell: false, timeout: timeoutMs,
-      killSignal: "SIGKILL", maxBuffer: 256 * 1024, encoding: "utf8", env: mediaProcessEnvironment() }, (error, stdout) => {
-      if (error) reject(new Error(error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? "video_media_output_limit"
-        : error.killed ? "video_media_timeout" : "video_media_process_failed"));
-      else resolve(stdout);
-    });
-  });
+function mediaPath(value: string): string {
+  return value === "-" || (/^[a-z][a-z0-9+.-]*:/i.test(value) && !/^[a-z]:/i.test(value)) ? value : path.resolve(value);
 }
 
 export async function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {
-  await runMediaProcess(ffmpegPath || "ffmpeg", args, 120_000);
+  // Builders retain their public argument contract. Resolve local file paths
+  // before the subprocess enters its private cwd, including relative tmpDir.
+  const localArgs = args.map((arg, index) => args[index - 1] === "-i"
+    || (index === args.length - 1 && !arg.startsWith("-")) ? mediaPath(arg) : arg);
+  await runMediaProcess(ffmpegPath || "ffmpeg", localArgs, 120_000);
 }
 
 function positive(value: unknown): number | null {
@@ -123,7 +117,7 @@ export function validateVideoProbe(value: unknown, mimeType: string): { width: n
 export async function probeVideo(ffprobePath: string, inputPath: string, mimeType: string) {
   const json = await runMediaProcess(ffprobePath || "ffprobe", [...decoderArgs, "-threads", "1",
     "-show_entries", "format=format_name,duration:stream=codec_type,codec_name,width,height,avg_frame_rate,nb_frames:stream_disposition=attached_pic",
-    "-of", "json", inputPath], 15_000);
+    "-of", "json", mediaPath(inputPath)], 15_000);
   try { return validateVideoProbe(JSON.parse(json), mimeType); }
   catch { throw new Error("video_probe_invalid"); }
 }

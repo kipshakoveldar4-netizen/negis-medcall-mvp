@@ -37,11 +37,14 @@ function dbError(res: VercelResponse, error: unknown) {
     return fail(
       res,
       503,
-      "Раздел операторов ещё не подключён. Владелец платформы должен проверить миграции 052–054.",
+      "Раздел операторов ещё не подключён. Владелец платформы должен проверить миграции 052–054 и 094–096.",
       "operators_not_provisioned",
     );
   }
-  if (["23505", "23514", "P0001"].includes(code)) {
+  if (code === "P9601") return fail(res, 403, "Доступ изменился. Обновите страницу.", "operator_access_denied");
+  if (code === "P9603") return fail(res, 404, "Предложение не найдено");
+  if (code === "P9604") return fail(res, 400, "Проверьте предложение и действие");
+  if (["23505", "23514", "P0001", "P9602", "40001", "40P01", "55P03"].includes(code)) {
     return fail(
       res,
       409,
@@ -240,11 +243,11 @@ export async function handleOperatorInbox(
   }
   const body = record(req.body);
   if (
-    !isUuidValue(body.id) ||
-    !["accept", "decline", "end"].includes(String(body.action))
+    typeof body.id !== "string" || !isUuidValue(body.id) ||
+    typeof body.action !== "string" || !["accept", "decline", "end"].includes(body.action)
   )
     return fail(res, 400, "Выберите предложение и действие");
-  // Scope even the preflight; the accept RPC rechecks the verified user atomically.
+  // Scope even the preflight; the RPC rechecks the verified user for every action.
   const { data: target, error: targetError } = await db
     .from("growth_operator_requests")
     .select("id")
@@ -253,30 +256,13 @@ export async function handleOperatorInbox(
     .maybeSingle();
   if (targetError) return dbError(res, targetError);
   if (!target) return fail(res, 404, "Предложение не найдено");
-  if (body.action === "accept") {
-    const { error } = await db.rpc("accept_growth_operator_request", {
-      p_request_id: body.id,
-      p_operator_user_id: user.id,
-    });
-    return error ? dbError(res, error) : json(res, 200, { success: true });
-  }
-  const ending = body.action === "end";
-  const { data, error } = await db
-    .from("growth_operator_requests")
-    .update(
-      ending
-        ? { status: "ended", ended_at: new Date().toISOString() }
-        : { status: "declined" },
-    )
-    .eq("id", body.id)
-    .eq("operator_id", operatorId)
-    .eq("status", ending ? "accepted" : "requested")
-    .select("id")
-    .maybeSingle();
+  const { data, error } = await db.rpc("transition_growth_operator_request", {
+    p_request_id: body.id, p_operator_user_id: user.id, p_action: body.action,
+  });
   if (error) return dbError(res, error);
-  return data
+  return isUuidValue(data) && data.toLowerCase() === body.id.toLowerCase()
     ? json(res, 200, { success: true })
-    : fail(res, 409, "Предложение изменилось. Обновите список.");
+    : fail(res, 503, "Результат действия не подтверждён. Обновите список.");
 }
 
 export async function handleClinicOperators(
@@ -332,41 +318,23 @@ export async function handleClinicOperators(
         "Нужны оператор, описание клиники до 2000 символов и согласованная цена за приход в тенге",
       );
     }
-    const { data, error } = await db
-      .from("growth_operator_requests")
-      .insert({
-        workspace_id: context.workspaceId,
-        requested_by_staff_user_id: context.staffUserId,
-        operator_id: body.operatorId,
-        clinic_brief: brief,
-        price_per_arrival_minor: amount,
-        currency: "KZT",
-        lead_scope: leadScope,
-        status: "requested",
-      })
-      .select("id")
-      .single();
+    const { data, error } = await db.rpc("create_clinic_operator_request", {
+      p_workspace_id: context.workspaceId, p_staff_user_id: context.staffUserId, p_auth_user_id: context.userId,
+      p_operator_id: body.operatorId, p_clinic_brief: brief, p_price_minor: amount, p_lead_scope: leadScope,
+    });
     return error
       ? dbError(res, error)
-      : json(res, 201, { success: true, data: { id: record(data).id } });
+      : isUuidValue(data) ? json(res, 201, { success: true, data: { id: data } })
+        : fail(res, 503, "Создание предложения не подтверждено. Обновите список.");
   }
-  if (!isUuidValue(body.id) || !["withdraw", "end"].includes(String(body.action)))
+  if (typeof body.id !== "string" || !isUuidValue(body.id) || typeof body.action !== "string" || !["withdraw", "end"].includes(body.action))
     return fail(res, 400, "Выберите предложение и действие");
-  const ending = body.action === "end";
-  const { data, error } = await db
-    .from("growth_operator_requests")
-    .update(
-      ending
-        ? { status: "ended", ended_at: new Date().toISOString() }
-        : { status: "declined" },
-    )
-    .eq("id", body.id)
-    .eq("workspace_id", context.workspaceId)
-    .eq("status", ending ? "accepted" : "requested")
-    .select("id")
-    .maybeSingle();
+  const { data, error } = await db.rpc("transition_clinic_operator_request", {
+    p_workspace_id: context.workspaceId, p_staff_user_id: context.staffUserId, p_auth_user_id: context.userId,
+    p_request_id: body.id, p_action: body.action,
+  });
   if (error) return dbError(res, error);
-  return data
+  return isUuidValue(data) && data.toLowerCase() === body.id.toLowerCase()
     ? json(res, 200, { success: true })
-    : fail(res, 409, "Предложение недоступно или уже изменилось.");
+    : fail(res, 503, "Результат действия не подтверждён. Обновите список.");
 }

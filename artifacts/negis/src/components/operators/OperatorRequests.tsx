@@ -56,6 +56,19 @@ export function OperatorRequests({
     }
   }
   const renderedView = currentView.current;
+  // A request-level refusal refreshes the list, not the other request's form.
+  const refreshingRefusal = useRef<{
+    scope: typeof renderedScope;
+    offset: number;
+    data: NonNullable<typeof list.data>;
+    id: string;
+  } | null>(null);
+  const retained = refreshingRefusal.current;
+  if (retained && (retained.scope !== renderedScope || retained.offset !== list.offset
+    || renderedScope.expired || isSessionCurrent?.() === false || list.error
+    || (list.data && list.data !== retained.data))) refreshingRefusal.current = null;
+  const visibleData = list.data ?? refreshingRefusal.current?.data ?? null;
+  const refusedRequestId = !list.data ? refreshingRefusal.current?.id : undefined;
   useLayoutEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
@@ -92,6 +105,7 @@ export function OperatorRequests({
   }, [actorId, isScopeCurrent, renderedScope]);
   const invalidateAccess = useCallback(async () => {
     if (!await isActorCurrent(true)) return;
+    refreshingRefusal.current = null;
     setOpenRequest(null);
     setOpenCatalog(null);
     setOpenArrivals(null);
@@ -129,10 +143,24 @@ export function OperatorRequests({
       list.refresh();
     } catch (err) {
       const accessDenied = err instanceof OperatorApiError && [401, 403].includes(err.status);
+      const requestRefused = err instanceof OperatorApiError && [404, 409].includes(err.status);
       // Refusal invalidates this actor/path even after a newer page or refresh.
-      const ownsReply = accessDenied ? isSameScope : isCurrent;
+      const ownsReply = accessDenied || requestRefused ? isSameScope : isCurrent;
       if (!ownsReply() || !await isActorCurrent(accessDenied) || !ownsReply()) return;
+      if (requestRefused) {
+        setOpenRequest((value) => isSameScope() && value === id ? null : value);
+        setOpenCatalog((value) => isSameScope() && value === id ? null : value);
+        setOpenArrivals((value) => isSameScope() && value === id ? null : value);
+        // Exact-ID invalidation also applies on a newer page. Its old reply
+        // must not replace that page's error, busy state or pending read.
+        if (!isCurrent()) return;
+        setError(err.message);
+        if (list.data) refreshingRefusal.current = { scope: renderedScope, offset: list.offset, data: list.data, id };
+        list.refresh();
+        return;
+      }
       if (accessDenied) {
+        refreshingRefusal.current = null;
         setOpenRequest(null);
         setOpenCatalog(null);
         setOpenArrivals(null);
@@ -170,11 +198,11 @@ export function OperatorRequests({
           {error || list.error}
         </p>
       )}
-      {!list.data && !list.error && <p role="status">Загружаем предложения…</p>}
-      {list.data?.items.length === 0 && (
+      {!visibleData && !list.error && <p role="status">Загружаем предложения…</p>}
+      {visibleData?.items.length === 0 && (
         <p className="text-sm opacity-70">Предложений пока нет.</p>
       )}
-      {list.data?.items.map((item) => (
+      {visibleData?.items.map((item) => (
         <article
           key={item.id}
           className="min-w-0 rounded-lg border p-4 space-y-3"
@@ -225,7 +253,7 @@ export function OperatorRequests({
                 </button>
               </>
             )}
-            {item.status === "accepted" && (
+            {item.status === "accepted" && item.id !== refusedRequestId && (
               <>
                 {!workspaceId && (
                   <button
@@ -278,9 +306,9 @@ export function OperatorRequests({
               </>
             )}
           </div>
-          {item.status === "accepted" && openRequest === item.id && (
+          {item.status === "accepted" && item.id !== refusedRequestId && openRequest === item.id && (
             <OperatorLeads
-              key={item.id}
+              key={`${item.id}:leads`}
               actorId={actorId}
               isSessionCurrent={isSessionCurrent}
               requestId={item.id}
@@ -289,10 +317,10 @@ export function OperatorRequests({
               onAccessDenied={workspaceId ? undefined : invalidateAccess}
             />
           )}
-          {!workspaceId && item.status === "accepted" && openCatalog === item.id && (
-            <OperatorServiceCatalog key={item.id} requestId={item.id} onAccessDenied={invalidateAccess} />
+          {!workspaceId && item.status === "accepted" && item.id !== refusedRequestId && openCatalog === item.id && (
+            <OperatorServiceCatalog key={`${item.id}:catalog`} requestId={item.id} onAccessDenied={invalidateAccess} />
           )}
-          {item.status === "accepted" && openArrivals === item.id && (
+          {item.status === "accepted" && item.id !== refusedRequestId && openArrivals === item.id && (
             <OperatorArrivals
               key={`${item.id}:arrivals`}
               actorId={actorId}

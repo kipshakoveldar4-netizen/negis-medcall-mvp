@@ -155,7 +155,7 @@ before changing a shared database, cloud worker or working credentials.
 2. Service settings → **Root Directory**: `artifacts/video-worker`. Railway picks up the `Dockerfile` there (it installs ffmpeg — do not switch to plain Nixpacks Node without adding ffmpeg).
    The package is fully standalone: its `tsconfig.json` inlines all compiler options and it must never reference the repo root (`tsconfig.base.json`, `workspace:`/`catalog:` deps) — the Docker build context contains only `package.json`, `tsconfig.json`, and `src/`.
 3. Variables: set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (plus any `VIDEO_WORKER_*` overrides).
-4. Start command: none needed — the image `CMD` is `npm start`.
+4. Start command: none needed — the image `CMD` runs `node dist/index.js` directly.
 5. Deploy. Logs show `[video-worker] started as ...`; the worker logs only job ids, statuses, and byte sizes — never URLs or credentials.
 6. Keep one instance until failover/requeue and orphan retention are accepted.
 
@@ -170,6 +170,33 @@ before changing a shared database, cloud worker or working credentials.
 - Jobs stay `queued`: worker not running or `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` missing; check Railway logs for `[video-worker] started`.
 
 ## Security
+
+### Local process-hardening candidate, 25 October 2026
+
+The runtime Docker stage now contains only compiled code and production
+dependencies, runs as `node`, and makes `/app` non-writable. This source change
+has not been built or accepted on a Linux/container host. It retains the
+existing base tag and package installation contract; it is not an image-version
+or dependency-vulnerability acceptance.
+
+Each decoder/probe invocation has a fresh private cwd/HOME/cache/temp tree,
+an allowlisted environment, no shell, separate 256 KiB stdout/stderr limits and
+a bounded deadline. Local input/output paths are resolved before changing cwd.
+On POSIX the invocation owns a detached process group; group termination also
+covers descendants after the direct child exits. Windows terminates only the
+direct child: no process-tree containment is claimed there.
+
+Cleanup checks canonical path, non-link directory identity and
+`dev/ino/birthtimeNs` before launch and before every removal attempt. Actual
+Windows junction/rename/replacement tests preserved an external synthetic
+canary. The targeted local set passed **78/78** using local processes/media,
+without a queue processor, cloud credentials, Docker build or external provider.
+
+This is not atomic openat-style filesystem protection against same-UID native
+code execution. HOME separation does not prevent absolute-path, network,
+RAM/disk or secret access. Read-only filesystem, resource/PID quotas, network
+restrictions, seccomp/capabilities and the actual Linux decoder/runtime remain
+separate deployment gates. Do not enable a working worker on this evidence alone.
 
 - The service role key belongs only in approved server environments, never in
   `artifacts/negis` or browser requests (enforced by a smoke test).

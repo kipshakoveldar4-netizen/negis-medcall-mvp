@@ -427,6 +427,20 @@ const RPC_ONLY_TABLES = new Map<string, ReceiptReview>([
       { name: "abandon_platform_subscription_operation", args: ["uuid", "uuid", "uuid"] },
     ],
   }],
+  ["content_telegram_delivery_guards", {
+    migration: "097_content_telegram_delivery_admission.sql",
+    functions: [{ name: "admit_content_telegram_delivery", args:
+      ["uuid", "uuid", "uuid", "uuid", "timestamp with time zone", "text", "uuid", "text", "jsonb"] }],
+  }],
+  ["content_telegram_deliveries", {
+    migration: "097_content_telegram_delivery_admission.sql",
+    functions: [
+      { name: "admit_content_telegram_delivery", args:
+        ["uuid", "uuid", "uuid", "uuid", "timestamp with time zone", "text", "uuid", "text", "jsonb"] },
+      { name: "advance_content_telegram_delivery", args:
+        ["uuid", "uuid", "uuid", "uuid", "timestamp with time zone", "text", "uuid", "integer", "text", "text"] },
+    ],
+  }],
   ["crm_site_consent_receipts", {
     migration: "093_site_consent_receipts.sql",
     readOnly: true,
@@ -589,11 +603,13 @@ for (const [table, review] of RPC_ONLY_TABLES) {
     const source = migrations.get(review.migration)!;
     assert.doesNotThrow(() => assertPrivateReceipt(migrations, table), "negative fixtures require a valid baseline");
     for (const [from, to] of [
-      ["enable row level security", "disable row level security"],
+      [`alter table public.${table} enable row level security`, `alter table public.${table} disable row level security`],
       ["security definer", "security invoker"],
       [source.includes("security definer set search_path = ''") ? "security definer set search_path = ''" : "security definer set search_path=''",
         "security definer set search_path=public"],
-      [`revoke all on public.${table}`, `grant select on public.${table}`],
+      [source.includes(`revoke all on public.${table}`) ? `revoke all on public.${table}`
+        : "revoke all on public.content_telegram_deliveries,public.content_telegram_delivery_guards",
+        `grant select on public.${table}`],
       [`grant execute on function public.${review.functions[0].name}`, `revoke execute on function public.${review.functions[0].name}`],
     ]) {
       assert.ok(source.includes(from), "each mutation must change the current migration");

@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { KeyRound, User, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, verifyCurrentPassword } from '@/lib/supabase';
+import { profileSessionIdentity, updateProfileForSession } from '@/lib/profileSession';
 import { PASSWORD_RULE_HINT, validatePasswordRules } from '../../../../../lib/auth/password-rules';
 import { PushSettings } from './PushSettings';
 import { isSyntheticEmail, loginFromEmail } from '../../../../../lib/auth/staff-logins';
@@ -57,13 +59,72 @@ function authErrorText(message: string): string {
   return 'Не удалось сохранить — попробуйте ещё раз.';
 }
 
+function clearPasswordInputs(element: HTMLDivElement | null) {
+  element?.querySelectorAll<HTMLInputElement>('input[type="password"]').forEach(input => {
+    input.value = ''; input.defaultValue = ''; input.removeAttribute('value');
+  });
+}
+
 export function ProfileDialog({ onClose }: ProfileDialogProps) {
-  const { user, session, isImpersonation, isDemoMode } = useAuth();
+  const { user, session, isImpersonation, isDemoMode, isSigningOut, applyConfirmedProfile } = useAuth();
   const [fullName, setFullName] = useState(user?.user_metadata?.full_name ?? '');
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [repeatPassword, setRepeatPassword] = useState('');
   const [saving, setSaving] = useState(false);
+  const [, setSessionRevision] = useState(0);
+  const root = useRef<HTMLDivElement>(null);
+  const connectRoot = useRef((element: HTMLDivElement | null) => {
+    // A context-change render can remove the form before layout effects run.
+    // Clear its owned controls at detachment, while the DOM reference exists.
+    if (root.current !== element) clearPasswordInputs(root.current);
+    root.current = element;
+  });
+  const contextKey = JSON.stringify([user?.id, user?.email, profileSessionIdentity(session), isImpersonation, isDemoMode, isSigningOut]);
+  const lifetime = useRef({ key: contextKey, mounted: false, invalidated: false, closed: false,
+    sdkIdentity: profileSessionIdentity(session), sdkToken: session?.access_token });
+  const pending = useRef<{ abort: AbortController } | null>(null);
+  if (lifetime.current.key !== contextKey) {
+    lifetime.current.invalidated = true;
+    pending.current?.abort.abort();
+  }
+  const isCurrent = () => lifetime.current.mounted && !lifetime.current.invalidated
+    && lifetime.current.key === contextKey && !isSigningOut;
+  const clearSecrets = () => {
+    setCurrentPassword(''); setNewPassword(''); setRepeatPassword('');
+    clearPasswordInputs(root.current);
+  };
+  const invalidate = () => {
+    lifetime.current.invalidated = true;
+    pending.current?.abort.abort();
+    pending.current = null;
+    clearSecrets(); setFullName(''); setSaving(false); setSessionRevision(value => value + 1);
+    if (!lifetime.current.closed) { lifetime.current.closed = true; onClose(); }
+  };
+  useLayoutEffect(() => {
+    lifetime.current.mounted = true;
+    return () => {
+      lifetime.current.mounted = false;
+      pending.current?.abort.abort(); pending.current = null;
+      clearPasswordInputs(root.current);
+    };
+  }, []);
+  useLayoutEffect(() => {
+    let active = true;
+    const subscription = supabase.auth.onAuthStateChange((event, next) => {
+      if (!active || !lifetime.current.mounted) return;
+      const identity = profileSessionIdentity(next);
+      const replacedWithoutIdentity = event === 'SIGNED_IN' && identity === next?.user.id
+        && next?.access_token !== lifetime.current.sdkToken;
+      if (identity !== lifetime.current.sdkIdentity || replacedWithoutIdentity) invalidate();
+      lifetime.current.sdkIdentity = identity;
+      lifetime.current.sdkToken = next?.access_token;
+    }).data.subscription;
+    return () => { active = false; subscription.unsubscribe(); };
+  }, []);
+  useLayoutEffect(() => {
+    if (lifetime.current.invalidated) invalidate();
+  }, [contextKey]);
 
   const email = user?.email ?? '';
   // У входа по логину почты нет: показывать служебный адрес нельзя (человек
@@ -75,25 +136,28 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
 
   // Настоящая своя сессия Supabase — единственное, что даёт право писать в этот
   // аккаунт. В демо-режиме её нет, под имперсонацией она чужая.
-  const canEditAccount = Boolean(session?.user?.id) && !isImpersonation && !isDemoMode;
+  const canEditAccount = Boolean(session?.user?.id) && !isImpersonation && !isDemoMode
+    && session?.user.id === user?.id && !isSigningOut;
   const canChangePassword = canEditAccount && Boolean(email);
   const blockedReason = isImpersonation
     ? 'Вы вошли как владелец клиники по ссылке из панели платформы. Его профиль и пароль меняет он сам в своём кабинете.'
     : 'Профиль доступен после обычного входа по почте и паролю.';
 
   const close = () => {
-    // Во время записи закрывать нельзя: сохранение — три обращения к сети
+    // Во время записи закрывать нельзя: сохранение — несколько обращений к сети
     // подряд, и человек, тапнувший «Отмена» на медленной связи, уходил
     // уверенным, что отменил, а пароль тем временем менялся.
+    if (!isCurrent() || pending.current) return;
     if (saving) return;
-    setCurrentPassword('');
-    setNewPassword('');
-    setRepeatPassword('');
+    lifetime.current.invalidated = true;
+    clearSecrets();
     onClose();
   };
 
   const save = async () => {
+    if (!isCurrent()) return;
     if (!canEditAccount) { toast.error(blockedReason); return; }
+    if (pending.current || !user?.id || session?.user.id !== user.id) return;
 
     const name = fullName.trim();
     if (!name) { toast.error('Введите имя'); return; }
@@ -117,10 +181,16 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
       if (newPassword === currentPassword) { toast.error('Новый пароль совпадает со старым'); return; }
     }
 
+    const operation = { abort: new AbortController() };
+    const sourceSession = session && { access_token: session.access_token, refresh_token: session.refresh_token, user: session.user };
+    if (!sourceSession) return;
+    pending.current = operation;
+    const operationCurrent = () => isCurrent() && pending.current === operation && !operation.abort.signal.aborted;
     setSaving(true);
     try {
       if (wantsPasswordChange) {
         const check = await verifyCurrentPassword(email, currentPassword);
+        if (!operationCurrent()) return;
         if (check === 'wrong') { toast.error('Текущий пароль неверный'); return; }
         if (check === 'unavailable') {
           // Сеть, 429 или сбой сервера — это НЕ «пароль неверный». Ложный
@@ -132,22 +202,35 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
 
       const updates: { data?: { full_name: string }; password?: string } = { data: { full_name: name } };
       if (wantsPasswordChange) updates.password = newPassword;
-      const { error } = await supabase.auth.updateUser(updates);
-      if (error) throw error;
+      const confirmed = await updateProfileForSession(sourceSession, updates, operationCurrent, operation.abort.signal);
+      if (!operationCurrent()) return;
+      // Commit the metadata-only update while this dialog still owns its guard;
+      // closing/unmounting below must not turn a queued update into a late write.
+      flushSync(() => applyConfirmedProfile(confirmed, operationCurrent));
+      if (!operationCurrent()) return;
 
       toast.success(wantsPasswordChange ? 'Пароль изменён — входите с новым' : 'Имя сохранено');
+      clearSecrets();
       setSaving(false);
-      close();
+      pending.current = null;
+      lifetime.current.invalidated = true;
+      onClose();
       return;
     } catch (error: unknown) {
-      toast.error(authErrorText(error instanceof Error ? error.message : ''));
+      if (operationCurrent()) toast.error(authErrorText(error instanceof Error ? error.message : ''));
     } finally {
-      setSaving(false);
+      const current = operationCurrent();
+      if (pending.current === operation) pending.current = null;
+      sourceSession.access_token = ''; sourceSession.refresh_token = '';
+      if (current) { clearSecrets(); setSaving(false); }
     }
   };
 
+  if (lifetime.current.invalidated) return null;
+
   return (
     <div
+      ref={connectRoot.current}
       className="fixed inset-0 z-[80] flex items-center justify-center p-4"
       style={{ background: 'rgba(17, 24, 39, 0.4)' }}
       onClick={event => { if (event.target === event.currentTarget) close(); }}
@@ -194,7 +277,8 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
                 className="neu-input"
                 placeholder="Ваше имя"
                 value={fullName}
-                onChange={event => setFullName(event.target.value)}
+                disabled={saving}
+                onChange={event => { if (isCurrent() && !pending.current) setFullName(event.target.value); }}
               />
               {/* Честно: это имя видит только сам человек. В списке сотрудников,
                   в записях и в отчётах стоит staff_users.full_name, и правит
@@ -229,7 +313,8 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
                       className="neu-input"
                       placeholder="Тот, которым вы вошли"
                       value={currentPassword}
-                      onChange={event => setCurrentPassword(event.target.value)}
+                      disabled={saving}
+                      onChange={event => { if (isCurrent() && !pending.current) setCurrentPassword(event.target.value); }}
                     />
                   </div>
                   <div>
@@ -243,7 +328,8 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
                       className="neu-input"
                       placeholder="Оставьте пустым, чтобы не менять"
                       value={newPassword}
-                      onChange={event => setNewPassword(event.target.value)}
+                      disabled={saving}
+                      onChange={event => { if (isCurrent() && !pending.current) setNewPassword(event.target.value); }}
                     />
                     <p className="mt-1 text-[11px]" style={{ color: 'var(--negis-muted)' }}>{PASSWORD_RULE_HINT}</p>
                     {withoutMailbox && (
@@ -263,7 +349,8 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
                       className="neu-input"
                       placeholder="Ещё раз"
                       value={repeatPassword}
-                      onChange={event => setRepeatPassword(event.target.value)}
+                      disabled={saving}
+                      onChange={event => { if (isCurrent() && !pending.current) setRepeatPassword(event.target.value); }}
                     />
                   </div>
                 </div>

@@ -2760,11 +2760,12 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
           return;
         }
       }
+      const testRequestId = test ? crypto.randomUUID() : undefined;
       const response = await crmFetch(`/api/content-studio/send-telegram?workspaceId=${encodeURIComponent(workspaceId)}`, {
         expectedUserId: actorId, dispatchGuard: () => isLibraryWriteCurrent(write), signal: write.session.signal,
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(test ? { test: true } : active),
+        body: JSON.stringify(test ? { test: true, testRequestId } : active),
       });
       if (handoffAccessDenied(response)) {
         if (receipt) releaseUnsentTelegramDelivery(window.localStorage, receipt);

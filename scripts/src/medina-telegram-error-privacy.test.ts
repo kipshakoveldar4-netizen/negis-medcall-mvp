@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Script } from "node:vm";
+import { controllerActor, telegramControllerRpcFixture } from "./telegram-controller-rpc.fixture";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const apiPath = "api/content-studio/[...path].ts";
@@ -16,7 +17,7 @@ const baselineSource = baselineRef
   : undefined;
 const markers = {
   token: "SYNTHETIC_NOT_A_REAL_BOT_TOKEN_PRIVACY_714",
-  chat: "SYNTHETIC_PRIVATE_CHAT_ID_PRIVACY_714",
+  chat: "-1000000000714",
   customer: "SYNTHETIC_CUSTOMER_TEXT_PRIVACY_714",
   echo: "SYNTHETIC_ARBITRARY_REQUEST_ECHO_PRIVACY_714",
 };
@@ -76,6 +77,7 @@ async function localFunctions(dependencies: Record<string, unknown>): Promise<Se
   }).outputText;
   const exported: { selected?: Selected } = {};
   new Script(compiled, { filename: "telegram-error-privacy.fixture.cjs" }).runInNewContext({
+    ...telegramControllerRpcFixture(),
     ...dependencies,
     // Injected fetch/body failures must take the actual instanceof Error branch in the VM.
     Error,
@@ -83,7 +85,9 @@ async function localFunctions(dependencies: Record<string, unknown>): Promise<Se
     process: { env: Object.freeze({ TELEGRAM_BOT_TOKEN: markers.token, TELEGRAM_CHAT_ID: markers.chat }) },
   }, { timeout: 1000 });
   assert.equal(typeof exported.selected?.handleSendTelegram, "function");
-  return exported.selected!;
+  const selected = exported.selected!;
+  return { ...selected, handleSendTelegram: (req, res, context) =>
+    selected.handleSendTelegram(req, res, { ...controllerActor, ...context }) };
 }
 
 function acknowledgement(call: Call) {

@@ -395,9 +395,15 @@ test("SC9 свой пароль меняют, предъявив текущий,
 
   // Порядок обязателен: сначала проверка текущего пароля, потом запись нового.
   const checkAt = dialog.indexOf("await verifyCurrentPassword(");
-  const updateAt = dialog.indexOf("supabase.auth.updateUser");
+  const updateAt = dialog.indexOf("await updateProfileForSession(");
   assert.ok(checkAt > 0, "текущий пароль проверяется");
   assert.ok(updateAt > checkAt, "проверка идёт ДО записи нового пароля");
+  assert.ok(!dialog.includes("supabase.auth.updateUser"), "глобальный SDK не выбирает аккаунт после асинхронного ожидания");
+  const boundSession = stripComments(await readFile(path.join(repoRoot, "artifacts", "negis", "src", "lib", "profileSession.ts"), "utf8"));
+  assert.ok(boundSession.includes("new AuthClient("), "обновление использует изолированный публичный SDK");
+  assert.ok(boundSession.includes("persistSession: false"), "обновление не подменяет сохранённый вход");
+  assert.ok(boundSession.includes("bound.data.user?.id !== actor"), "исходная личность проверяется перед обновлением");
+  assert.ok(boundSession.includes("return transport(input,"), "ограниченный транспорт проверяет принадлежность прямо перед отправкой");
   assert.ok(/if \(!currentPassword\)/.test(dialog), "без текущего пароля смена не начинается");
   assert.ok(/newPassword !== repeatPassword/.test(dialog), "опечатка в новом пароле — потерянный доступ, поэтому повтор");
 

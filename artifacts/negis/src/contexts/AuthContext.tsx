@@ -99,6 +99,8 @@ interface AuthContextType {
   selectWorkspace: (workspaceId: string) => void;
   /** Drops the current choice and returns the user to the picker. */
   clearWorkspaceSelection: () => void;
+  /** Apply only the confirmed display name; never replace an SDK session. */
+  applyConfirmedProfile: (confirmed: Pick<User, 'id' | 'user_metadata'>, isCurrent: () => boolean) => void;
   signOut: () => Promise<void>;
 }
 
@@ -317,8 +319,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const authRevisionRef = useRef(0);
   const authSignOutRevisionRef = useRef(getSignOutRevision());
   const authIdentityRef = useRef<string | null>(null);
+  const profileSubjectRevisionRef = useRef(0);
+  const profileSubjectRevision = profileSubjectRevisionRef.current;
   const mountedRef = useRef(true);
   const signOutRequestRef = useRef<Promise<void> | null>(null);
+  const profileContextRef = useRef({ userId: user?.id, sessionUserId: session?.user.id,
+    isImpersonation, isDemoMode, isSigningOut });
+  profileContextRef.current = { userId: user?.id, sessionUserId: session?.user.id,
+    isImpersonation, isDemoMode, isSigningOut };
   useEffect(() => {
     userRef.current = user;
   }, [user]);
@@ -343,6 +351,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     && authSignOutRevisionRef.current === getSignOutRevision()
     && authIdentityRef.current === userId && authRevisionRef.current === revision;
 
+  const applyConfirmedProfile: AuthContextType['applyConfirmedProfile'] = (confirmed, callerIsCurrent) => {
+    const subject = user?.id;
+    const revision = authRevisionRef.current;
+    const fullName = confirmed.user_metadata?.full_name;
+    const canApply = () => {
+      const context = profileContextRef.current;
+      return typeof subject === 'string' && Boolean(subject) && confirmed.id === subject && typeof fullName === 'string'
+        && profileSubjectRevisionRef.current === profileSubjectRevision
+        && isCurrentAuthResolution(subject, revision) && userRef.current?.id === subject
+        && context.userId === subject && context.sessionUserId === subject
+        && !context.isImpersonation && !context.isDemoMode && !context.isSigningOut
+        && !loadStoredImpersonation() && !loadStoredDemoAuth() && callerIsCurrent();
+    };
+    if (!canApply()) return;
+    setUser(previous => {
+      // React may process or replay this update after an account/epoch change.
+      if (!previous || !canApply() || previous.id !== subject) return previous;
+      return { ...previous, user_metadata: { ...previous.user_metadata, full_name: fullName } };
+    });
+  };
+
+  const applyResolvedUser = (resolved: User) => {
+    const revision = authRevisionRef.current;
+    setUser(previous => {
+      if (!isCurrentAuthResolution(resolved.id, revision)) return previous;
+      // A membership read carries the SDK user from when it started. A local
+      // confirmed name may have committed since, without changing that session.
+      const fullName = previous?.id === resolved.id ? previous.user_metadata?.full_name : undefined;
+      return typeof fullName === 'string' && previous !== resolved
+        ? { ...resolved, user_metadata: { ...resolved.user_metadata, full_name: fullName } }
+        : resolved;
+    });
+  };
+
   const beginAuthResolution = (nextUser: User | null) => {
     const nextId = nextUser?.id ?? null;
     const changed = authIdentityRef.current !== nextId;
@@ -351,6 +393,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     userRef.current = nextUser;
     const revision = ++authRevisionRef.current;
     if (changed || !nextUser) {
+      profileSubjectRevisionRef.current++;
       clearCrmCache();
       clearListReadCache();
       membershipsRef.current = [];
@@ -544,7 +587,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setVertical(selected.vertical);
     setWorkspacePurpose(selected.purpose);
     setRolePermissions(routePermissionsForStaffRole(role));
-    setUser(supabaseUser);
+    applyResolvedUser(supabaseUser);
     setAvailableWorkspaces(toWorkspaceChoices(memberships));
   };
 
@@ -611,7 +654,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // one, and neither do we. Selection-1: the list is published so the user
       // can, which is what `requiresWorkspaceSelection` has been asking for.
       rememberSelector(null);
-      setUser(supabaseUser);
+      applyResolvedUser(supabaseUser);
       setAvailableWorkspaces(toWorkspaceChoices(memberships));
       return false;
     }
@@ -1003,6 +1046,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       isImpersonation, isDemoMode, isStaffMode, impersonationClinicName, vertical,
       workspacePurpose,
       availableWorkspaces, selectWorkspace, clearWorkspaceSelection,
+      applyConfirmedProfile,
       signOut,
     }}>
       {children}

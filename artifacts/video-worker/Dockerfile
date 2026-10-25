@@ -1,6 +1,12 @@
-# Video optimization worker for Railway (or any Docker host).
-# ffmpeg must be present in the image — the worker shells out to it.
-FROM node:20-slim
+# Standalone build; application sources and dev dependencies stay in this stage.
+FROM node:20-slim AS build
+
+WORKDIR /app
+COPY package.json tsconfig.json ./
+COPY src ./src
+RUN npm install && npm run build && npm prune --omit=dev
+
+FROM node:20-slim AS runtime
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ffmpeg \
@@ -8,12 +14,14 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY package.json tsconfig.json ./
-COPY src ./src
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+RUN chmod -R a-w /app
 
-# Self-contained build: no workspace/catalog dependencies, plain npm works.
-RUN npm install && npm run build && npm prune --omit=dev
+ENV NODE_ENV=production HOME=/tmp TMPDIR=/tmp
+USER node
 
-ENV NODE_ENV=production
-
-CMD ["npm", "start"]
+# cgroup/CPU/PID/disk/network/seccomp limits must be supplied and verified by
+# the host. USER and read-only app files alone are not a decoder sandbox.
+CMD ["node", "dist/index.js"]

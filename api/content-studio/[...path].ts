@@ -61,6 +61,13 @@ import {
   type PrivateRouteAuthorization,
 } from "../../lib/auth/route-guard";
 import { requireWorkspaceAccess, WorkspaceAdminAuthError, type WorkspaceAccessContext } from "../../lib/auth/server";
+import {
+  acknowledgeTelegramDeliveryPart,
+  admitTelegramDelivery,
+  beginTelegramDeliveryPart,
+  TelegramDeliveryError,
+  telegramDeliveryHash,
+} from "../../lib/crm/telegram-delivery";
 
 // Security-2D — Content Studio is a private workspace surface.
 //
@@ -395,7 +402,9 @@ async function sendTelegramMessage(input: {
     && Number.isSafeInteger(message.message_id) && Number(message.message_id) > 0
     && Number.isSafeInteger(message.date) && Number(message.date) >= 0
     && Number.isSafeInteger(chat.id) && Number(chat.id) !== 0
-    && typeof message.text === "string" && Boolean(message.text.trim());
+    && typeof message.text === "string" && message.text === input.text
+    && (String(chat.id) === input.chatId || (input.chatId.startsWith("@") && typeof chat.username === "string"
+      && `@${chat.username}`.toLowerCase() === input.chatId.toLowerCase()));
   const description =
     typeof body.description === "string" && body.description.trim() ? body.description
       : body.raw ? "Telegram returned a non-JSON response body."
@@ -416,6 +425,7 @@ async function sendTelegramMessage(input: {
   return {
     success: true as const,
     status: response.status,
+    acknowledgement: telegramDeliveryHash(JSON.stringify(["telegram-ack-v1", chat!.id, message!.message_id])),
   };
 }
 
@@ -758,16 +768,19 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse, conte
   try {
     const safeFetch = fetch as unknown as TelegramFetch;
     const chunks = splitTelegramMessage(messageText);
+    const parts = chunks.map((chunk, index) => chunks.length > 1
+      ? `SAAF Content Studio — пакет ролика, часть ${index + 1}/${chunks.length}\n\n${chunk}` : chunk);
+    const delivery = await admitTelegramDelivery({
+      actor: context, payload, isTest, packageText: messageText, parts, token, chatId,
+    });
 
-    for (let index = 0; index < chunks.length; index += 1) {
-      const chunk = chunks[index];
-      const text =
-        chunks.length > 1 ? `SAAF Content Studio — пакет ролика, часть ${index + 1}/${chunks.length}\n\n${chunk}` : chunk;
+    for (let index = 0; !delivery.replayed && index < parts.length; index += 1) {
+      await beginTelegramDeliveryPart(delivery, index);
       const result = await sendTelegramMessage({
         safeFetch,
         token,
         chatId,
-        text,
+        text: parts[index]!,
       });
 
       if (!result.success) {
@@ -787,6 +800,7 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse, conte
           hint: result.hint,
         });
       }
+      await acknowledgeTelegramDeliveryPart(delivery, index, result.acknowledgement);
     }
 
     let statusPersisted: boolean | undefined;
@@ -809,10 +823,20 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse, conte
         packageText: messageText,
         test: isTest,
         parts: chunks.length,
+        replayed: delivery.replayed,
+        ...(isTest ? { testRequestId: delivery.videoId } : {}),
         ...(statusPersisted !== undefined ? { statusPersisted } : {}),
       },
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof TelegramDeliveryError) {
+      return sendJson(res, error.status, {
+        success: false,
+        error: "Доставка Telegram не подтверждена",
+        code: error.code,
+        details: ["Повторная отправка заблокирована. Обновите библиотеку и проверьте Telegram; не повторяйте отправку ради статуса."],
+      });
+    }
     return sendJson(res, 502, {
       success: false,
       error: "Telegram network error",

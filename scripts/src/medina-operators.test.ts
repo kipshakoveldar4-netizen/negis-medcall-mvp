@@ -189,6 +189,9 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
       },
       rpc(name: string, args: Row) {
         rpcCalls.push({ name, args });
+        if (!rpcFailure && name === "transition_clinic_operator_request"
+          && !tables.growth_operator_requests.some(row => row.id === args.p_request_id && row.workspace_id === args.p_workspace_id))
+          return Promise.resolve({ data: null, error: { code: "P9603", message: "private-db-detail" } });
         if (pipelineMissing && name === "read_growth_operator_lead_pipeline")
           return Promise.resolve({data:null,error:{code:"PGRST202",message:"private-db-detail"}});
         return Promise.resolve({ data: rpcData, error: rpcFailure ? { code: rpcFailure, message: rpcMessage, ...rpcErrorFields } : null });
@@ -397,20 +400,15 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
           currency: "USD",
         });
         assert.equal(res.statusCode, 201);
-        assert.deepEqual(log.find((row) => row.op === "insert")?.values, {
-          workspace_id: WORKSPACE,
-          requested_by_staff_user_id: "staff",
-          operator_id: OPERATOR,
-          clinic_brief: "Описание",
-          price_per_arrival_minor: "150000",
-          currency: "KZT",
-          lead_scope: "assigned",
-          status: "requested",
-        });
+        assert.deepEqual(rpcCalls, [{ name: "create_clinic_operator_request", args: {
+          p_workspace_id: WORKSPACE, p_staff_user_id: "staff", p_auth_user_id: USER,
+          p_operator_id: OPERATOR, p_clinic_brief: "Описание", p_price_minor: "150000", p_lead_scope: "assigned",
+        } }]);
+        assert.ok(!log.some(row => row.table === "growth_operator_requests" && row.op !== "select"));
       },
     );
     await t.test(
-      "unsafe and malformed amounts rejected before insert",
+      "unsafe and malformed amounts rejected before mutation RPC",
       async () => {
         reset();
         for (const amount of ["1.5", "-1", "NaN", "9007199254740992", ""])
@@ -425,6 +423,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
             400,
           );
         assert.ok(!log.some((row) => row.op === "insert"));
+        assert.equal(rpcCalls.length, 0);
       },
     );
     await t.test("clinic chooses either scope, never an unknown or array scope", async () => {
@@ -434,7 +433,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
           operatorId: OPERATOR, clinicBrief: "Описание", pricePerArrivalMinor: "150000", leadScope: scope,
         });
         assert.equal(res.statusCode, typeof scope === "string" && scope !== "all" ? 201 : 400);
-        if (res.statusCode === 201) assert.equal(log.find(r => r.op === "insert")?.values?.lead_scope, scope);
+        if (res.statusCode === 201) assert.equal(rpcCalls[0]?.args.p_lead_scope, scope);
       }
     });
     await t.test("operator leads use only verified identity and agreement, never supplied workspace or user", async () => {
@@ -589,8 +588,8 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
         );
         assert.deepEqual(rpcCalls, [
           {
-            name: "accept_growth_operator_request",
-            args: { p_request_id: REQUEST, p_operator_user_id: USER },
+            name: "transition_growth_operator_request",
+            args: { p_request_id: REQUEST, p_operator_user_id: USER, p_action: "accept" },
           },
         ]);
         assert.ok(
@@ -626,12 +625,13 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
               action: "withdraw",
             })
           ).statusCode,
-          409,
+          404,
         );
-        assert.equal(
-          log.find((row) => row.op === "update")?.filters.workspace_id,
-          WORKSPACE,
-        );
+        assert.deepEqual(rpcCalls, [{ name: "transition_clinic_operator_request", args: {
+          p_workspace_id: WORKSPACE, p_staff_user_id: "staff", p_auth_user_id: USER,
+          p_request_id: REQUEST, p_action: "withdraw",
+        } }]);
+        assert.ok(!log.some(row => row.op === "update"));
       },
     );
     await t.test(
@@ -649,12 +649,10 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
           ).statusCode,
           200,
         );
-        const write = log.find((row) => row.op === "update")!;
-        assert.equal(write.filters.status, "accepted");
-        assert.deepEqual(Object.keys(write.values!).sort(), [
-          "ended_at",
-          "status",
-        ]);
+        assert.deepEqual(rpcCalls, [{ name: "transition_growth_operator_request", args: {
+          p_request_id: REQUEST, p_operator_user_id: USER, p_action: "end",
+        } }]);
+        assert.ok(!log.some(row => row.op === "update"));
       },
     );
     await t.test(
@@ -1270,7 +1268,7 @@ test("operator catalog UI is read-only, scoped to accepted operator requests and
   assert.match(ui, /window.addEventListener\("focus", list.refresh\)/);
   assert.match(ui, /key=\{`\$\{requestId\}:\$\{doctor.id\}`\}/);
   assert.doesNotMatch(ui, /localStorage|sessionStorage|<input|operatorApi\(|meta-launch/);
-  assert.match(requests, /!workspaceId && item.status === "accepted" && openCatalog === item.id/);
+  assert.match(requests, /!workspaceId && item.status === "accepted" && item.id !== refusedRequestId && openCatalog === item.id/);
   const server = await read("lib/crm/operator-services.ts");
   assert.doesNotMatch(server, /\.insert\(|\.update\(|\.delete\(|\.rpc\(/);
   assert.match(server, /requireAuthenticatedUser/);
@@ -1327,7 +1325,7 @@ test("operator entry, clinic and platform controls stay distinct", async () => {
     backend,
     /localStorage|launchMeta|meta_campaign_launches|from\("clients"\)|from\("leads"\)/,
   );
-  assert.match(backend, /accept_growth_operator_request/);
+  assert.match(backend, /transition_growth_operator_request/);
 });
 
 test("operator contact UI uses explicit scope and guarded stage writes without general CRM editing", async () => {
@@ -1374,7 +1372,7 @@ test("arrival UI separates clinic confirmation from operator control calls", asy
   const backend = await read("lib/crm/operator-arrivals.ts");
   assert.match(
     requests,
-    /item\.status === "accepted" && openArrivals === item\.id/,
+    /item\.status === "accepted" && item\.id !== refusedRequestId && openArrivals === item\.id/,
   );
   assert.match(requests, /Подтвердить приходы/);
   assert.match(requests, /Приходы и звонки/);

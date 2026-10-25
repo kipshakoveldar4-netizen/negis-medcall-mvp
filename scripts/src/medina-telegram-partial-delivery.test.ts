@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Script } from "node:vm";
+import { controllerActor, telegramControllerRpcFixture } from "./telegram-controller-rpc.fixture";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -48,12 +49,14 @@ async function localHandler(dependencies: Record<string, unknown>, env: Record<s
   }).outputText;
   const exported: { selected?: TelegramHandler } = {};
   new Script(compiled, { filename: "telegram-partial-delivery.fixture.cjs" }).runInNewContext({
+    ...telegramControllerRpcFixture(),
     ...dependencies,
     exports: exported,
     process: { env: Object.freeze({ ...env }) },
   }, { timeout: 1000 });
   assert.equal(typeof exported.selected, "function");
-  return exported.selected!;
+  const actual = exported.selected!;
+  return (req, res, context) => actual(req, res, { ...controllerActor, ...context });
 }
 
 for (const isTest of [false, true]) {
@@ -148,6 +151,7 @@ test("G5C14 server stops after part 2/3 fails without retry, status writes or a 
     script: "B".repeat(3200),
     caption: "C".repeat(3200),
     videoId: "33333333-3333-4333-8333-333333333333",
+    expectedUpdatedAt: "2026-10-24T08:00:00.123456+00:00",
   };
   const work = handler({ body }, response, { workspaceId: "11111111-1111-4111-8111-111111111111" });
   try {
@@ -262,6 +266,11 @@ for (const version of [undefined, "invalid", "2026-10-24T08:00:00.123456+00:00"]
     await handler({ body: { title: "Synthetic CAS conflict", videoId: "33333333-3333-4333-8333-333333333333",
       ...(version === undefined ? {} : { expectedUpdatedAt: version }) } }, response,
     { workspaceId: "11111111-1111-4111-8111-111111111111" });
+    if (version === undefined || version === "invalid") {
+      assert.equal(status, 400); assert.equal(sends, 0);
+      assert.deepEqual(effects, [], "invalid admission must precede any dispatch or status mutation");
+      return;
+    }
     assert.equal(status, 200); assert.equal(sends, 1);
     assert.equal(reply.data.sent, true, "physical delivery remains acknowledged, not a reason to resend");
     assert.equal(reply.data.statusPersisted, false, "no claim that the database accepted readiness");
@@ -283,7 +292,8 @@ test("G5C37 test:true with a legacy videoId never attempts readiness persistence
   });
   let reply: any;
   const response: LocalResponse = { status() { return this; }, setHeader() { return this; }, json(body) { reply = body; } };
-  await handler({ body: { test: true, videoId: "33333333-3333-4333-8333-333333333333" } }, response,
+  await handler({ body: { test: true, testRequestId: "55555555-5555-4555-8555-555555555555",
+    videoId: "33333333-3333-4333-8333-333333333333" } }, response,
     { workspaceId: "11111111-1111-4111-8111-111111111111" });
   assert.equal(sends, 1); assert.equal(reply.data.sent, true); assert.equal(reply.data.test, true);
   assert.equal(Object.hasOwn(reply.data, "statusPersisted"), false);
