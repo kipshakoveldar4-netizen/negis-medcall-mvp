@@ -119,7 +119,9 @@ test("IA6 новая версия не применяется молча", async
 
   // Перезагрузка посреди заполнения карточки стирает несохранённое, поэтому
   // переключение происходит по нажатию человека.
-  assert.ok(/onClick=\{\(\) => waiting\.postMessage\("skip-waiting"\)\}/.test(prompt), "переключает кнопка");
+  assert.ok(prompt.includes("onClick={prompt.apply}"), "переключает действие текущей плашки");
+  assert.ok(prompt.includes('worker.postMessage("skip-waiting")'), "подтверждённое действие отправляет сообщение");
+  assert.ok(prompt.includes("if (requested === controller) { reload(); return; }"), "чужая активация не разрешает автоматическую перезагрузку");
   assert.ok(/event\.data === "skip-waiting"/.test(sw), "и работник ждёт именно этого сообщения");
   assert.ok(!/self\.skipWaiting\(\);\s*\n\s*\}\);\s*\n\s*self\.addEventListener\("install"/.test(sw), "не переключается сам при установке");
 });

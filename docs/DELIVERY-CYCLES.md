@@ -5228,6 +5228,80 @@ gates: точные test-only build/runtime bindings и baseline/ACL, соста
 retention/reconciliation, утверждённые юридические тексты и банковский sandbox.
 Production, Baspana, салоны, WhatsApp, настоящие роли/аккаунты и расходы не менялись.
 
+### Цикл G7-C26: изолированный запуск проверок и обновление PWA — локально, 26 октября
+
+База `41865a8`. Шесть разных выполненных направлений: AI readers, browser/Control
+bindings, site build/runtime gates, старые senders, отдельная карта workers и
+UI обновления PWA. Задача дополнительного read-only аудита остановилась ошибкой
+инструмента; её результат не засчитан и обход не предпринимался. Main подготовил
+и принял новый runner, source snapshot и запрет сети.
+
+- Новый `test:readiness-isolation` не меняет исторический fixture. Проверяет
+  SHA-256 **41** нормализованного исходника от базы цикла и отказывается при
+  drift; это не raw SQL/deployment receipt. Дочерний процесс получает только
+  именованные OS-параметры, test/UTC, same-origin API, loopback targeting и
+  literal false flags. Не наследует известные или неизвестные app variables,
+  HOME/USERPROFILE/APPDATA, NODE_OPTIONS и deployment context. Значения app env
+  не читаются/не печатаются. Omissions объединены, но безопасность обеспечивается
+  allowlist, не списком известных секретов или spread process.env.
+- Preload закрывает fetch, HTTP(S)/HTTP2, TCP/TLS/UDP, DNS, WebSocket и listen.
+  Даже пойманная попытка завершает процесс с exit 86. Выводится только тип и
+  количество, без URL/headers/body. **21/21** проверок профиля/runner охватывают
+  отказ всем маршрутам, no-network positive, credential getter/неизвестный ключ,
+  лишний entrypoint и source drift. Это **Node boundary, не OS sandbox для native
+  children**. Доверенные установленные TS/esbuild преобразуют source в памяти;
+  VM подменяет импорты, SDK/HTTP/native API. Приложение, CLI, worker и sender
+  не запускаются. Требуется имеющийся Node 24 с native TS transform.
+- Настоящие source/config в VM: AI **297/297**, browser/Control **63/63**, site
+  **141/141**, senders **42/42**. Пустой API URL восстанавливает маршрут;
+  browser bindings запекаются отдельно от runtime; literal auto не равен
+  пустому selector; модели по умолчанию не отключают генерацию. Проверены и
+  допустимые вымышленные конфигурации. Source под ожидаемый результат не менялся.
+  Настоящих HTTP, SDK, аккаунтов и provider generation не было.
+- **G4, PWA:** другой tab/controllerchange и первая установка больше не
+  перезагружают CRM сами. После чужой активации предлагается явная перезагрузка;
+  собственное подтверждение связано с ожидаемым worker. Синхронный postMessage
+  failure не оставляет разрешения на будущий reload. Listener-ы и поздний
+  register/update/statechange прекращаются после unmount; update rejection
+  обработан. Приёмка **28/28** исполняет фактический компонент с вымышленными
+  hooks/SW, а не реальный PWA upgrade. Русские labels и stacked mobile button
+  проверены структурно, **не browser pixels/physical device**. Прежние семь IA
+  source/cache/manifest проверок также прошли; IA6 проверяет действие текущей
+  плашки вместо старого inline-handler. Сам service worker не менялся.
+- **Не исправленные здесь условия:** [карта workers](WORKER-ISOLATION-REVIEW-2026-10-26.md)
+  описывает requeue при API false, глобальный claim до bucket validation и
+  malformed Insights restriction, превращающееся в server selection. Это не
+  доказательство обхода HMAC/allowlist или реальной облачной схемы. Требуется
+  решение intended worker scope/off semantics; workers/очереди не трогались.
+  VM отдельно подтвердила: legacy Edge Wazzup matcher с отсутствующим/пустым
+  WAZZUP_CRM_KEY допускает запрос, в отличие от root 503. Это **остаточный риск**,
+  не исправление: WhatsApp source/webhook/рабочее подключение по ограничению
+  не менялись. Их действующая конфигурация не исследовалась.
+
+Общий зарегистрированный clean-env/no-network набор: **599/599**, без skip и
+cancelled. Включает все наборы выше, повторно цифры не суммировать. Первый
+составной прогон не принят: tsx IPC пытался открыть net.createConnection.
+Запрет не ослаблен, pipe-исключения не добавлены; runner перешёл на встроенное
+преобразование TS Node 24.16. Первый scripts typecheck обнаружил два rootDir
+нарушения от typeof import root-сервисов в AI-тесте; main заменил только fixture
+interfaces, не tsconfig/проверяемый runtime. Повторный no-emit typecheck прошёл.
+Дополнительный actual-child тест обнаружил OS-injected USERPROFILE и родственные
+поля Windows даже при явном env. Промежуточные 598/599 не приняты. Preload теперь
+удаляет неразрешённые имена до app/test imports и устанавливает фиксированные
+synthetic flags. Native children этим не изолированы; значения чужих переменных
+не читались/не выводились. Повторная проверка настоящего дочернего Node принята.
+Полный build прошёл: API в двух module-resolution режимах, все workspace
+typecheck, 143 CommonJS cold-start (16+56 normal / 16+55 broken-site) и Vite
+production bundle. Сохранены прежние nonfatal tooltip sourcemap/смешанного
+импорта warnings. Новых зависимостей, установок или lockfile изменений нет.
+
+Это локальная приёмка, не готовность облачного Preview. Реальные build/runtime
+bindings и schema/ACL, Storage/versioning, Linux/native-child sandbox, legacy
+выключение/retention, банковские и юридические gates остаются отдельными.
+059/065 не редактировались; Production, Baspana, салоны, WhatsApp, реклама и
+расходы не менялись. Cloud env, секреты, пользовательские сеансы и документы
+не читались; новый Preview и миграции в облаке не выполнялись.
+
 ### Цикл G2-C13: статус «Отложенные» — готов только локально, 22 октября
 
 - Код/тесты/документация в **9c42ef82f335fc621b8d985325d14d7c889d28f3**.

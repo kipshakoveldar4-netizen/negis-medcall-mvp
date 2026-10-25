@@ -4,6 +4,7 @@
   "packageManager": "pnpm@10.33.2",
   "license": "MIT",
   "scripts": {
+    "test:readiness-isolation": "node scripts/run-readiness-isolation.cjs",
     "test:readiness-workflows": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:readiness-workflows",
     "test:site-deletion-operations": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:site-deletion-operations",
     "test:site-deletion-client": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:site-deletion-client",

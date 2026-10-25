@@ -47,6 +47,25 @@ readers. It did not inspect deployed values/secrets. Old fixture equality and
 blank/PAUSED/off values do not attest current build/runtime DB, sender, provider
 or independent worker isolation. Re-attestation is a release gate.
 
+**G7-C26, 26 October, local base 41865a8:** the separate
+[isolation runner](../scripts/run-readiness-isolation.cjs) now starts only a
+fixed synthetic test list under an OS-only inherited environment and a Node
+no-network preload. Its [41-reader normalized source snapshot](../scripts/fixtures/readiness-isolation-readers.json)
+refuses drift. The combined local suite is **599/599**; it characterizes actual
+AI/browser/site/legacy reader behavior and the PWA update UI without a service
+call. The preload also strips Windows-injected user-profile bindings before
+test imports; an actual child-process check accepted this, not just a map test.
+This is not a deployable env profile, cloud attestation, an OS/native-child
+sandbox or acceptance of every application transport. The old historical
+fixture remains unchanged. See DELIVERY-CYCLES G7-C26 and the separate
+[worker source review](WORKER-ISOLATION-REVIEW-2026-10-26.md).
+
+Newly explicit residuals must not disappear behind green tests: legacy Edge
+Wazzup accepts a missing/empty CRM key; root webhook refuses it. No WhatsApp
+source/connection was changed under this task. Native video scope/off/requeue
+semantics and malformed Insights scope require Main's intended-contract decision
+before any worker test/deployment. Current deployed state was not inspected.
+
 ## Latest Recorded Preview
 
 The latest recorded content/security Preview is **6c11l89kr / f18f411**,

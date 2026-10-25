@@ -15,7 +15,9 @@ import { useEffect, useState } from "react";
 // и никто не связывает одно с другим.
 
 export function UpdatePrompt() {
-  const [waiting, setWaiting] = useState<ServiceWorker | null>(null);
+  const [prompt, setPrompt] = useState<{ reloadOnly: boolean; apply: () => void } | null>(null);
+  const [updating, setUpdating] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
@@ -25,70 +27,152 @@ export function UpdatePrompt() {
 
     let cancelled = false;
     let registered: ServiceWorkerRegistration | null = null;
+    const serviceWorker = navigator.serviceWorker;
+    let controller = serviceWorker.controller;
+    let waiting: ServiceWorker | null = null;
+    let requested: ServiceWorker | null = null;
+    let reloadOnly = false;
+    let reloading = false;
+    let installing: ServiceWorker | null = null;
+    let onInstallingStateChange: (() => void) | null = null;
+
+    setPrompt(null);
+    setUpdating(false);
+    setFailed(false);
+
+    const reload = () => {
+      if (cancelled || reloading) return;
+      reloading = true;
+      requested = null;
+      window.location.reload();
+    };
+
+    const offerWaiting = (worker: ServiceWorker) => {
+      if (cancelled || reloading || reloadOnly || requested || worker.state !== "installed"
+        || registered?.waiting !== worker || !serviceWorker.controller || serviceWorker.controller === worker) return;
+      waiting = worker;
+      setFailed(false);
+      setPrompt({ reloadOnly: false, apply: () => {
+        if (cancelled || reloading || reloadOnly || requested || waiting !== worker) return;
+        // Контроллер мог смениться до доставки controllerchange этой вкладке.
+        if (serviceWorker.controller === worker) { reload(); return; }
+        if (registered?.waiting !== worker || worker.state !== "installed") return;
+        requested = worker;
+        setUpdating(true);
+        setFailed(false);
+        try {
+          worker.postMessage("skip-waiting");
+        } catch {
+          requested = null;
+          if (cancelled || reloading) return;
+          setUpdating(false);
+          setFailed(true);
+        }
+      } });
+    };
+
+    const stopWatchingInstalling = () => {
+      if (installing && onInstallingStateChange) {
+        installing.removeEventListener("statechange", onInstallingStateChange);
+      }
+      installing = null;
+      onInstallingStateChange = null;
+    };
+    const onUpdateFound = () => {
+      if (cancelled || !registered) return;
+      const worker = registered.installing;
+      if (worker === installing) return;
+      stopWatchingInstalling();
+      if (!worker) return;
+      installing = worker;
+      onInstallingStateChange = () => {
+        if (cancelled || installing !== worker) return;
+        if (worker.state === "installed") {
+          offerWaiting(worker);
+          stopWatchingInstalling();
+        } else if (worker.state === "redundant") {
+          stopWatchingInstalling();
+        }
+      };
+      worker.addEventListener("statechange", onInstallingStateChange);
+      onInstallingStateChange();
+    };
 
     // Проверка при возвращении к вкладке: приложение, открытое сутками, иначе
     // не узнает о новой версии до перезапуска. Слушатель вешается здесь, а не
     // внутри асинхронного блока: возврат функции оттуда ничего не отписывает —
     // React ждёт её от самого эффекта.
-    const recheck = () => {
-      if (document.visibilityState === "visible") void registered?.update();
+    const recheck = async () => {
+      if (cancelled || document.visibilityState !== "visible" || !registered) return;
+      try {
+        await registered.update();
+      } catch {
+        // Проверка в фоне может не пройти без сети; повторим при возвращении.
+      }
     };
     document.addEventListener("visibilitychange", recheck);
 
     void (async () => {
       try {
-        const registration = await navigator.serviceWorker.register("/sw.js");
+        const registration = await serviceWorker.register("/sw.js");
         if (cancelled) return;
         registered = registration;
 
         // Версия могла приехать, пока вкладка была закрыта.
-        if (registration.waiting) setWaiting(registration.waiting);
-
-        registration.addEventListener("updatefound", () => {
-          const installing = registration.installing;
-          if (!installing) return;
-          installing.addEventListener("statechange", () => {
-            // «installed» при уже работающем контроллере означает: новая
-            // версия готова и ждёт разрешения занять место старой.
-            if (installing.state === "installed" && navigator.serviceWorker.controller) {
-              setWaiting(installing);
-            }
-          });
-        });
+        if (registration.waiting) offerWaiting(registration.waiting);
+        registration.addEventListener("updatefound", onUpdateFound);
+        // Установка могла начаться ещё до завершения register().
+        onUpdateFound();
       } catch {
         // Не зарегистрировался — приложение продолжает работать как обычный
         // сайт. Это ухудшение, а не поломка, и пугать им оператора незачем.
       }
     })();
 
-    let reloading = false;
     const onControllerChange = () => {
-      if (reloading) return;
-      reloading = true;
-      window.location.reload();
+      if (cancelled || reloading) return;
+      const previous = controller;
+      controller = serviceWorker.controller;
+      if (!controller || controller === previous) return;
+      if (requested === controller) { reload(); return; }
+      requested = null;
+      waiting = null;
+      setUpdating(false);
+      setFailed(false);
+      // Первое получение контроллера не требует обновления страницы.
+      if (!previous) { setPrompt(null); return; }
+      reloadOnly = true;
+      // Другая вкладка уже применила версию: skip-waiting больше не нужен.
+      setPrompt({ reloadOnly: true, apply: reload });
     };
-    navigator.serviceWorker.addEventListener("controllerchange", onControllerChange);
+    serviceWorker.addEventListener("controllerchange", onControllerChange);
 
     return () => {
       cancelled = true;
+      requested = null;
+      stopWatchingInstalling();
+      registered?.removeEventListener("updatefound", onUpdateFound);
       document.removeEventListener("visibilitychange", recheck);
-      navigator.serviceWorker.removeEventListener("controllerchange", onControllerChange);
+      serviceWorker.removeEventListener("controllerchange", onControllerChange);
     };
   }, []);
 
-  if (!waiting) return null;
+  if (!prompt) return null;
 
   return (
     <div className="fixed inset-x-3 bottom-3 z-50 sm:left-auto sm:right-4 sm:w-96">
-      <div className="neu-card flex items-center gap-3 p-4">
+      <div className="neu-card flex flex-col items-stretch gap-3 p-4 sm:flex-row sm:items-center" role="status">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-black text-[#0F172A]">Вышла новая версия</p>
           <p className="text-xs font-semibold text-[#64748B]">
-            Обновление уже скачано. Применить сейчас — страница перезагрузится.
+            {failed ? "Не удалось применить обновление. Попробуйте ещё раз."
+              : prompt.reloadOnly ? "Новая версия уже запущена. Перезагрузите страницу, когда сохраните изменения."
+                : "Обновление уже скачано. Применить сейчас — страница перезагрузится."}
           </p>
         </div>
-        <button type="button" className="neu-btn-primary shrink-0 text-sm" onClick={() => waiting.postMessage("skip-waiting")}>
-          Обновить
+        <button type="button" className="neu-btn-primary w-full shrink-0 whitespace-nowrap text-sm sm:w-auto"
+          disabled={updating} aria-busy={updating} onClick={prompt.apply}>
+          {updating ? "Обновляем..." : prompt.reloadOnly ? "Перезагрузить" : "Обновить"}
         </button>
       </div>
     </div>
