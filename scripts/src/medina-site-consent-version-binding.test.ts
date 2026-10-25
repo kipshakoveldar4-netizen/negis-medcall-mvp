@@ -5,6 +5,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runInNewContext } from "node:vm";
+import { syntheticSiteConsent, type ConsentResolver } from "./site-consent-fixture";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const load = (file: string) => import(pathToFileURL(path.join(root, file)).href);
@@ -15,9 +16,9 @@ type Inquiry = {
 };
 type Envelope = { requestKey: string; inquiry: Inquiry; challengeToken: string };
 type RpcArgs = { p_site_key: string; p_request_key: string; p_inquiry: Inquiry };
-const page = await load("lib/crm/site-page.ts") as { handleSitePage: Handler };
+const page = await load("lib/crm/site-page.ts") as { createSitePageHandler(deps: { resolveConsent: ConsentResolver; renderPages: unknown }): Handler };
 const intake = await load("lib/crm/site-intake-handler.ts") as {
-  createSiteIntakeHandler(deps: { env(): NodeJS.ProcessEnv; verify(): Promise<boolean> }): Handler;
+  createSiteIntakeHandler(deps: { env(): NodeJS.ProcessEnv; verify(): Promise<boolean>; resolveConsent: ConsentResolver }): Handler;
 };
 const validation = await load("lib/crm/site-intake.ts") as {
   validateSiteInquiry(value: unknown): { ok: true; data: Inquiry } | { ok: false; code: string };
@@ -25,9 +26,10 @@ const validation = await load("lib/crm/site-intake.ts") as {
 const supabase = await load("lib/supabase/server.ts") as {
   setSupabaseServerClientFactoryForTests(factory: (() => unknown) | null): void;
 };
-const renderer = createRequire(import.meta.url)(path.join(root, "artifacts/medina-site/render.cjs")) as {
-  createPages(settings: { endpoint: string; siteKey: string; consentVersion: string },
-    options: { preview: boolean; origin: string }): Map<string, string>;
+type RenderPages = (settings: { endpoint: string; siteKey: string; consentVersion: string },
+  options: { preview: boolean; origin: string }) => Map<string, string>;
+const rendering = createRequire(import.meta.url)(path.join(root, "artifacts/medina-site/render.cjs")) as {
+  createPageRenderer(resolve: ConsentResolver): RenderPages;
 };
 const formSource = await readFile(path.join(root, "artifacts/medina-site/form.js"), "utf8");
 const env = {
@@ -39,6 +41,8 @@ const env = {
 // Labels identify synthetic DB states, not approved policy revisions. L2 in
 // LEGAL-SECURITY-READINESS.md supplies no approved version-to-notice mapping.
 const versions = ["g8-fixture-a", "g8-fixture-b"] as const;
+const resolveConsent = syntheticSiteConsent(versions);
+const renderer = { createPages: rendering.createPageRenderer(resolveConsent) };
 const fields = { name: "Synthetic visitor", phone: "+77000000001", business: "Synthetic business", service: "call-center" };
 const envelope = (inquiry: unknown) => ({
   requestKey: "00000000-0000-4000-8000-000000000100", challengeToken: "synthetic-challenge", inquiry,
@@ -112,11 +116,12 @@ function fixture(t: TestContext) {
     },
   }));
   const handler = intake.createSiteIntakeHandler({
+    resolveConsent,
     env: () => ({ ...env }), verify: async () => { verifications++; return true; },
   });
   return {
     site, attempts, saved, handler, verifications: () => verifications,
-    render: () => call(page.handleSitePage, { method: "GET", query: { page: "/ru/" } }),
+    render: () => call(page.createSitePageHandler({ resolveConsent, renderPages: renderer.createPages }), { method: "GET", query: { page: "/ru/" } }),
   };
 }
 
@@ -129,7 +134,7 @@ function activeForm(html: string) {
     assert.ok(match, `Missing rendered ${name}`);
     return match[1]!;
   };
-  const notice = form.match(/<label class="consent">[\s\S]*?<\/label>/)?.[0];
+  const notice = form.match(/<label class="consent"[^>]*>[\s\S]*?<\/label>/)?.[0];
   assert.ok(notice, "Use the actual rendered checkbox/notice, not fixture policy copy");
   return {
     notice, dataset: {
@@ -183,18 +188,20 @@ async function submitRenderedForm(html: string, handler: Handler, requestKey = "
   return { body: requests[0]!, response: responses[0]!, dataset, fieldset };
 }
 
-test("G8 reproduction: changing the renderer's version label does not select different notice text or a versioned privacy link", () => {
+test("G8 synthetic registry binds different versions to different escaped notices and policy revisions", () => {
   const rendered = versions.map(consentVersion => activeForm(renderer.createPages({
     endpoint: `${env.MEDINA_SITE_ORIGIN}/api/crm/site-inquiry`, siteKey: env.MEDINA_SITE_TURNSTILE_SITE_KEY, consentVersion,
   }, { preview: false, origin: env.MEDINA_SITE_ORIGIN }).get("/ru/")!));
   assert.notEqual(rendered[0]!.dataset.consentVersion, rendered[1]!.dataset.consentVersion);
-  assert.equal(rendered[0]!.notice, rendered[1]!.notice);
-  assert.match(rendered[0]!.notice, /href="https:\/\/[^"?#]+\/privacy"/);
+  assert.notEqual(rendered[0]!.notice, rendered[1]!.notice);
+  assert.match(rendered[0]!.notice, /href="https:\/\/policy.fixture.invalid\/revisions\/g8-fixture-a"/);
+  assert.match(rendered[0]!.notice, /&lt;not legal copy&gt;/);
+  assert.match(rendered[0]!.notice, /data-notice-sha256="[a-f0-9]{64}"/);
   assert.doesNotMatch(rendered[0]!.notice, /\bchecked\b/);
   assert.match(rendered[0]!.notice, /<input type="checkbox" name="consent" required>/);
 });
 
-test("G8 reproduction: actual page, form script and intake handler pass different DB labels with the same displayed notice to fake persistence", async t => {
+test("G8 synthetic registry: actual page, form script and intake handler retain the exact displayed revision at fake persistence", async t => {
   const f = fixture(t), notices: string[] = [];
   for (const [index, version] of versions.entries()) {
     f.site.consent_version = version;
@@ -210,7 +217,7 @@ test("G8 reproduction: actual page, form script and intake handler pass differen
     assert.equal(sent.dataset.sent, "true");
     assert.doesNotMatch(rendered.html, /synthetic-not-a-provider-credential|workspace_id/);
   }
-  assert.equal(notices[0], notices[1]);
+  assert.notEqual(notices[0], notices[1]);
   assert.deepEqual(f.saved.map(row => row.consentVersion), [...versions]);
   assert.equal(f.verifications(), 2); assert.equal(f.attempts.length, 2);
   assert.equal(new Set(f.attempts.map(args => args.p_request_key)).size, 2);

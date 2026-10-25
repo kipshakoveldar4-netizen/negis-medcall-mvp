@@ -393,7 +393,7 @@ test("public surface refuses tenant selectors, writes, disabled config and stora
   assert.equal((await publicCall()).status, 503);
 });
 
-test("inquiry form requires matching enabled tenant mapping and never renders its secret", async () => {
+test("matching enabled tenant mapping alone never approves a notice or renders a secret", async () => {
   let workspace = id(2), enabled = true;
   supabase.setSupabaseServerClientFactoryForTests(() => ({ from(table: string) {
     if (table === "site_blog_posts") return client().from(table);
@@ -411,8 +411,8 @@ test("inquiry form requires matching enabled tenant mapping and never renders it
   enabled = true;
   const page = await publicCall("/ru/", {}, true, "GET", true);
   assert.equal(page.status, 200);
-  assert.match(page.html, /data-intake-endpoint/);
-  assert.match(page.html, /public-test-site-key/);
+  assert.doesNotMatch(page.html, /data-intake-endpoint|public-test-site-key|name="consent"|\/form\.js/);
+  assert.match(page.html, /<fieldset disabled>/);
   assert.doesNotMatch(page.html, /test-secret-never-render|workspace_id/);
   assert.doesNotMatch((await publicCall("/ru/")).html, /data-intake-endpoint/);
 });

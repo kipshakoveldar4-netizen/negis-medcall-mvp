@@ -1,4 +1,5 @@
 const { services, audiences, articles: previewArticles, crmOrigin } = require('./content.cjs');
+const { resolveSiteConsent } = require('../../lib/site/consent-registry.cjs');
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -80,11 +81,11 @@ function consultation(intake) {
   <label>Телефон<input name="phone" type="tel" required maxlength="40" autocomplete="off" placeholder="+7"></label>
   <label>Название бизнеса<input name="business" required maxlength="160" autocomplete="off" placeholder="Клиника, стоматология или салон"></label>
   <label>Что вас интересует<select name="service" required><option value="">Выберите направление</option>${services.map(item => `<option value="${item.slug}">${e(item.title)}</option>`).join('')}</select></label>
-  ${intake ? `<label class="consent"><input type="checkbox" name="consent" required><span>Согласен на обработку имени, телефона и сведений об организации для обратной связи согласно <a href="${crmOrigin}/privacy" target="_blank" rel="noopener noreferrer">политике конфиденциальности</a>.</span></label><div data-challenge></div>` : ''}
+  ${intake ? `<label class="consent" data-notice-sha256="${e(intake.notice.sha256)}"><input type="checkbox" name="consent" required><span>${e(intake.notice.text)} <a href="${e(intake.notice.policyUrl)}" target="_blank" rel="noopener noreferrer">Политика конфиденциальности</a></span></label><div data-challenge></div>` : ''}
   <button class="button primary" type="${intake ? 'submit' : 'button'}" disabled>Оставить заявку</button></fieldset></form></div></section>`;
 }
 
-function createPages(intake = null, options = {}) {
+function createPagesResolved(intake = null, options = {}) {
   const articles = options.articles ?? (options.preview === false ? [] : previewArticles);
   const articleCards = () => renderArticleCards(articles);
   const layout = input => baseLayout({ ...options, ...input });
@@ -127,4 +128,11 @@ function createSitemap(pages, origin, articles = []) {
     + [...pages.keys()].filter(url => url.startsWith('/ru/')).map(url => `<url><loc>${e(origin + url)}</loc>${dates.get(url) ? `<lastmod>${e(dates.get(url))}</lastmod>` : ''}</url>`).join('') + '</urlset>';
 }
 
-module.exports = { escapeHtml, createPages, createSitemap, renderArticleNodes };
+function createPageRenderer(resolveConsent = resolveSiteConsent) {
+  return (intake = null, options = {}) => {
+    const notice = intake && resolveConsent(intake.consentVersion);
+    return createPagesResolved(notice ? { ...intake, notice } : null, options);
+  };
+}
+const createPages = createPageRenderer();
+module.exports = { escapeHtml, createPages, createPageRenderer, createSitemap, renderArticleNodes };

@@ -315,6 +315,40 @@ fake HTTP/SDK стенде приняты Operators list/отказ B и Onboard
 очищен Reset0; своя tab 10 закрыта, viewport восстановлен, PID 9376 остановлен.
 Никаких новых рабочих данных, прав, облачных выпусков, миграций или расходов.
 
+25 октября, G5-C53: прежний остаток generated-video identity закрыт **локально**.
+Для точного tenant/job key получаются стабильные UUID/path/name независимо от
+даты poll; upload create-only. Восстановление потерянного ответа требует raw
+DB identity и streamed own-Storage MIME/size/SHA-256, не одного URL/metadata.
+Локальный 085 добавляет unique key и immutable file identity с отказом дублей,
+legacy backfill без выдуманного content hash. Actual 015 table-only/082/085
+прошли 16/16 на одноразовом native PostgreSQL, cluster убран. В Supabase 085
+не применялась; старый uploader может оставить orphan до unique отказа.
+Остались private staging, video decoder, expiry/provider-independent replay и
+настоящая облачная матрица. Повтор API всё ещё зависит от ответа провайдера.
+
+G7-C21: независимые участки G1/G2/G3/G4/G6 получили scopes для поздних action,
+input, read-body и clipboard callbacks. Main дополнительно воспроизвёл и закрыл
+MobileNav logout под SDK B до React render и batched A/B/A. Это покрыто actual
+AuthProvider/runtime с явно fake SDK, не настоящими облачными сеансами.
+Аналитика/мобильное меню просмотрены в loopback браузере на 1440x900/375x812;
+Tab/Shift+Tab/Escape и возврат фокуса проверены в DOM. Полная модальность и
+физические устройства не приняты. Своя вкладка/сервер закрыты, viewport сброшен.
+
+G8-C7: arbitrary DB consent label теперь не включает форму и не пропускает
+intake к challenge/persistence. Общий version/text/purpose/policy/hash registry
+по умолчанию пуст и неизменяемый. ENV не одобряет тексты; SYNTHETIC notice
+внедряется только явной локальной test dependency, не изменяет default registry.
+L2 остаётся открытым: нужны согласованные тексты/архив редакций и audit snapshot;
+реальный consent receipt пока хранит version. Ничего юридически не опубликовано.
+Техническая блокировка неизвестных версий не равна заключению о соответствии
+законодательству. Новый Preview и облачные миграции в этом цикле не создавались.
+Общий selected run: 60 уникальных файлов, 3783 pass, 1 явно неприменимый skip,
+0 fail; поднаборы повторно не суммируются. После него малая usability-доработка
+SDK A/B/A принята отдельным 32/32 MobileNav run. Native PostgreSQL 16/16,
+static renderer 8/8 и loopback intake HTTP 9/9 учитываются отдельно.
+Повторная полная сборка после последней runtime-правки также прошла, включая
+все проверки типов и 115 cold-start. Это локальная проверка, не новый Preview.
+
 Нет основания выставлять «100% защиты» или «100% юридической готовности».
 Изменение исходников не меняет уже опубликованную версию. Отдельно фиксируются
 локальные тесты, проверки Preview, юридическое согласование и рабочий выпуск.

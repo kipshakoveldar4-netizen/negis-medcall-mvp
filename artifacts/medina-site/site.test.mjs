@@ -62,11 +62,10 @@ test('form requires explicit public settings; secret is never rendered', () => {
   const config = readFormSettings({ MEDINA_SITE_FORM_ENABLED: 'true', MEDINA_SITE_API_ORIGIN: 'https://api.example.invalid',
     MEDINA_SITE_TURNSTILE_SITE_KEY: 'public-test-key', MEDINA_SITE_CONSENT_VERSION: 'v1', MEDINA_SITE_TURNSTILE_SECRET: 'MUST-NOT-RENDER' });
   const html = createPages(config).get('/ru/');
-  assert.match(html, /data-intake-endpoint="https:\/\/api.example.invalid\/api\/crm\/site-inquiry"/);
-  assert.match(html, /name="consent" required/);
+  assert.doesNotMatch(html, /data-intake-endpoint|data-consent-version|name="consent"|\/form\.js/);
   assert.match(html, /method="post"/);
-  assert.doesNotMatch(html, /MUST-NOT-RENDER|workspaceId|<fieldset disabled/);
-  assert.match(html, /type="submit" disabled/);
+  assert.doesNotMatch(html, /MUST-NOT-RENDER|workspaceId/);
+  assert.match(html, /<fieldset disabled>/);
 });
 
 test('public rendering excludes example drafts and escapes approved text', () => {

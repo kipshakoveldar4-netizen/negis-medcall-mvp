@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
 import { validateSiteInquiry, type SiteInquiry } from "./site-intake";
+import { resolveSiteConsent, type SiteConsentResolver } from "../site/consent-registry.cjs";
 
 type Config = { origin: string; hostname: string; siteKey: string; secret: string };
 type VerificationFetch = (url: string, init: {
@@ -72,6 +73,7 @@ export function createSiteIntakeHandler(deps: {
   verify?: typeof verifySiteChallenge;
   save?: typeof persist;
   now?: () => number;
+  resolveConsent?: SiteConsentResolver;
 } = {}) {
   let windowStart = 0;
   let attempts = 0;
@@ -106,6 +108,7 @@ export function createSiteIntakeHandler(deps: {
       || typeof challengeToken !== "string" || challengeToken.length < 1 || challengeToken.length > 2048) return reply(400, "invalid_request");
     const inquiry = validateSiteInquiry(body.inquiry);
     if (!inquiry.ok) return reply(400, inquiry.code);
+    if (!(deps.resolveConsent || resolveSiteConsent)(inquiry.data.consentVersion)) return reply(400, "invalid_inquiry");
     try {
       if (!await (deps.verify || verifySiteChallenge)(config, challengeToken)) return reply(403, "challenge_failed");
       const error = await (deps.save || persist)(config.siteKey, requestKey, inquiry.data);

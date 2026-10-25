@@ -13,6 +13,12 @@ function compile(directory) {
   for (const entry of fs.readdirSync(path.join(root, directory), { withFileTypes: true })) {
     const relative = path.join(directory, entry.name);
     if (entry.isDirectory()) { compile(relative); continue; }
+    if (entry.name.endsWith('.cjs')) {
+      const target = path.join(output, relative);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(path.join(root, relative), target);
+      continue;
+    }
     if (!entry.name.endsWith('.ts') || entry.name.endsWith('.d.ts')) continue;
     const result = ts.transpileModule(fs.readFileSync(path.join(root, relative), 'utf8'), {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },

@@ -4,12 +4,15 @@ import { readFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
-import { createPages } from '../../artifacts/medina-site/render.cjs';
+import { createPageRenderer } from '../../artifacts/medina-site/render.cjs';
+import { syntheticSiteConsent } from '../src/site-consent-fixture.ts';
 import intake from '../../lib/crm/site-intake-handler.ts';
 import supabase from '../../lib/supabase/server.ts';
 
 const { createSiteIntakeHandler } = intake;
 const { setSupabaseServerClientFactoryForTests } = supabase;
+const resolveConsent = syntheticSiteConsent();
+const createPages = createPageRenderer(resolveConsent);
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const workspace = '00000000-0000-4000-8000-000000000001';
@@ -46,6 +49,7 @@ export async function startSiteIntakeFixture({ articles = [] } = {}) {
     },
   }));
   const handler = createSiteIntakeHandler({
+    resolveConsent,
     env: () => ({ MEDINA_SITE_INTAKE_ENABLED: 'true', MEDINA_SITE_ORIGIN: simulatedOrigin,
       MEDINA_SITE_INTAKE_KEY: 'browser-fixture', MEDINA_SITE_TURNSTILE_SECRET: 'fixture-only-not-a-secret' }),
     verify: async (_config, token) => tokens.delete(token) && mode !== 'challenge-failed',

@@ -3,17 +3,20 @@ import test from "node:test";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import path from "node:path";
 import { Readable } from "node:stream";
+import { syntheticSiteConsent, type ConsentResolver } from "./site-consent-fixture";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 type Config = { origin: string; hostname: string; siteKey: string; secret: string };
 type Request = { method: string; headers: Record<string, string>; body?: unknown };
 type Response = { status(code: number): Response; setHeader(key: string, value: string): void; json(value: unknown): void; end(): void };
 type Handler = (req: Request, res: Response) => Promise<unknown>;
-const mod = await import(pathToFileURL(path.join(root, "lib/crm/site-intake-handler.ts")).href) as {
+const actual = await import(pathToFileURL(path.join(root, "lib/crm/site-intake-handler.ts")).href) as {
   readSiteIntakeConfig(env: Record<string, string>): Config | null;
   verifySiteChallenge(config: Config, token: string, request: (...args: unknown[]) => Promise<{ ok: boolean; text(): Promise<string> }>): Promise<boolean>;
-  createSiteIntakeHandler(deps: { env(): Record<string, string>; verify?(config: Config, token: string): Promise<boolean>; save?(site: string, key: string, inquiry: unknown): Promise<string | null> }): Handler;
+  createSiteIntakeHandler(deps: { env(): Record<string, string>; verify?(config: Config, token: string): Promise<boolean>; save?(site: string, key: string, inquiry: unknown): Promise<string | null>; resolveConsent?: ConsentResolver }): Handler;
 };
+const mod = { ...actual, createSiteIntakeHandler: (deps: Parameters<typeof actual.createSiteIntakeHandler>[0]) =>
+  actual.createSiteIntakeHandler({ resolveConsent: syntheticSiteConsent(), ...deps }) };
 const env = { MEDINA_SITE_INTAKE_ENABLED: "true", MEDINA_SITE_ORIGIN: "https://site.example.invalid", MEDINA_SITE_INTAKE_KEY: "medina-test", MEDINA_SITE_TURNSTILE_SECRET: "test-only-not-a-real-secret" };
 const body = { requestKey: "00000000-0000-4000-8000-000000000100", challengeToken: "mock-challenge", inquiry: {
   name: "Test", phone: "+77071234567", business: "Salon", service: "call-center", pagePath: "/ru/", consentVersion: "v1", consent: true,

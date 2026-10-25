@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { syntheticSiteConsent } from "./site-consent-fixture";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -483,7 +484,7 @@ test("late public-form retry after confirmed erasure returns safe 409 without re
     },
   }));
   const intake = await load("lib/crm/site-intake-handler.ts");
-  const handler = intake.createSiteIntakeHandler({ env: () => ({ MEDINA_SITE_INTAKE_ENABLED: "true",
+  const handler = intake.createSiteIntakeHandler({ resolveConsent: syntheticSiteConsent(), env: () => ({ MEDINA_SITE_INTAKE_ENABLED: "true",
     MEDINA_SITE_ORIGIN: "https://site.example.invalid", MEDINA_SITE_INTAKE_KEY: "medina-test", MEDINA_SITE_TURNSTILE_SECRET: "fixture" }), verify: async () => true });
   let status = 0, payload: unknown;
   const res = { setHeader() {}, status(value: number) { status = value; return res; }, json(value: unknown) { payload = value; } };

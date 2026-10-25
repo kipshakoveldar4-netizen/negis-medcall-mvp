@@ -3,6 +3,7 @@ import { getSupabaseServerClient } from "../supabase/server";
 import { createPages, createSitemap, type PublicArticle } from "../../artifacts/medina-site/render.cjs";
 import { readSiteIntakeConfig } from "./site-intake-handler";
 import { parseArticleBody } from "../site/article";
+import { resolveSiteConsent, type SiteConsentResolver } from "../site/consent-registry.cjs";
 
 export function publicSiteConfig(env: Record<string, string | undefined> = process.env) {
   if (env.MEDINA_PUBLIC_SITE_ENABLED !== "true") return null;
@@ -26,7 +27,8 @@ export function publicArticle(value: unknown, publishedAt?: unknown): PublicArti
 }
 
 // Isolated public read surface. No caller-selected tenant, draft fields or IDs.
-export async function handleSitePage(req: VercelRequest, res: VercelResponse) {
+export function createSitePageHandler(deps: { resolveConsent?: SiteConsentResolver; renderPages?: typeof createPages } = {}) {
+return async function handleSitePage(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Robots-Tag", "noindex, nofollow");
@@ -70,13 +72,13 @@ export async function handleSitePage(req: VercelRequest, res: VercelResponse) {
       const site = await client.from("crm_intake_sites").select("workspace_id,enabled,consent_version,allowed_page_paths")
         .eq("site_key", intakeConfig.siteKey).maybeSingle();
       if (!site.error && site.data?.enabled === true && site.data.workspace_id === config.workspaceId
-        && typeof site.data.consent_version === "string" && /^[a-zA-Z0-9._-]{1,40}$/.test(site.data.consent_version)
+        && typeof site.data.consent_version === "string" && (deps.resolveConsent || resolveSiteConsent)(site.data.consent_version)
         && Array.isArray(site.data.allowed_page_paths) && site.data.allowed_page_paths.includes("/ru/")) {
         intake = { endpoint: `${config.origin}/api/crm/site-inquiry`, siteKey: publicKey, consentVersion: site.data.consent_version };
         res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
       }
     }
-    const pages = createPages(intake, { articles: articles as PublicArticle[], preview: false,
+    const pages = (deps.renderPages || createPages)(intake, { articles: articles as PublicArticle[], preview: false,
       origin: config.origin, indexable: config.indexable, assetBase: "/medina-site" });
     if (route === "/ru/sitemap.xml") {
       res.setHeader("Content-Type", "application/xml; charset=utf-8");
@@ -86,4 +88,6 @@ export async function handleSitePage(req: VercelRequest, res: VercelResponse) {
     if (html && config.indexable) res.setHeader("X-Robots-Tag", "index, follow");
     return end(html ? 200 : 404, html || pages.get("/404.html")!);
   } catch { return end(503, "Сайт временно недоступен. Попробуйте позже."); }
+};
 }
+export const handleSitePage = createSitePageHandler();

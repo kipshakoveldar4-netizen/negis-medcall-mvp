@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test, { before, after, beforeEach, afterEach } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
+import { syntheticSiteConsent } from "./site-consent-fixture";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const { validateSiteInquiry } = await import(pathToFileURL(path.join(root, "lib/crm/site-intake.ts")).href) as {
@@ -65,6 +66,7 @@ async function formFixture() {
   }));
   const origin = "https://site.example.invalid";
   const handler = intake.createSiteIntakeHandler({
+    resolveConsent: syntheticSiteConsent(),
     env: () => ({ MEDINA_SITE_INTAKE_ENABLED: "true", MEDINA_SITE_ORIGIN: origin,
       MEDINA_SITE_INTAKE_KEY: "medina-test", MEDINA_SITE_TURNSTILE_SECRET: "fixture-only-secret" }),
     verify: async () => true,
