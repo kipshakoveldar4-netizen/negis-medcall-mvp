@@ -17,6 +17,8 @@ export type RouteKind =
   | "internal_hmac"
   /** Single write-only public form; explicit server mapping + verified bot challenge. */
   | "site_intake"
+  /** Isolated, disabled-by-default partner visit gateway; JWT for account operations. */
+  | "partner_entry"
   /** Explicit public snapshots only; no caller-selected workspace. */
   | "site_public"
   /**
@@ -181,6 +183,7 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   "contributor-account": { kind: "bootstrap", methods: ["GET", "POST"] },
   "platform-contributors": { kind: "platform", methods: ["GET", "PATCH"] },
   "partner-ledger": { kind: "bootstrap", methods: ["GET"] },
+  "partner-entry": { kind: "partner_entry", methods: ["POST"] },
   "creator-jobs": { kind: "bootstrap", methods: ["GET", "POST"] },
   "creator-job-command": { kind: "bootstrap", methods: ["GET", "POST"] },
   "clinic-creator-jobs": { kind: "browser", methods: ["GET", "POST"], roles: WORKSPACE_ADMIN },

@@ -480,7 +480,9 @@ test("C6 every route is classified; only the isolated site intake may accept ano
   // "platform" — панель владельца платформы: единственный вид, читающий
   // поперёк арендаторов. Он допущен сюда сознательно и с условиями ниже, а не
   // потому, что набор не заметил нового значения.
-  const kinds = new Set(["browser", "bootstrap", "internal_hmac", "platform", "site_intake", "site_public"]);
+  const kinds = new Set(["browser", "bootstrap", "internal_hmac", "platform", "site_intake", "site_public", "partner_entry"]);
+  assert.deepEqual(Object.entries(all).filter(([, entry]) => entry.kind === "partner_entry").map(([key]) => key), ["partner-entry"]);
+  assert.deepEqual(all["partner-entry"].methods, ["POST"]);
   assert.deepEqual(Object.entries(all).filter(([, entry]) => entry.kind === "site_public").map(([key]) => key), ["site-page"]);
   assert.deepEqual(all["site-page"].methods, ["GET", "HEAD"]);
   assert.deepEqual(Object.entries(all).filter(([, entry]) => entry.kind === "site_intake").map(([key]) => key), ["site-inquiry"]);

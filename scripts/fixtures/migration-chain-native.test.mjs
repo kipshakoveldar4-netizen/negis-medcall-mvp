@@ -22,6 +22,8 @@ import { exercisePartnerLedger } from './partner-ledger-cases.mjs';
 import { exerciseCreatorJobs, exerciseCreatorJobRefusals, reproduceUnfencedCreatorCommand } from './creator-job-cases.mjs';
 import { exerciseCreatorClosure, exerciseCreatorClosureRefusals } from './creator-command-closure-cases.mjs';
 import { exercisePartnerSources, partnerSourceHelpers } from './partner-source-cases.mjs';
+import { exercisePartnerEntryAnchor } from './partner-entry-cases.mjs';
+import { exercisePartnerEntryHttp } from './partner-entry-native-http-cases.mjs';
 
 // Native application-chain acceptance, NOT an authority to release migrations.
 // 001-008 require an undocumented legacy baseline; data/*.sql is deliberately
@@ -154,7 +156,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
   assert.deepEqual(bootstrap, { auth: null, storage_tables: 2, routines: 0 });
   assert.deepEqual((await readReviewedChain(directory)).map(item => [item.file, item.sha256]), chain.map(item => [item.file, item.sha256]),
     'Source must remain identical while the owned native server starts');
-  t.diagnostic('Only fresh attested loopback PostgreSQL 17.11; no Auth/Storage/cron/HTTP services, keys, providers or workers. Native query errors are not skipped.');
+  t.diagnostic('Only fresh attested loopback PostgreSQL 17.11. Partner-entry alone also exercises owned loopback HTTP with synthetic external Auth/Turnstile/notice data. No real Auth/Storage, cron, external providers or workers; native query errors are not skipped.');
   t.diagnostic('Protected dirty 059 and restored 065 are executed exactly as read, not modified/staged/replaced. This is not an applied/released manifest.');
 
   let legacyBefore;
@@ -240,6 +242,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     if(entry.file==='110_creator_job_workflow.sql') await exerciseCreatorJobs(db,fixture,entry.source,t);
     if(entry.file==='111_creator_command_closure.sql') await exerciseCreatorClosure(db,fixture,entry.source,t);
     if(entry.file==='112_partner_first_source.sql') await exercisePartnerSources(db,fixture,entry.source,t);
+    if(entry.file==='113_partner_entry_anchor.sql'){await exercisePartnerEntryAnchor(db,fixture,entry.source,t);await exercisePartnerEntryHttp(db,fixture,t);}
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
       await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{
@@ -351,7 +354,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'public.execute_growth_creator_job(uuid,uuid,uuid,uuid,uuid,uuid,text,jsonb)','public.read_growth_creator_command(uuid,uuid,uuid,uuid)',
       'public.creator_command_result_v2(uuid,uuid,uuid,uuid,text,uuid)',
       'public.operator_request_command_receipt(public.growth_operator_request_commands)', 'public.confirm_operator_request_command(uuid,uuid,text,uuid,uuid,text)',
-      ...operatorLegacySignatures,...partnerSourceHelpers,'public.bind_growth_referral(uuid,text,text)','public.lock_operator_command_reader(uuid,text,uuid,uuid)',
+      ...operatorLegacySignatures,...partnerSourceHelpers,'public.bind_growth_referral(uuid,text,text)','public.capture_growth_partner_source(uuid,text,text,text)','public.lock_operator_command_reader(uuid,text,uuid,uuid)',
       'public.operator_command_result_v2(uuid,uuid,text,uuid,uuid,text,uuid)',
       'public.site_deletion_operation_receipt(public.site_deletion_operations,boolean)']) {
       assert.equal((await one(db, "select has_function_privilege('service_role',$1,'EXECUTE') as allowed", [signature])).allowed, false, signature);
@@ -363,7 +366,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'read_operator_request_command_v2','close_operator_request_command_v2','read_growth_partner_ledger',
       'read_growth_creator_jobs','execute_growth_creator_job_v2','read_growth_creator_command_v2','close_growth_creator_command_v2',
       'read_growth_creator_directory','read_growth_creator_job_detail',
-      'capture_growth_partner_source','claim_growth_partner_source','read_growth_partner_source','bind_growth_partner_source']) {
+      'capture_growth_partner_source_v2','purge_growth_partner_sources','claim_growth_partner_source','read_growth_partner_source','bind_growth_partner_source']) {
       const functions = (await db.query(`select p.oid::regprocedure::text as signature,has_function_privilege('service_role',p.oid,'EXECUTE') as allowed
         from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname=$1`, [name])).rows;
       assert.equal(functions.length, 1, name); assert.equal(functions[0].allowed, true, name);

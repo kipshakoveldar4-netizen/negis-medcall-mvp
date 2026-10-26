@@ -6,6 +6,7 @@ import { handleSiteInquiryDeletion, handleSiteInquiryDeletionPreview, handleSite
 import { handlePlatformOperators, handleOperatorAccount, handleOperatorInbox, handleClinicOperators } from "../../lib/crm/operators";
 import { handleContributorAccount, handlePlatformContributors } from "../../lib/crm/contributors";
 import { handlePartnerLedger } from "../../lib/crm/partner-ledger";
+import { handlePartnerEntry } from "../../lib/crm/partner-entry";
 import { handleCreatorJobs, handleCreatorJobReads } from "../../lib/crm/creator-jobs";
 import { handleOperatorLeads, handleClinicOperatorLeads } from "../../lib/crm/operator-leads";
 import { handleOperatorServices } from "../../lib/crm/operator-services";
@@ -493,6 +494,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (route.authorization.kind === "site_intake") {
     if (route.key !== "site-inquiry" || segments.length !== 1) return notFound(res);
     return handleSiteIntake(req, res);
+  }
+  if (route.authorization.kind === "partner_entry") {
+    res.setHeader("Cache-Control", "no-store");
+    if (route.key !== "partner-entry" || segments.length !== 1) return notFound(res);
+    try { return await handlePartnerEntry(req, res); }
+    catch (error) { if (error instanceof WorkspaceAdminAuthError) return sendAuthError(res, error); throw error; }
   }
 
   const method = (req.method || "GET").toUpperCase();

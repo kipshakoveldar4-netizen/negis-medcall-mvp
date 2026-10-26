@@ -56,6 +56,7 @@ const API_SURFACE: readonly RouteClassification[] = [
       "Deny-by-default CRM router. Verified JWT, active membership, server-resolved role and permission; " +
       "auth-context is the B bootstrap inside it and meta-insights-background-cycle is the D HMAC route. " +
       "The isolated site-inquiry write-only route requires explicit configuration, exact origin, server-verified Turnstile and server-side site mapping; it cannot read CRM data. " +
+      "The isolated partner-entry gateway is disabled without explicit configuration and an approved attribution notice, requires same-origin POST, Turnstile for preparation and a sealed cookie; claim/read require verified Auth and never accept a workspace selector. " +
       "The isolated site-page GET/HEAD route reads only explicit publication snapshots from a server-configured workspace, never drafts or CRM records; disabled by default.",
   },
   {

@@ -82,6 +82,8 @@ try {
       await check('contributor-account', 401, 'Bearer invalid-test-token');
       await check('contributor-account', 401, undefined, 'POST');
       await check('partner-ledger', 401, 'Bearer invalid-test-token');
+      await check('partner-entry',503,undefined,'POST');
+      await check('partner-entry',503,'Bearer invalid-test-token','POST');
       for (const route of ['creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command',
         'creator-job-detail','clinic-creator-job-detail','creator-directory']) await check(route,401,'Bearer invalid-test-token');
       await check('creator-jobs',401,undefined,'POST');
