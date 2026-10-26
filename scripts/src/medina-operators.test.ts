@@ -804,6 +804,26 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
         assert.equal(log.length,0);
       }
     });
+    await t.test("operator booking malformed or foreign RPC success is unavailable and never publishes a partial receipt", async () => {
+      const body = {leadId:LEAD,requestKey:STAGE,doctorId:OPERATOR,serviceIds:[OTHER],startsLocal:"2030-01-07T10:00",timeZone:"Asia/Almaty"};
+      const valid = {id:STAGE,startsAt:"2030-01-07T05:00:00Z",priceMinor:"100000",durationMinutes:60,status:"scheduled",service:"Услуга",doctorName:"Мастер",timeZone:"Asia/Almaty"};
+      for (const patch of [{startsAt:undefined},{id:OTHER},{priceMinor:100000},{durationMinutes:0},{timeZone:"Invalid/Zone"},{timeZone:"UTC"},{status:"paid"},{service:{}}]) {
+        reset(); rpcData={...valid,...patch,clientPhone:"private-result",notes:"private-result"};
+        const r=await call("operator-bookings","POST",body,undefined,WORKSPACE,{requestId:REQUEST});
+        assert.equal(r.statusCode,503,JSON.stringify(patch)); assert.equal(r.body.data,undefined);
+        assert.doesNotMatch(JSON.stringify(r.body),/private-result|clientPhone/);assert.equal(rpcCalls.length,1);assert.equal(log.length,0);
+      }
+      for (const timeZone of ["", "Invalid/Zone", 5]) {
+        reset();rpcData={timeZone};const r=await call("operator-bookings","GET",undefined,undefined,WORKSPACE,{requestId:REQUEST,leadId:LEAD});
+        assert.equal(r.statusCode,503);assert.equal(r.body.data,undefined);
+      }
+    });
+    await t.test("operator booking current nullable/extended appointment metadata remains recoverable without fallback writes", async () => {
+      reset();
+      rpcData={id:STAGE,startsAt:null,priceMinor:null,durationMinutes:720,status:"cancelled",service:null,doctorName:null,timeZone:"Asia/Almaty"};
+      const r=await call("operator-bookings","POST",{leadId:LEAD,requestKey:STAGE,doctorId:OPERATOR,serviceIds:[OTHER],startsLocal:"2030-01-07T10:00",timeZone:"Asia/Almaty"},undefined,WORKSPACE,{requestId:REQUEST});
+      assert.equal(r.statusCode,200);assert.deepEqual(r.body.data,rpcData);assert.equal(log.length,0);assert.equal(rpcCalls.length,1);
+    });
     await t.test("operator capacity refusal has an explicit safe code and no fallback writes", async () => {
       for (const [code, message, status] of [
         ["23P01", "appointment_capacity_exceeded", 409],

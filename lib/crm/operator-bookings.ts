@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { isUuidValue, requireAuthenticatedUser } from "../auth/server";
 import { getSupabaseServerClient } from "../supabase/server";
+import { parseOperatorBooking, parseOperatorBookingContext } from "./operator-contracts";
 
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -143,30 +144,21 @@ export async function handleOperatorBookings(
       "Не удалось подтвердить запись. Повторите отправку без изменения параметров.",
     );
   }
-  const row = record(data);
   if (req.method === "GET") {
-    if (row.timeZone !== null && typeof row.timeZone !== "string")
-      return fail(503, "Не удалось прочитать настройки записи");
+    const context = parseOperatorBookingContext(data);
+    if (!context) return fail(503, "Не удалось прочитать настройки записи");
     return res
       .status(200)
-      .json({ success: true, data: { timeZone: row.timeZone } });
+      .json({ success: true, data: context });
   }
-  if (!isUuidValue(row.id))
+  const booking = parseOperatorBooking(data, body.requestKey as string, body.timeZone as string);
+  if (!booking)
     return fail(
       503,
       "Не удалось подтвердить запись. Повторите отправку без изменения параметров.",
     );
   return res.status(200).json({
     success: true,
-    data: {
-      id: row.id,
-      startsAt: row.startsAt,
-      service: row.service,
-      doctorName: row.doctorName,
-      priceMinor: row.priceMinor,
-      durationMinutes: row.durationMinutes,
-      status: row.status,
-      timeZone: row.timeZone,
-    },
+    data: booking,
   });
 }

@@ -138,7 +138,7 @@ async function bundle(ids) {
     }}] })).outputFiles[0].text;
 }
 async function httpFixture(handlers, code) {
-  const controls = { drop: false, hold: false, committed: [], held: [], errors: [], headers: [] };
+  const controls = { drop: false, hold: false, partial: false, committed: [], held: [], errors: [], headers: [] };
   let origin;
   const server = createServer(async(req,res) => {
     if (!origin || req.headers.host !== new URL(origin).host) { res.writeHead(403).end(); return; }
@@ -162,6 +162,7 @@ async function httpFixture(handlers, code) {
       controls.headers.push({status,cache:res.getHeader('Cache-Control')});
       if(req.method==='POST'&&status===200){
         controls.committed.push({key:body.requestKey,id:payload.data.id});
+        if(controls.partial){controls.partial=false;payload={success:true,data:{id:payload.data.id}};send();return;}
         if(controls.drop){
           controls.drop=false;
           // A pre-header reset may be retried transparently by Chromium. Make
@@ -191,7 +192,7 @@ test('operator booking survives committed lost ACK through real local HTTP and n
     alter table storage.objects enable row level security;`);
   for(const entry of chain)await db.query(entry.source);
   const identities=new Set(), api=await handlers(sqlAdapter(fixture),identities);
-  for(const width of [375,1440])for(const scenario of ['lost-ack','revoked-reopen','account-switch']){
+  for(const width of [375,1440])for(const scenario of ['lost-ack','revoked-reopen','account-switch','changed-result','partial-result']){
     await t.test(`${width}: ${scenario} recovers the same committed appointment without duplicate rows`,async()=>{
       const f=await provision(db);identities.add(f.actor);identities.add(f.otherActor);
       const server=await httpFixture(api,await bundle(f));let browser, failure;
@@ -204,12 +205,13 @@ test('operator booking survives committed lost ACK through real local HTTP and n
         await wait("document.querySelectorAll('input[type=checkbox]').length===2");
         await run("for(const c of document.querySelectorAll('input[type=checkbox]'))c.click();const d=document.querySelector('input[type=datetime-local]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(d,'2030-01-07T10:00');d.dispatchEvent(new Event('input',{bubbles:true}));d.dispatchEvent(new Event('change',{bubbles:true}));");
         await wait("!document.querySelector('button[type=submit]').disabled");
-        server.controls[scenario==='account-switch'?'hold':'drop']=true;
+        server.controls[scenario==='account-switch'?'hold':scenario==='partial-result'?'partial':'drop']=true;
         await run("document.querySelector('form').requestSubmit();");
         await until(()=>server.controls.committed.length===1);
         const original=server.controls.committed[0];assert.equal(original.key,original.id);
         assert.deepEqual(await f.counts(),{appointments:1,clients:1,receipts:1,audits:1});
         await db.query('update clinic_services set base_price_minor=999999,duration_minutes=90 where workspace_id=$1',[f.workspace]);
+        if(scenario==='changed-result')await db.query("update appointments set status='cancelled',starts_at=starts_at+interval '1 day',price_minor=null,doctor_name=null,service=null,duration_minutes=720 where id=$1",[original.id]);
         if(scenario==='account-switch'){
           await run(`f.switchActor('${f.otherActor}');`);await wait('f.denied===1');
           await run(`f.switchActor('${f.actor}');`);await wait("document.querySelector('button[type=submit]')?.textContent.includes('Проверить')");
@@ -230,10 +232,11 @@ test('operator booking survives committed lost ACK through real local HTTP and n
         assert.doesNotMatch(retained.receipts[0][1],/Owned|phone|clientName|full_name/);
         await run("document.querySelector('form').requestSubmit();");await wait('f.booked.length===1');
         const recovered=await snapshot();assert.equal(recovered.receipts.length,0);
-        assert.equal(recovered.booked[0].id,original.id);assert.equal(recovered.booked[0].priceMinor,'150050');
-        assert.equal(recovered.booked[0].durationMinutes,75);assert.equal(recovered.booked[0].timeZone,'Asia/Almaty');
-        assert.equal(recovered.booked[0].service,'Owned service + Owned shared');assert.equal(recovered.booked[0].doctorName,'Owned doctor');
-        assert.equal(new Date(recovered.booked[0].startsAt).toISOString(),'2030-01-07T05:00:00.000Z');
+        assert.equal(recovered.booked[0].id,original.id);assert.equal(recovered.booked[0].priceMinor,scenario==='changed-result'?null:'150050');
+        assert.equal(recovered.booked[0].durationMinutes,scenario==='changed-result'?720:75);assert.equal(recovered.booked[0].timeZone,'Asia/Almaty');
+        assert.equal(recovered.booked[0].service,scenario==='changed-result'?null:'Owned service + Owned shared');assert.equal(recovered.booked[0].doctorName,scenario==='changed-result'?null:'Owned doctor');
+        assert.equal(new Date(recovered.booked[0].startsAt).toISOString(),scenario==='changed-result'?'2030-01-08T05:00:00.000Z':'2030-01-07T05:00:00.000Z');
+        assert.equal(recovered.booked[0].status,scenario==='changed-result'?'cancelled':'scheduled');
         assert.deepEqual(await f.counts(),{appointments:1,clients:1,receipts:1,audits:1});
         assert.ok(server.controls.committed.every(row=>row.id===original.id&&row.key===original.key));
         assert.equal(server.controls.committed.length,2,'Exactly one original POST and one explicit same-key recovery');

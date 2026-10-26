@@ -566,10 +566,61 @@ async function startAction(ui: Ui, target: "stage" | "call") {
 
 type QueuedAction = "request" | "call" | "stage" | "booking" | "clinic-assignment" | "clinic-confirmation";
 type ActionTransition = "unmount" | "actor" | "path" | "refresh" | "page";
-const savedBooking = {
+const savedBooking = (request: Pending) => ({
+  id: request.body?.requestKey, durationMinutes: 60, status: "scheduled",
   startsAt: "2026-10-18T04:00:00Z", timeZone: "Asia/Almaty", doctorName: "Synthetic doctor",
   service: "Synthetic catalog service", priceMinor: "100",
-};
+});
+for (const [label, patch] of [
+  ["missing identity", { id: undefined }], ["foreign request identity", { id: REQUEST_B }],
+  ["missing duration", { durationMinutes: undefined }], ["numeric price", { priceMinor: 100 }],
+  ["unknown status", { status: "paid" }], ["missing doctor", { doctorName: undefined }],
+  ["missing service", { service: undefined }], ["invalid zone", { timeZone: "Invalid/Zone" }], ["wrong original zone", { timeZone: "UTC" }],
+  ["local timestamp", { startsAt: "2026-10-18T09:00:00" }], ["impossible calendar date", { startsAt: "2026-02-30T09:00:00Z" }],
+] as const) {
+  test(`operator booking malformed 200 ${label} retains its key and recovers through the same intent`, async t => {
+    const ui = await queuedAction(t, "booking"); ui.mutation.release();
+    const original = [...ui.storage.values()][0], key = JSON.parse(original).requestKey;
+    ui.mutation.succeed({ ...savedBooking(ui.mutation), ...patch }); await ui.render.flush();
+    assert.equal(ui.render.instances("BookingFields").length, 1, "A malformed reply must not close the unresolved booking as successful");
+    assert.equal(ui.storage.size, 1); assert.equal(JSON.parse([...ui.storage.values()][0]).requestKey, key);
+    assert.equal(ui.render.content().includes("Запись сохранена:"), false);
+    assert.ok(ui.render.content().includes("Сохранение не подтверждено."));
+    ui.invoke(ui.find(node => node.type === "form", ui.section(labels.booking)), "onSubmit"); await ui.render.flush();
+    const retry = ui.take("event", "POST"); assert.deepEqual(retry.body, ui.mutation.body);
+    retry.release(); retry.succeed(savedBooking(retry)); await ui.render.flush();
+    assert.equal(ui.storage.size, 0); assert.equal(ui.render.instances("BookingFields").length, 0);
+    assert.ok(ui.render.content().includes("Запись сохранена:")); assert.equal(ui.denied(), 0);
+  });
+}
+for (const [status, message] of [["cancelled", "Запись отменена"], ["no_show", "Пациент не пришёл"], ["confirmed", "Запись сохранена"]]) {
+  test(`operator booking recovery displays the existing ${status} result without inventing a new active visit`, async t => {
+    const ui = await queuedAction(t, "booking"); ui.mutation.release();
+    ui.mutation.succeed({ ...savedBooking(ui.mutation), status }); await ui.render.flush();
+    assert.equal(ui.storage.size, 0); assert.equal(ui.render.instances("BookingFields").length, 0);
+    assert.ok(ui.render.content().includes(message));
+    if (status !== "confirmed") assert.equal(ui.render.content().includes("Запись сохранена:"), false);
+    assert.equal(ui.requests.filter(request => request.method === "POST").length, 1);
+  });
+}
+test("operator booking explicit cleared existing metadata is acknowledged as requiring review, not a new active visit", async t => {
+  const ui = await queuedAction(t, "booking"); ui.mutation.release();
+  ui.mutation.succeed({ ...savedBooking(ui.mutation), startsAt: null, doctorName: null, service: "", priceMinor: null, durationMinutes: 720 });
+  await ui.render.flush();
+  assert.equal(ui.storage.size, 0); assert.equal(ui.render.instances("BookingFields").length, 0);
+  assert.ok(ui.render.content().includes("Запись требует проверки"));
+  assert.ok(ui.render.content().includes("Время не указано")); assert.ok(ui.render.content().includes("Цена не согласована"));
+  assert.equal(ui.render.content().includes("Запись сохранена:"), false);
+});
+for (const context of [{}, { timeZone: "" }, { timeZone: "Invalid/Zone" }, { timeZone: 5 }]) {
+  test(`operator booking invalid context ${JSON.stringify(context)} cannot open fields or imply a valid schedule`, async t => {
+    const ui = await runtime(t), Form = ui.load("booking").OperatorBookingForm;
+    ui.render.mount(jsx(Form, { actorId: ACTOR, requestId: REQUEST_A, leadId: LEAD, onBooked: () => {}, onAccessDenied: () => {} }));
+    await ui.render.flush(); ui.take("OperatorBookingForm").succeed(context); await ui.render.flush();
+    assert.equal(ui.render.instances("BookingFields").length, 0);
+    assert.ok(ui.render.nodes().some(node => node.props.role === "alert"), "Invalid schedule metadata must be an explicit unavailable result");
+  });
+}
 async function queuedAction(t: TestContext, target: QueuedAction, openStageBooking = false, isSessionCurrent?: () => boolean) {
   const ui = await runtime(t, true);
   let denied = 0;
@@ -740,7 +791,7 @@ for (const target of ["request", "call", "stage", "booking", "clinic-assignment"
     ui.mutation.release();
     assert.equal(ui.dispatched.length, dispatched + 1);
     assert.equal(ui.dispatched.at(-1), ui.mutation);
-    ui.mutation.succeed(target === "booking" ? savedBooking : undefined);
+    ui.mutation.succeed(target === "booking" ? savedBooking(ui.mutation) : undefined);
     await ui.render.flush();
     assert.equal(ui.denied(), 0);
     assert.equal(ui.take(target === "request" ? "OperatorRequests" : target === "call" || target === "clinic-confirmation" ? "OperatorArrivals" : "LeadList").settled, false,
@@ -1591,7 +1642,7 @@ for (const outcome of ["success", "network"] as const) {
     await ui.transition("unmount");
     const writes = ui.render.writes();
     const count = ui.requests.length;
-    if (outcome === "success") ui.mutation.succeed(savedBooking); else ui.mutation.reject();
+    if (outcome === "success") ui.mutation.succeed(savedBooking(ui.mutation)); else ui.mutation.reject();
     await ui.render.beforeEffects();
     assert.deepEqual([...ui.storage.entries()], persisted, "Unmount and late outcomes must retain the durable retry key for reconciliation");
     assert.equal(ui.render.writes(), writes, "The old BookingFields and onBooked callback must stay silent after layout cleanup");
@@ -1619,7 +1670,7 @@ for (const outcome of ["success", "network", 403, 503] as const) {
     ui.mutation.release();
     const receipt = [...ui.storage.entries()], writes = ui.render.writes(), count = ui.requests.length;
     const before = ui.render.content(); live = false;
-    if (outcome === "success") ui.mutation.succeed(savedBooking);
+    if (outcome === "success") ui.mutation.succeed(savedBooking(ui.mutation));
     else if (outcome === "network") ui.mutation.reject(); else ui.mutation.fail(outcome);
     await ui.render.beforeEffects();
     assert.equal(ui.render.writes(), writes); assert.equal(ui.requests.length, count);
@@ -1685,7 +1736,7 @@ for (const status of [401, 403]) {
     await ui.render.flush(); ui.take("OperatorBookingForm").fail(status); await ui.render.flush();
     assert.equal(denied, 1); assert.deepEqual([...ui.storage.entries()], receipt);
     assert.equal(ui.render.instances("BookingFields").length, 0);
-    ui.mutation.succeed(savedBooking); await ui.render.flush();
+    ui.mutation.succeed(savedBooking(ui.mutation)); await ui.render.flush();
     assert.deepEqual([...ui.storage.entries()], receipt, "The old successful reply cannot erase a recoverable booking after remount");
   });
 }

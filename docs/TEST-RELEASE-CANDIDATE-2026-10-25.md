@@ -269,6 +269,19 @@ synthetic; this is not Vercel/catch-all, actual Supabase/Auth or styled-device
 proof. No new schema, cloud migration or Preview is credited. Staff-calendar
 matrices, durable proposal transitions and all original family gates remain.
 
+Later G2-C18 local acceptance: [complete original booking result](OPERATOR-BOOKING-RECEIPT-2026-10-26.md).
+The existing handler and form share original-key/time-zone correlation and a
+complete safe DTO parser. Partial/foreign/invalid results are unavailable and
+keep the recovery key, not false successes. Existing cancelled/no-show status
+is explicitly shown; legitimate changed appointments remain same-ID results.
+Explicit cleared metadata is acknowledged with review-required/missing-value
+labels; read bounds do not change new-booking limits. Expanded regression
+898/898, full build/169 cold starts; native HTTP 11/11 adds real reschedule/cancel
+with null metadata/720-minute current duration and synthetic partial JSON after a real commit on exact
+009-106/98 at 375/1440. Four runtime sources change, with no new endpoint,
+schema or target mutation. This is still local fake Auth/SDK/Node-adapter
+composition, not cloud Vercel/Supabase, the full family or release approval.
+
 This is a dependency inventory, **not an apply script**. Existing site-test
 receipts are scoped: DELIVERY records selected applications of 072/073/074,
 075, 076/077, 078, 021+079, 080 and 051+081 in their respective R2/O2/G7/G5

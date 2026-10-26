@@ -132,3 +132,12 @@ an operator booking receipt does not make end/withdraw/create commands durable.
 Current Preview isolation, G7 release/dependency attestation and all other
 G1-G8 and recruitment legal/commercial/creator-job gates remain open.
 Protected raw 059/065 are unchanged and excluded; no migration is prepared here.
+
+Later G2-C18 [result validation](OPERATOR-BOOKING-RECEIPT-2026-10-26.md) checks
+the original key/time-zone identity and complete safe receipt on both handler
+and form. It also distinguishes existing cancelled/no-show results from a new
+active booking. Cleared current metadata receives explicit review-required
+labels without applying new-admission limits to the stored result. Native HTTP
+acceptance expands to 11/11 with actual changed/null-metadata appointments and
+synthetic partial-result delivery after the real commit;
+this does not expand the cloud/real-Auth scope or make proposals durable.

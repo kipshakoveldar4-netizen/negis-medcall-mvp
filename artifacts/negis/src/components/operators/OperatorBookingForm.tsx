@@ -17,6 +17,8 @@ import {
 import { OperatorCatalogPagination } from "./OperatorServiceCatalog";
 import {
   formatArrivalPrice,
+  parseOperatorBooking,
+  parseOperatorBookingContext,
   type OperatorBooking,
   type OperatorDoctor,
   type OperatorService,
@@ -77,7 +79,10 @@ export function OperatorBookingForm({
       canPublish,
     )
       .then((data) => {
-        if (canPublish()) setResponse({ scope: renderedScope, context: data, error: "" });
+        if (!canPublish()) return;
+        const context = parseOperatorBookingContext(data);
+        if (!context) throw new OperatorApiError("Не удалось прочитать настройки записи.", 503);
+        setResponse({ scope: renderedScope, context, error: "" });
       })
       .catch((err) => {
         if (
@@ -280,7 +285,7 @@ function BookingFields({
       && isCurrentOperatorBookingAttempt(attempt, currentScope.current.actorId,
         currentScope.current.requestId, currentScope.current.leadId);
     try {
-      const saved = await operatorApi<OperatorBooking>(
+      const data = await operatorApi<unknown>(
         `operator-bookings?requestId=${encodeURIComponent(attempt.requestId)}`,
         {
           ...attempt.payload,
@@ -292,6 +297,8 @@ function BookingFields({
         isCurrent,
       );
       if (!isCurrent()) return;
+      const saved = parseOperatorBooking(data, attempt.requestKey, attempt.payload.timeZone);
+      if (!saved) throw new OperatorApiError("Не удалось проверить результат записи.", 503);
       clearOperatorBookingAttempt(
         storage,
         attempt.actorId,

@@ -10,6 +10,7 @@ import { operatorApi, OperatorApiError, useOperatorList } from "@/lib/operatorAp
 import { OperatorBookingForm } from "./OperatorBookingForm";
 import {
   formatArrivalPrice,
+  operatorBookingStatusLabels,
   type OperatorLead,
   type OperatorLeadScope,
   type OperatorLeadList,
@@ -352,14 +353,18 @@ function LeadList({
                 leadId={item.id}
                 onAccessDenied={bookingAccessDenied}
                 onBooked={(booking) => {
-                  const when = new Intl.DateTimeFormat("ru-RU", {
+                  const when = booking.startsAt === null ? "Время не указано" : new Intl.DateTimeFormat("ru-RU", {
                     timeZone: booking.timeZone,
                     dateStyle: "short",
                     timeStyle: "short",
                   }).format(new Date(booking.startsAt));
-                  setNotice(
-                    `Запись сохранена: ${when}, ${booking.doctorName}. ${booking.service}. ${formatArrivalPrice(booking.priceMinor, "KZT")}.`,
-                  );
+                  const requiresReview = booking.startsAt === null || !booking.doctorName?.trim() || !booking.service?.trim()
+                    || booking.priceMinor === null || booking.durationMinutes === null || booking.status === null;
+                  const result = booking.status === "cancelled" ? "Запись отменена"
+                    : booking.status === "no_show" ? "Пациент не пришёл"
+                    : requiresReview ? "Запись требует проверки" : "Запись сохранена";
+                  const status = booking.status === null ? "Статус не указан" : operatorBookingStatusLabels[booking.status];
+                  setNotice(`${result}: ${when}, ${booking.doctorName?.trim() || "Специалист не указан"}. ${booking.service?.trim() || "Услуга не указана"}. ${formatArrivalPrice(booking.priceMinor, "KZT")}. ${status}.`);
                   setBookingLeadId(null);
                   refresh();
                 }}
