@@ -256,6 +256,19 @@ Chromium/React/transport at 375/1440, full build/169 cold starts. Only two UI
 sources change; no new API/schema/financial rule. This is not durable reload/
 unknown-commit recovery, real Auth/SQL or new Preview acceptance.
 
+Later G1-C8/G2-C17 local acceptance: [operator booking lifetime/recovery](OPERATOR-BOOKING-RECOVERY-2026-10-26.md).
+LeadList now forwards the parent lifetime through context and BookingFields;
+old forms disappear on identity changes before passive cleanup. Access refusal
+hides the form but retains the original potentially committed booking key.
+Expanded local set 819/819 and full build/169 cold starts. Separate native HTTP
+7/7 composes the actual React/transport, booking/catalogue handlers and service
+SQL after exact raw 009-106/98. Selected lost JSON body, revoked-reopen and
+account replacement recover one original appointment/client/receipt/audit at
+375/1440, preserving price/duration/+5 despite catalogue changes. Auth/SDK are
+synthetic; this is not Vercel/catch-all, actual Supabase/Auth or styled-device
+proof. No new schema, cloud migration or Preview is credited. Staff-calendar
+matrices, durable proposal transitions and all original family gates remain.
+
 This is a dependency inventory, **not an apply script**. Existing site-test
 receipts are scoped: DELIVERY records selected applications of 072/073/074,
 075, 076/077, 078, 021+079, 080 and 051+081 in their respective R2/O2/G7/G5

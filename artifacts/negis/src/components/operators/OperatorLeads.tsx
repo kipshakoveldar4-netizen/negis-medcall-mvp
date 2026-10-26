@@ -133,12 +133,14 @@ function LeadList({
   }, []);
   const refresh = list.refresh;
   const bookingAccessDenied = useCallback(() => {
-    if (!mounted.current || currentView.current.path !== path || currentView.current.actorId !== actorId) return;
+    if (!mounted.current || isSessionCurrent?.() === false || currentView.current.path !== path || currentView.current.actorId !== actorId) return;
     setBookingLeadId(null);
     setError("Доступ к заявке изменился. Список обновлён.");
     refresh();
     onAccessDenied?.();
-  }, [refresh, onAccessDenied, path, actorId]);
+  }, [refresh, onAccessDenied, path, actorId, isSessionCurrent]);
+  const isBookingSessionCurrent = useCallback(() => mounted.current
+    && currentView.current === renderedView && isSessionCurrent?.() !== false, [renderedView, isSessionCurrent]);
   useEffect(() => {
     // Mobile browsers commonly restore a tab without firing window focus. Close
     // the open form, hide stale contacts and recheck access on either signal.
@@ -345,6 +347,7 @@ function LeadList({
               <OperatorBookingForm
                 key={item.id}
                 actorId={actorId}
+                isSessionCurrent={isBookingSessionCurrent}
                 requestId={requestId}
                 leadId={item.id}
                 onAccessDenied={bookingAccessDenied}

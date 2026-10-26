@@ -449,12 +449,12 @@ const labels = {
   arrivals: "\u041f\u0440\u0438\u0445\u043e\u0434\u044b \u043f\u0430\u0446\u0438\u0435\u043d\u0442\u043e\u0432",
 };
 type Ui = Awaited<ReturnType<typeof runtime>>;
-async function populated(t: TestContext) {
+async function populated(t: TestContext, isSessionCurrent?: () => boolean) {
   const ui = await runtime(t);
   let denied = 0;
   const onAccessDenied = () => { denied++; };
   const Requests = ui.load("requests").OperatorRequests;
-  ui.render.mount(jsx(Requests, { actorId: ACTOR, onAccessDenied }));
+  ui.render.mount(jsx(Requests, { actorId: ACTOR, onAccessDenied, isSessionCurrent }));
   await ui.render.flush();
   async function open(scope: string, requestId: string, parent = ui.take("OperatorRequests")) {
     parent.succeed(list([{
@@ -570,7 +570,7 @@ const savedBooking = {
   startsAt: "2026-10-18T04:00:00Z", timeZone: "Asia/Almaty", doctorName: "Synthetic doctor",
   service: "Synthetic catalog service", priceMinor: "100",
 };
-async function queuedAction(t: TestContext, target: QueuedAction, openStageBooking = false) {
+async function queuedAction(t: TestContext, target: QueuedAction, openStageBooking = false, isSessionCurrent?: () => boolean) {
   const ui = await runtime(t, true);
   let denied = 0;
   const onAccessDenied = () => { denied++; };
@@ -580,7 +580,7 @@ async function queuedAction(t: TestContext, target: QueuedAction, openStageBooki
   const component = ui.load(target === "request" ? "requests" : arrivals ? "arrivals" : "leads")[name];
   const props = {
     actorId: ACTOR, requestId: REQUEST_A, leadScope: "assigned",
-    ...(clinic ? { workspaceId: WORKSPACE } : {}), onAccessDenied,
+    ...(clinic ? { workspaceId: WORKSPACE } : {}), onAccessDenied, isSessionCurrent,
   };
   ui.render.mount(jsx(component, props));
   await ui.render.flush();
@@ -1597,6 +1597,96 @@ for (const outcome of ["success", "network"] as const) {
     assert.equal(ui.render.writes(), writes, "The old BookingFields and onBooked callback must stay silent after layout cleanup");
     assert.equal(ui.requests.length, count);
     assert.equal(ui.denied(), 0);
+  });
+}
+
+test("operator booking queued in an expired parent lifetime cannot dispatch or clear its recovery key", async t => {
+  let live = true;
+  const ui = await queuedAction(t, "booking", false, () => live);
+  const receipt = [...ui.storage.entries()], writes = ui.render.writes(), count = ui.requests.length;
+  live = false;
+  assert.equal(ui.mutation.dispatchGuard?.(), false, "The existing parent lifetime must reach BookingFields");
+  ui.mutation.release(); await ui.render.beforeEffects();
+  assert.equal(ui.mutation.dispatched, false); assert.equal(ui.requests.length, count);
+  assert.equal(ui.render.writes(), writes); assert.deepEqual([...ui.storage.entries()], receipt);
+  assert.equal(ui.denied(), 0);
+});
+
+for (const outcome of ["success", "network", 403, 503] as const) {
+  test(`operator booking expired parent ignores late ${outcome} and retains the original recovery key`, async t => {
+    let live = true;
+    const ui = await queuedAction(t, "booking", false, () => live);
+    ui.mutation.release();
+    const receipt = [...ui.storage.entries()], writes = ui.render.writes(), count = ui.requests.length;
+    const before = ui.render.content(); live = false;
+    if (outcome === "success") ui.mutation.succeed(savedBooking);
+    else if (outcome === "network") ui.mutation.reject(); else ui.mutation.fail(outcome);
+    await ui.render.beforeEffects();
+    assert.equal(ui.render.writes(), writes); assert.equal(ui.requests.length, count);
+    assert.equal(ui.render.content(), before); assert.deepEqual([...ui.storage.entries()], receipt);
+    assert.equal(ui.denied(), 0);
+  });
+}
+
+for (const expired of [false, true]) {
+  test(`operator booking retained submit after ${expired ? "raw session expiry" : "unmount"} performs no storage/state/transport work`, async t => {
+    let live = true;
+    const ui = await populated(t, () => live);
+    const form = ui.find(node => node.type === "form", ui.section(labels.booking));
+    if (expired) live = false; else ui.render.update(null);
+    const writes = ui.render.writes(), count = ui.requests.length;
+    ui.invoke(form, "onSubmit"); await ui.render.beforeEffects();
+    assert.equal(ui.render.writes(), writes); assert.equal(ui.requests.length, count);
+    assert.equal(ui.storage.size, 0); assert.equal(ui.denied(), 0);
+  });
+}
+
+for (const outcome of ["success", 403, "auth403"] as const) {
+  test(`operator booking context ignores late ${outcome} from an expired parent before cleanup`, async t => {
+    const ui = await runtime(t), Form = ui.load("booking").OperatorBookingForm;
+    let live = true, denied = 0;
+    ui.render.mount(jsx(Form, { actorId: ACTOR, requestId: REQUEST_A, leadId: LEAD,
+      isSessionCurrent: () => live, onBooked: () => assert.fail("Unexpected booking"), onAccessDenied: () => denied++ }));
+    await ui.render.flush(); const read = ui.take("OperatorBookingForm");
+    const writes = ui.render.writes(), count = ui.requests.length; live = false;
+    if (outcome === "success") read.succeed({ timeZone: "Asia/Almaty" }); else deny(read, outcome);
+    await ui.render.beforeEffects();
+    assert.equal(ui.render.writes(), writes); assert.equal(ui.requests.length, count);
+    assert.equal(ui.render.instances("BookingFields").length, 0); assert.equal(denied, 0);
+  });
+}
+
+for (const change of ["actor", "request", "lead"] as const) {
+  test(`operator booking context ${change} change hides the prior form before passive cleanup`, async t => {
+    const ui = await runtime(t), Form = ui.load("booking").OperatorBookingForm;
+    const props = { actorId: ACTOR, requestId: REQUEST_A, leadId: LEAD, onBooked: () => {}, onAccessDenied: () => {} };
+    ui.render.mount(jsx(Form, props)); await ui.render.flush();
+    ui.take("OperatorBookingForm").succeed({ timeZone: "Asia/Almaty" }); await ui.render.flush();
+    assert.equal(ui.render.instances("BookingFields").length, 1);
+    ui.render.update(jsx(Form, { ...props, [change === "actor" ? "actorId" : change === "request" ? "requestId" : "leadId"]: REQUEST_B }));
+    await ui.render.beforeEffects();
+    assert.equal(ui.render.instances("BookingFields").length, 0, "An old booking context must not be rendered under new identity props");
+  });
+}
+
+for (const status of [401, 403]) {
+  test(`operator booking current ${status} preserves its potentially committed recovery key while closing access`, async t => {
+    const ui = await queuedAction(t, "booking"); ui.mutation.release();
+    const receipt = [...ui.storage.entries()]; ui.mutation.fail(status); await ui.render.flush();
+    assert.deepEqual([...ui.storage.entries()], receipt, "An access refusal does not prove the original booking was never committed");
+    assert.equal(ui.denied(), 1); assert.equal(ui.render.instances("BookingFields").length, 0);
+  });
+  test(`operator booking reopened context ${status} cannot delete an earlier unresolved receipt`, async t => {
+    const ui = await queuedAction(t, "booking"); ui.mutation.release();
+    const receipt = [...ui.storage.entries()], Form = ui.load("booking").OperatorBookingForm;
+    let denied = 0;
+    ui.render.update(jsx(Form, { actorId: ACTOR, requestId: REQUEST_A, leadId: LEAD,
+      onBooked: () => assert.fail("Unexpected restored publication"), onAccessDenied: () => denied++ }));
+    await ui.render.flush(); ui.take("OperatorBookingForm").fail(status); await ui.render.flush();
+    assert.equal(denied, 1); assert.deepEqual([...ui.storage.entries()], receipt);
+    assert.equal(ui.render.instances("BookingFields").length, 0);
+    ui.mutation.succeed(savedBooking); await ui.render.flush();
+    assert.deepEqual([...ui.storage.entries()], receipt, "The old successful reply cannot erase a recoverable booking after remount");
   });
 }
 

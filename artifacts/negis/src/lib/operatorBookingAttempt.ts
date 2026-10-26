@@ -189,7 +189,7 @@ export function clearOperatorBookingAttempt(
 }
 
 export function canReleaseOperatorBookingAttempt(status: number): boolean {
-  // Validation, access and business conflicts are definite refusals. Network
-  // failures and 5xx responses may have lost a successful provider response.
-  return [400, 401, 403, 409, 422].includes(status);
+  // Access denial cannot prove that an earlier attempt was not committed.
+  // Network failures and 5xx responses also retain the original request key.
+  return [400, 409, 422].includes(status);
 }

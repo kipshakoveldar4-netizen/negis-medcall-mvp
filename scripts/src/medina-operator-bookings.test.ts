@@ -86,8 +86,8 @@ test("operator retry keeps one detached request and only definite refusals relea
   assert.equal(isCurrentOperatorBookingAttempt(attempt, id(21), id(50), id(60)), false);
   assert.equal(isCurrentOperatorBookingAttempt(attempt, id(20), id(51), id(60)), false);
   assert.equal(isCurrentOperatorBookingAttempt(attempt, id(20), id(50), id(61)), false);
-  for (const status of [400, 401, 403, 409, 422]) assert.ok(canReleaseOperatorBookingAttempt(status));
-  for (const status of [0, 500, 502, 503, 504]) assert.equal(canReleaseOperatorBookingAttempt(status), false);
+  for (const status of [400, 409, 422]) assert.ok(canReleaseOperatorBookingAttempt(status));
+  for (const status of [0, 401, 403, 500, 502, 503, 504]) assert.equal(canReleaseOperatorBookingAttempt(status), false);
 });
 
 test("operator retry survives a same-tab reload without contacts or cross-account reuse", () => {

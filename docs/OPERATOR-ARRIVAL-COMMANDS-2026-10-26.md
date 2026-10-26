@@ -107,3 +107,9 @@ Current Preview isolation and dependency attestation, all other G1-G8 gates,
 legal/commercial recruitment conditions and creator job/rights/fee workflows
 remain separate. The original goal is active, not complete or redefined around
 these two UI fixes. Protected 059/065 are not edited or staged.
+
+Later G1-C8/G2-C17 [booking recovery](OPERATOR-BOOKING-RECOVERY-2026-10-26.md)
+forwards that lifetime through the booking form and preserves uncertain booking
+keys on access refusal. Selected original-commit/reload/revoked-reopen/account
+replacement is proven through actual local HTTP and native SQL. This does not
+make cooperation/proposal mutations durable or attest a cloud Preview.

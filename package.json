@@ -12,6 +12,7 @@
     "test:readiness-composed": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:readiness-composed",
     "test:function-default-access": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:function-default-access",
     "test:operator-request-refusal": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:operator-request-refusal",
+    "test:operator-booking-native-http": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:operator-booking-native-http",
     "test:legacy-server-access": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:legacy-server-access",
     "test:migration-chain-review": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:migration-chain-review",
     "test:profile-session": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:profile-session",

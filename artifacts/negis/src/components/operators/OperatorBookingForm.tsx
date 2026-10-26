@@ -24,57 +24,76 @@ import {
 
 export function OperatorBookingForm({
   actorId,
+  isSessionCurrent,
   requestId,
   leadId,
   onBooked,
   onAccessDenied,
 }: {
   actorId: string;
+  isSessionCurrent?: () => boolean;
   requestId: string;
   leadId: string;
   onBooked: (booking: OperatorBooking) => void;
   onAccessDenied: () => void;
 }) {
-  const [context, setContext] = useState<{ timeZone: string | null } | null>(
-    null,
-  );
-  const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
+  const mounted = useRef(false);
+  const scope = useRef({ actorId, requestId, leadId, revision, isSessionCurrent });
+  if (scope.current.actorId !== actorId || scope.current.requestId !== requestId || scope.current.leadId !== leadId
+    || scope.current.revision !== revision || scope.current.isSessionCurrent !== isSessionCurrent) {
+    scope.current = { actorId, requestId, leadId, revision, isSessionCurrent };
+  }
+  const renderedScope = scope.current;
+  const [response, setResponse] = useState<{
+    scope: typeof renderedScope;
+    context: { timeZone: string | null } | null;
+    error: string;
+  } | null>(null);
+  const isCurrent = () => mounted.current && scope.current === renderedScope && isSessionCurrent?.() !== false;
+  const current = response?.scope === renderedScope && isSessionCurrent?.() !== false ? response : null;
+  const context = current?.context ?? null;
+  const error = current?.error ?? "";
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  function invalidateAccess() {
+    if (!isCurrent()) return;
+    setResponse({ scope: renderedScope, context: null, error: "Доступ к записи изменился." });
+    onAccessDenied();
+  }
   useEffect(() => {
-    setContext(null);
-    setError("");
+    if (!isCurrent()) return;
+    setResponse(null);
     const controller = new AbortController();
+    const canPublish = () => !controller.signal.aborted && isCurrent();
     void operatorApi<{ timeZone: string | null }>(
       `operator-bookings?requestId=${encodeURIComponent(requestId)}&leadId=${encodeURIComponent(leadId)}`,
       undefined,
       "GET",
       controller.signal,
+      actorId,
+      canPublish,
     )
       .then((data) => {
-        if (!controller.signal.aborted) setContext(data);
+        if (canPublish()) setResponse({ scope: renderedScope, context: data, error: "" });
       })
       .catch((err) => {
         if (
-          !controller.signal.aborted &&
+          canPublish() &&
           err instanceof OperatorApiError &&
           [401, 403].includes(err.status)
         ) {
-          clearOperatorBookingAttempt(
-            getOperatorBookingStorage(),
-            actorId,
-            requestId,
-            leadId,
-          );
-          onAccessDenied();
+          // Access denial says nothing about an earlier uncertain commit.
+          invalidateAccess();
           return;
         }
-        if (!controller.signal.aborted)
-          setError(
-            err instanceof Error ? err.message : "Не удалось открыть запись",
-          );
+        if (canPublish()) setResponse({ scope: renderedScope, context: null,
+          error: err instanceof Error ? err.message : "Не удалось открыть запись" });
       });
     return () => controller.abort();
-  }, [actorId, requestId, leadId, revision, onAccessDenied]);
+  }, [renderedScope, onAccessDenied]);
   return (
     <section
       aria-label="Запись пациента"
@@ -106,11 +125,12 @@ export function OperatorBookingForm({
       {context?.timeZone && (
         <BookingFields
           actorId={actorId}
+          isSessionCurrent={isCurrent}
           requestId={requestId}
           leadId={leadId}
           timeZone={context.timeZone}
           onBooked={onBooked}
-          onAccessDenied={onAccessDenied}
+          onAccessDenied={invalidateAccess}
         />
       )}
     </section>
@@ -119,6 +139,7 @@ export function OperatorBookingForm({
 
 function BookingFields({
   actorId,
+  isSessionCurrent,
   requestId,
   leadId,
   timeZone,
@@ -126,6 +147,7 @@ function BookingFields({
   onAccessDenied,
 }: {
   actorId: string;
+  isSessionCurrent?: () => boolean;
   requestId: string;
   leadId: string;
   timeZone: string;
@@ -149,7 +171,11 @@ function BookingFields({
   const inFlight = useRef(false);
   const mounted = useRef(false);
   const currentScope = useRef({ actorId, requestId, leadId });
-  currentScope.current = { actorId, requestId, leadId };
+  if (currentScope.current.actorId !== actorId || currentScope.current.requestId !== requestId || currentScope.current.leadId !== leadId) {
+    currentScope.current = { actorId, requestId, leadId };
+  }
+  const renderedScope = currentScope.current;
+  const isScopeCurrent = () => mounted.current && currentScope.current === renderedScope && isSessionCurrent?.() !== false;
   useLayoutEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
@@ -219,7 +245,7 @@ function BookingFields({
     !!startsLocal;
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if ((!ready && !createAttempt.current) || inFlight.current) return;
+    if (!isScopeCurrent() || (!ready && !createAttempt.current) || inFlight.current) return;
     const attempt =
       createAttempt.current ??
       newOperatorBookingAttempt(actorId, requestId, {
@@ -250,7 +276,7 @@ function BookingFields({
     inFlight.current = true;
     setBusy(true);
     setError("");
-    const isCurrent = () => mounted.current && createAttempt.current === attempt
+    const isCurrent = () => isScopeCurrent() && createAttempt.current === attempt
       && isCurrentOperatorBookingAttempt(attempt, currentScope.current.actorId,
         currentScope.current.requestId, currentScope.current.leadId);
     try {
@@ -279,15 +305,7 @@ function BookingFields({
     } catch (err) {
       if (!isCurrent()) return;
       if (err instanceof OperatorApiError && [401, 403].includes(err.status)) {
-        clearOperatorBookingAttempt(
-          storage,
-          attempt.actorId,
-          attempt.requestId,
-          attempt.payload.leadId,
-        );
-        createAttempt.current = null;
-        setUncertainCreate(false);
-        setRecoveredCreate(false);
+        // Keep the original key: a denied retry cannot prove prior rollback.
         onAccessDenied();
         return;
       }
@@ -311,7 +329,7 @@ function BookingFields({
         setError(`Сохранение не подтверждено. Запись могла сохраниться; проверьте теми же данными. ${reason}`);
       }
     } finally {
-      if (mounted.current && isCurrentOperatorBookingAttempt(
+      if (isScopeCurrent() && isCurrentOperatorBookingAttempt(
         attempt,
         currentScope.current.actorId,
         currentScope.current.requestId,
