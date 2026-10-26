@@ -61,10 +61,12 @@ Owned-browser PNGs were saved and visually inspected, only in ignored local cach
 - [After: 1440x900](../node_modules/.cache/pwa-update-20261026/banner-1440.png), SHA-256
   `352daa688ca2042cc57a8ff44c43dcfde08bbb8919957fe8bc78ee23380283d8`.
 
-Third-version runs consistently retain qa-pwa-2 and qa-pwa-3 shell caches. Late
-old-worker writes can recreate the deleted name. No API data was observed in a
-cache, but eviction is NOT accepted: it needs a deterministic race test and fix.
-The draft assertion proves form state/new controller only. Physical touch and
+The C32 third-version sample contained qa-pwa-2 and qa-pwa-3 caches, but
+[C33](PWA-CACHE-2026-10-26.md) established that the sample preceded completed
+activation; that sample alone was not proof of failed eviction. C33 separately
+reproduces and fixes late-cache creation with real-source deterministic races
+and accepts the fully activated real sequence. C32's draft assertion proves
+form state/new controller only. Physical touch and
 safe-area, iOS/WebKit, installed launch, offline/reconnect, every route/role/form,
 pending-write recovery and current isolated Preview remain separate gates.
 This is not universal draft persistence or automatic saving.

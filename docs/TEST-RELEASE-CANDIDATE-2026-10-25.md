@@ -131,6 +131,13 @@ meeting editor and six measured viewports pass locally. This is not installed
 standalone, universal draft protection or current Preview acceptance. The third
 worker run retains an old shell cache; late-write/cache eviction remains explicit.
 
+**G7-C33 local delta, base 959a019:** [cache ownership acceptance](PWA-CACHE-2026-10-26.md)
+corrects C32's early controllerchange cache interpretation and independently
+reproduces late creation with real-source race controls. Active-build fencing,
+retained handles and per-shell lookup pass 16 local VM controls and the actual
+fully activated worker sequence. First upgrade from an unfenced deployed worker,
+installed/offline/physical-device coverage and current Preview remain pending.
+
 The latest recorded content/security Preview is **6c11l89kr / f18f411**,
 deployment `dpl_8CXaiuXmMfBY1EfrjqtMT2GNVjWv`: READY, target=null, aliases=[],
 846/846 sources matched. G5-C45 records site-test in loaded JS, absence of the

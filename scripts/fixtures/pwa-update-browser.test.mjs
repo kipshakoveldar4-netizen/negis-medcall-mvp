@@ -101,11 +101,11 @@ test('real two-version PWA update, navigation geometry and cancelled reload reco
     await writeFile(path.join(folder, name + '.png'), Buffer.from(data, 'base64'));
   };
   await cdp.call('Page.navigate', { url: server.origin + '/appointments?fixturePurpose=mortgage_leads&fixtureRole=admin' });
-  await wait('return !!navigator.serviceWorker?.controller && !![...document.querySelectorAll("button")].find(n=>n.textContent===\'Новая встреча\'&&!n.disabled)', 'Initial app and first real controller must load');
+  await wait('return navigator.serviceWorker?.controller?.state===\'activated\' && !![...document.querySelectorAll("button")].find(n=>n.textContent===\'Новая встреча\'&&!n.disabled)', 'Initial app and fully activated controller must load');
   await t.test('first installation is silent and only a shell cache exists', async () => {
     assert.equal(await version(), 'qa-pwa-1');
     assert.equal(await evaluate(`return !!${updateButton}`), false);
-    assert.deepEqual(await evaluate('return await caches.keys()'), ['medina-shell-qa-pwa-1']);
+    assert.deepEqual(await evaluate('return (await caches.keys()).sort()'), ['medina-active-shell', 'medina-shell-qa-pwa-1']);
   });
   // Vite may finish dependency optimization with an initial development reload.
   // Compare worker operations to the loaded fixture, not that dev-server count.
@@ -167,13 +167,13 @@ test('real two-version PWA update, navigation geometry and cancelled reload reco
   const beforeForeign = navigations;
   await evaluate(`const r=await navigator.serviceWorker.getRegistration();if(!r.waiting)throw Error('Expected third waiting version');r.waiting.postMessage('skip-waiting');`, other);
   await wait(`return ${updateButton}?.textContent==='Перезагрузить'`, 'Foreign activation must offer reload only');
+  // controllerchange can precede completion of activation waitUntil/cleanup.
+  await wait("return navigator.serviceWorker.controller?.state==='activated'", 'Third worker must finish activation before inspecting eviction');
   await t.test('another real tab activation leaves the original draft and old shell untouched', async () => {
     assert.equal(navigations, beforeForeign); assert.equal(await version(), 'qa-pwa-3');
     assert.equal(await evaluate('return document.querySelector("input[id$=\'-title\']").value'), 'QA draft survives another tab');
     const cacheNames = await evaluate('return await caches.keys()');
-    assert.ok(cacheNames.includes('medina-shell-qa-pwa-3'));
-    // Late writes from the old worker can recreate its shell cache. This is
-    // recorded separately, not accepted as cache-eviction coverage here.
+    assert.deepEqual(cacheNames.sort(), ['medina-active-shell', 'medina-shell-qa-pwa-3']);
     t.diagnostic('Observed shell caches after activation: ' + JSON.stringify(cacheNames));
   });
   await cdp.call('Target.closeTarget', { targetId: newTarget.targetId });

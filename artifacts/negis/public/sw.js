@@ -22,6 +22,22 @@
 
 const BUILD_ID = "__BUILD_ID__";
 const SHELL_CACHE = `medina-shell-${BUILD_ID}`;
+const ACTIVE_CACHE = "medina-active-shell";
+const ACTIVE_KEY = new URL("/__medina_active_shell", self.location.origin).href;
+
+async function activeShellCache() {
+  try {
+    const ownsCache = async () => (await caches.match(ACTIVE_KEY, { cacheName: ACTIVE_CACHE }))?.text();
+    if (await ownsCache() !== BUILD_ID) return null;
+    const cache = await caches.open(SHELL_CACHE);
+    // Activation can retire us between the ownership read and open(). Check
+    // again before retaining the handle; only our retired name may be removed.
+    if (await ownsCache() !== BUILD_ID) { await caches.delete(SHELL_CACHE); return null; }
+    return cache;
+  } catch {
+    return null;
+  }
+}
 
 /** Пути, которые работник не обслуживает ни при каких условиях. */
 function isNeverCached(url) {
@@ -53,10 +69,16 @@ self.addEventListener("activate", (event) => {
     (async () => {
       // Кэши прошлых сборок удаляются: они больше никому не нужны, а место на
       // телефоне занимают.
-      const names = await caches.keys();
-      await Promise.all(
-        names.filter((name) => name.startsWith("medina-shell-") && name !== SHELL_CACHE).map((name) => caches.delete(name)),
-      );
+      try {
+        const owner = await caches.open(ACTIVE_CACHE);
+        await owner.put(ACTIVE_KEY, new Response(BUILD_ID));
+        const names = await caches.keys();
+        await Promise.all(
+          names.filter((name) => name.startsWith("medina-shell-") && name !== SHELL_CACHE).map((name) => caches.delete(name)),
+        );
+      } catch {
+        // Unavailable storage must not stop the online application taking control.
+      }
       await self.clients.claim();
     })(),
   );
@@ -79,35 +101,37 @@ self.addEventListener("fetch", (event) => {
   if (isNeverCached(url)) return;
 
   if (isImmutableAsset(url)) {
+    // Capture this cache before the network wait. A later activation can delete
+    // its name; writing the retained handle cannot recreate that retired name.
+    const cachePromise = activeShellCache();
     event.respondWith(
-      caches.match(request).then(
-        (cached) =>
-          cached ||
-          fetch(request).then((response) => {
-            if (response.ok) {
-              const copy = response.clone();
-              caches.open(SHELL_CACHE).then((cache) => cache.put(request, copy));
-            }
-            return response;
-          }),
-      ),
+      cachePromise.then(async (cache) => {
+        const cached = cache && await cache.match(request).catch(() => undefined);
+        if (cached) return cached;
+        const response = await fetch(request);
+        if (response.ok && cache) await cache.put(request, response.clone()).catch(() => undefined);
+        return response;
+      }),
     );
     return;
   }
 
   if (request.mode === "navigate") {
+    const cachePromise = activeShellCache();
     // Сеть первой: приложение обязано показывать свежее, а кэш здесь только на
     // случай, когда сети нет вовсе.
     event.respondWith(
-      fetch(request)
-        .then((response) => {
+      cachePromise.then(async (cache) => {
+        try {
+          const response = await fetch(request);
           if (response.ok) {
-            const copy = response.clone();
-            caches.open(SHELL_CACHE).then((cache) => cache.put("/", copy));
+            if (cache) await cache.put("/", response.clone()).catch(() => undefined);
           }
           return response;
-        })
-        .catch(() => caches.match("/").then((cached) => cached || Response.error())),
+        } catch {
+          return (cache && await cache.match("/").catch(() => undefined)) || Response.error();
+        }
+      }),
     );
   }
 });
