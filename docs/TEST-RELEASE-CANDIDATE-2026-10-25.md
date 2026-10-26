@@ -246,6 +246,16 @@ scope lease across refresh; 323 hook/transport and 25 actual React/Chromium case
 pass locally. This is not durable unknown-outcome recovery or new Preview proof.
 All original family requirements above remain; do not sum overlapping counts.
 
+Later G1-C7 local acceptance: [arrival command and portal lifetime](OPERATOR-ARRIVAL-COMMANDS-2026-10-26.md).
+Arrival/control-call writes now own each row synchronously across list refresh
+and pages; independent rows remain usable. Old handlers cannot acquire a newer
+view, and only the owning settled attempt releases its row. The actual portal
+profile epoch now guards descendants before raw identity/ABA/focus rerenders;
+same-user token refresh remains valid. Expanded 591/591, including actual
+Chromium/React/transport at 375/1440, full build/169 cold starts. Only two UI
+sources change; no new API/schema/financial rule. This is not durable reload/
+unknown-commit recovery, real Auth/SQL or new Preview acceptance.
+
 This is a dependency inventory, **not an apply script**. Existing site-test
 receipts are scoped: DELIVERY records selected applications of 072/073/074,
 075, 076/077, 078, 021+079, 080 and 051+081 in their respective R2/O2/G7/G5

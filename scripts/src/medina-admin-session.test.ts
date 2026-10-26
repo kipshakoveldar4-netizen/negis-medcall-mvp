@@ -281,7 +281,8 @@ function setup(search = "") {
   renderer.mount(module.default, [module.fixture.AdminCenterSession, module.fixture.AdminCenterContent]);
   return {
     renderer, calls, dispatches, tokenCalls, toasts, storageWrites, locations, copies, snapshots,
-    api, fetch: importedFetch, snapshot: () => snapshot,
+    api, fetch: importedFetch, getToken, snapshot: () => snapshot,
+    sdkSession: async () => ({ data: { session: sdkActor ? { user: { id: sdkActor } } : null }, error: null }),
     access: () => renderer.instance("AdminCenterContent").props.access,
     emit(id: string | null, event = id ? "SIGNED_IN" : "SIGNED_OUT") {
       sdkActor = id || "";
@@ -348,6 +349,8 @@ async function clinicArrival(fixture: Fixture) {
     clinicBrief: "Local fixture only", pricePerArrivalMinor: "0", currency: "KZT", leadScope: "assigned" }]);
   const requests = evaluate(requestSource, {}, {
     react: children[1].hooks, "@/lib/operatorApi": { useOperatorList: () => requestsList },
+    "@/lib/serverAuth": { getSupabaseAccessToken: fixture.getToken },
+    "@/lib/supabase": { supabase: { auth: { getSession: fixture.sdkSession } } },
     "./OperatorLeads": { OperatorLeads: "OperatorLeads" },
     "./OperatorServiceCatalog": { OperatorServiceCatalog: "OperatorServiceCatalog" },
     "./OperatorArrivals": { OperatorArrivals: "OperatorArrivals" },
@@ -542,6 +545,8 @@ async function clinicAction(fixture: Fixture, kind: ClinicAction, confirm?: () =
       window: { confirm: confirm ?? (() => true) },
     }, {
       react: target.hooks, "@/lib/operatorApi": { ...operator, useOperatorList: () => requests },
+      "@/lib/serverAuth": { getSupabaseAccessToken: fixture.getToken },
+      "@/lib/supabase": { supabase: { auth: { getSession: fixture.sdkSession } } },
       "./OperatorLeads": { OperatorLeads: "OperatorLeads" },
       "./OperatorServiceCatalog": { OperatorServiceCatalog: "OperatorServiceCatalog" },
       "./OperatorArrivals": { OperatorArrivals: "OperatorArrivals" },
@@ -718,6 +723,8 @@ async function clinicAssignment(fixture: Fixture) {
     clinicBrief: "Synthetic agreement", pricePerArrivalMinor: "0", currency: "KZT", leadScope: "assigned" }]);
   const requests = evaluate(requestSource, { window: { confirm: () => true } }, {
     react: children[1].hooks, "@/lib/operatorApi": { ...operator, useOperatorList: () => requestsList },
+    "@/lib/serverAuth": { getSupabaseAccessToken: fixture.getToken },
+    "@/lib/supabase": { supabase: { auth: { getSession: fixture.sdkSession } } },
     "./OperatorLeads": { OperatorLeads: "OperatorLeads" },
     "./OperatorServiceCatalog": { OperatorServiceCatalog: "OperatorServiceCatalog" },
     "./OperatorArrivals": { OperatorArrivals: "OperatorArrivals" },

@@ -331,10 +331,15 @@ async function fixture(t: TestContext, delayInitialSession = false) {
     labels: contracts.operatorStatusLabels,
     flush: driver.flush,
     initialSession(id: string) { initial.resolve({ data: { session: session(id) } }); },
-    changeSession(id: string) {
+    changeSession(id: string | null, event = "SIGNED_IN") {
       assert.ok(authListener, "Auth subscription must be installed");
       currentSession = session(id);
-      authListener("SIGNED_IN", currentSession);
+      authListener(event, currentSession);
+    },
+    cabinet() {
+      const node = driver.nodes().find(node => node.type === OperatorRequests);
+      assert.ok(node, "The real portal must render its collaboration boundary");
+      return node.props;
     },
     focus() { now += 1_000; windowEvents.dispatch("focus"); },
     take(method: string, actorId: string) {
@@ -376,6 +381,26 @@ async function approvedFixture(t: TestContext) {
   assert.equal(ui.snapshot().cabinetActor, "A", "Initial successful GET must open the real cabinet branch");
   assert.equal(ui.snapshot().busy, false);
   return ui;
+}
+
+for (const transition of ["actor", "logout", "ABA", "focus", "refresh"] as const) {
+  test(`portal child lifetime: ${transition} is authoritative before the next render`, async t => {
+    const ui = await approvedFixture(t), props = ui.cabinet();
+    assert.equal(typeof props.isSessionCurrent, "function", "Forward the real profile/session lifetime to collaboration descendants");
+    const current = props.isSessionCurrent as () => boolean;
+    assert.equal(current(), true);
+    if (transition === "focus") ui.focus();
+    else if (transition === "refresh") ui.changeSession("A", "TOKEN_REFRESHED");
+    else if (transition === "logout") ui.changeSession(null, "SIGNED_OUT");
+    else { ui.changeSession("B"); if (transition === "ABA") ui.changeSession("A"); }
+    assert.equal(current(), transition === "refresh", "Returning to A cannot revive an expired profile epoch");
+    await ui.flush();
+    if (transition !== "refresh" && transition !== "logout") {
+      ui.take("GET", transition === "actor" ? "B" : "A").succeed(profile(transition === "actor" ? "B" : "A"));
+      await ui.flush();
+      assert.equal(current(), false); assert.equal((ui.cabinet().isSessionCurrent as () => boolean)(), true);
+    }
+  });
 }
 
 test("simulation R3.1 delayed successful PATCH cannot restore approved after suspended focus GET", async (t) => {

@@ -218,6 +218,9 @@ export default function OperatorPortal() {
       }
     }
   }
+  const renderedProfileEpoch = profileEpoch.current;
+  const isProfileSessionCurrent = () => currentUserId.current === userId
+    && profileEpoch.current === renderedProfileEpoch;
   return (
     <main
       className="min-h-screen px-4 py-8"
@@ -380,6 +383,7 @@ export default function OperatorPortal() {
             <OperatorRequests
               key={`${userId}:${revision}`}
               actorId={userId}
+              isSessionCurrent={isProfileSessionCurrent}
               onAccessDenied={refreshProfile}
             />
           </>

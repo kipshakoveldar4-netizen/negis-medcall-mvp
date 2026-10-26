@@ -62,9 +62,17 @@ export function OperatorArrivals({
     ? `clinic-operator-arrivals?workspaceId=${encodeURIComponent(workspaceId!)}&requestId=${encodeURIComponent(requestId)}`
     : `operator-arrivals?requestId=${encodeURIComponent(requestId)}`;
   const list = useOperatorList<OperatorArrival>(path, true, clinic ? undefined : onAccessDenied);
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
   const [error, setError] = useState("");
   const mounted = useRef(false);
+  const pending = useRef(new Map<string, object>());
+  const scope = useRef({ path, actorId });
+  if (scope.current.path !== path || scope.current.actorId !== actorId) {
+    scope.current = { path, actorId };
+    pending.current = new Map();
+    if (busyIds.size) setBusyIds(new Set());
+  }
+  const renderedScope = scope.current;
   // A mutation belongs to its visible list snapshot, including refreshes/pages.
   const currentView = useRef({ path, actorId, offset: list.offset, data: list.data });
   const scopeChanged =
@@ -73,8 +81,28 @@ export function OperatorArrivals({
     currentView.current.offset !== list.offset;
   if (scopeChanged || currentView.current.data !== list.data) {
     currentView.current = { path, actorId, offset: list.offset, data: list.data };
-    if (busyId !== null) setBusyId(null);
     if (scopeChanged) setError("");
+  }
+  const renderedView = currentView.current;
+  const isSameScope = () => mounted.current && scope.current === renderedScope && isSessionCurrent?.() !== false;
+  const isCurrent = () => isSameScope() && currentView.current === renderedView;
+  function ownCommand(key: string) {
+    if (!actorId || !isCurrent() || pending.current.has(key)) return null;
+    // Own each row before rendering. Refreshes retire its reply, not its lease.
+    const attempt = {};
+    pending.current.set(key, attempt);
+    setBusyIds(value => new Set(value).add(key));
+    setError("");
+    return attempt;
+  }
+  function releaseCommand(key: string, attempt: object) {
+    if (!isSameScope() || pending.current.get(key) !== attempt) return;
+    pending.current.delete(key);
+    setBusyIds(value => {
+      const next = new Set(value);
+      next.delete(key);
+      return next;
+    });
   }
   useLayoutEffect(() => {
     mounted.current = true;
@@ -95,16 +123,9 @@ export function OperatorArrivals({
   }, [list.refresh]);
 
   async function confirm(item: OperatorArrival) {
-    if (!mounted.current || !actorId || isSessionCurrent?.() === false) return;
-    const startedAtView = currentView.current;
-    const isCurrent = () => mounted.current && isSessionCurrent?.() !== false && currentView.current === startedAtView;
-    const isSameScope = () =>
-      mounted.current &&
-      isSessionCurrent?.() !== false &&
-      currentView.current.path === startedAtView.path &&
-      currentView.current.actorId === startedAtView.actorId;
-    setBusyId(item.appointmentId);
-    setError("");
+    const key = `confirm:${item.appointmentId}`;
+    const attempt = ownCommand(key);
+    if (!attempt) return;
     try {
       await operatorApi(
         path,
@@ -127,8 +148,7 @@ export function OperatorArrivals({
         err instanceof Error ? err.message : "Не удалось подтвердить приход",
       );
     } finally {
-      if (isCurrent())
-        setBusyId((value) => value === item.appointmentId ? null : value);
+      releaseCommand(key, attempt);
     }
   }
 
@@ -136,16 +156,10 @@ export function OperatorArrivals({
     item: OperatorArrival,
     result: OperatorArrivalCheckResult,
   ) {
-    if (!item.arrivalId || !mounted.current || !actorId || isSessionCurrent?.() === false) return;
-    const startedAtView = currentView.current;
-    const isCurrent = () => mounted.current && isSessionCurrent?.() !== false && currentView.current === startedAtView;
-    const isSameScope = () =>
-      mounted.current &&
-      isSessionCurrent?.() !== false &&
-      currentView.current.path === startedAtView.path &&
-      currentView.current.actorId === startedAtView.actorId;
-    setBusyId(item.arrivalId);
-    setError("");
+    if (!item.arrivalId) return;
+    const key = `call:${item.arrivalId}`;
+    const attempt = ownCommand(key);
+    if (!attempt) return;
     try {
       await operatorApi(
         path,
@@ -170,8 +184,7 @@ export function OperatorArrivals({
           : "Не удалось сохранить результат звонка",
       );
     } finally {
-      if (isCurrent())
-        setBusyId((value) => value === item.arrivalId ? null : value);
+      releaseCommand(key, attempt);
     }
   }
 
@@ -238,7 +251,7 @@ export function OperatorArrivals({
               <button
                 type="button"
                 className="neu-btn-primary"
-                disabled={busyId === item.appointmentId}
+                disabled={busyIds.has(`confirm:${item.appointmentId}`)}
                 onClick={() => void confirm(item)}
               >
                 <CheckCircle2 size={16} />
@@ -274,7 +287,7 @@ export function OperatorArrivals({
                           ? "neu-btn-primary"
                           : "neu-btn"
                       }
-                      disabled={busyId === item.arrivalId}
+                      disabled={busyIds.has(`call:${item.arrivalId}`)}
                       aria-pressed={item.operatorCheckResult === value}
                       onClick={() => void saveCall(item, value)}
                     >

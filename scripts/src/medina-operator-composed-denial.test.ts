@@ -680,7 +680,7 @@ async function queuedAction(t: TestContext, target: QueuedAction, openStageBooki
     if (change !== "unmount") assert.equal(ui.render.instances(name)[0], owner, "Keep the real outer component instance across scope changes");
     if (change === "actor" || change === "refresh") assert.equal(ui.render.instances(origin)[0], listOwner, "Actor changes and refreshes must retain the real list owner");
   }
-  return { ...ui, mutation, transition, denied: () => denied };
+  return { ...ui, mutation, transition, rows, denied: () => denied };
 }
 
 for (const target of ["request", "call", "stage", "booking", "clinic-assignment", "clinic-confirmation"] as const) {
@@ -699,7 +699,7 @@ for (const target of ["request", "call", "stage", "booking", "clinic-assignment"
       assert.equal(ui.mutation.dispatchGuard?.(), false, "The live predicate must close without passive cleanup");
       assert.equal(ui.mutation.settled, true, "The queued transport must reject cancellation, not leave the action hanging");
       assert.equal(ui.render.content(), before);
-      const releasesLiveLease = change === "refresh" && (target === "request" || target === "stage" || target === "clinic-assignment");
+      const releasesLiveLease = change === "refresh" && target !== "booking";
       assert.equal(ui.render.writes(), writes + Number(releasesLiveLease),
         "A refreshed live scope may only release its settled lease; other obsolete callbacks make no writes");
       assert.equal(ui.requests.length, count);
@@ -713,6 +713,13 @@ for (const target of ["request", "call", "stage", "booking", "clinic-assignment"
         const control = ui.find(node => node.type === "button" && typeof node.props.disabled === "boolean", ui.find(node => node.type === "article"));
         assert.equal(control.props.disabled, false, "The canceled original request lease must release the still-live scope");
         assert.equal(ui.requests.filter(request => request.method === "PATCH").length, 1);
+      } else if (releasesLiveLease && (target === "call" || target === "clinic-confirmation")) {
+        await ui.render.flush();
+        ui.take("OperatorArrivals").succeed(list(ui.rows)); await ui.render.flush();
+        const article = ui.find(node => node.type === "article", ui.section(labels.arrivals));
+        const controls = elements(article.props.children).filter(node => node.type === "button" && typeof node.props.disabled === "boolean");
+        assert.ok(controls.length > 0); assert.ok(controls.every(control => control.props.disabled === false));
+        assert.equal(ui.requests.filter(request => request.method !== "GET").length, 1);
       } else if (releasesLiveLease) {
         await ui.render.flush();
         ui.take("LeadList").succeed(list([{ id: LEAD, name: "Synthetic refreshed patient", status: "new", assigned: false }]));
@@ -1425,6 +1432,82 @@ async function clinicConfirmation(t: TestContext) {
       assert.notEqual(ui.render.instances("OperatorArrivals")[0], oldArrivals);
     },
   };
+}
+
+async function arrivalCommand(t: TestContext, clinic: boolean) {
+  const ui = await runtime(t, true);
+  const Arrivals = ui.load("arrivals").OperatorArrivals;
+  const props = { actorId: ACTOR, requestId: REQUEST_A, ...(clinic ? { workspaceId: WORKSPACE } : {}) };
+  const rows = [0, 1].map(index => ({
+    appointmentId: `synthetic-appointment-${index}`, arrivalId: clinic ? null : `synthetic-arrival-${index}`,
+    status: "arrived", clientName: `Synthetic lease patient ${index}`, clientPhone: `PRIVATE-${index}`,
+    startsAt: "2026-10-18T09:00:00Z", priceMinor: "100", currency: "KZT",
+  }));
+  ui.render.mount(jsx(Arrivals, props)); await ui.render.flush();
+  ui.take("OperatorArrivals").succeed(list(rows)); await ui.render.flush();
+  const buttons = () => ui.render.nodes().filter(node => node.type === "button"
+    && (clinic ? text(node.props.children).includes("Подтвердить приход") : text(node.props.children) === "Подтвердил"));
+  const controls = () => ui.render.nodes().filter(node => node.type === "button"
+    && (clinic ? text(node.props.children).includes("Подтвердить приход")
+      : ["Подтвердил", "Не подтвердил", "Не дозвонился"].includes(text(node.props.children))));
+  const writes = () => ui.requests.filter(request => request.method !== "GET");
+  return { ...ui, buttons, controls, writes, rows, props, Arrivals,
+    async fresh(page = false) {
+      ui.invoke(page ? ui.button("Далее") : ui.button("Обновить приходы")); await ui.render.flush();
+      ui.take("OperatorArrivals").succeed(list(rows)); await ui.render.flush();
+    } };
+}
+
+for (const clinic of [false, true]) {
+  const kind = clinic ? "arrival confirmation" : "control call";
+  test(`arrival command ${kind}: retained handler dispatches once before the disabled render`, async t => {
+    const ui = await arrivalCommand(t, clinic), button = ui.buttons()[0];
+    ui.invoke(button); ui.invoke(button); await ui.render.flush();
+    assert.equal(ui.writes().length, 1, "The original handler must own the command synchronously");
+    const mutation = ui.take("event", clinic ? "POST" : "PATCH");
+    mutation.release(); mutation.succeed(); await ui.render.flush();
+  });
+  for (const page of [false, true]) for (const outcome of ["success", "network"] as const) {
+    test(`arrival command ${kind}: ${page ? "page" : "refresh"} retains its row lease until ${outcome}`, async t => {
+      const ui = await arrivalCommand(t, clinic), oldButton = ui.buttons()[0];
+      ui.invoke(oldButton); await ui.render.flush();
+      const mutation = ui.take("event", clinic ? "POST" : "PATCH"); mutation.release();
+      await ui.fresh(page);
+      assert.equal(ui.buttons()[0].props.disabled, true, "A fresh list cannot reopen an unresolved row command");
+      ui.invoke(oldButton); await ui.render.flush(); assert.equal(ui.writes().length, 1);
+      const before = ui.requests.length;
+      if (outcome === "success") mutation.succeed(); else mutation.reject();
+      await ui.render.flush();
+      assert.equal(ui.buttons()[0].props.disabled, false, "The settled owning command releases its live row lease");
+      assert.equal(ui.requests.length, before, "An obsolete outcome cannot refresh or report into the newer list");
+      assert.equal(ui.render.nodes().some(node => node.props.role === "alert"), false);
+    });
+  }
+  test(`arrival command ${kind}: independent rows retain independent pending owners`, async t => {
+    const ui = await arrivalCommand(t, clinic);
+    ui.invoke(ui.buttons()[0]); await ui.render.flush();
+    const first = ui.take("event", clinic ? "POST" : "PATCH"); first.release();
+    assert.equal(ui.buttons()[1].props.disabled, false);
+    ui.invoke(ui.buttons()[1]); await ui.render.flush();
+    const second = ui.take("event", clinic ? "POST" : "PATCH"); second.release();
+    assert.ok(ui.controls().every(button => button.props.disabled === true), "A second row cannot unlock the first");
+    await ui.fresh(); second.succeed(); await ui.render.flush();
+    assert.equal(ui.buttons()[0].props.disabled, true); assert.equal(ui.buttons()[1].props.disabled, false);
+    first.reject(); await ui.render.flush(); assert.ok(ui.controls().every(button => button.props.disabled === false));
+  });
+  for (const change of ["actor", "path", "page", "refresh"] as const) {
+    test(`arrival command ${kind}: retained ${change} handler cannot acquire the replacement view`, async t => {
+      const ui = await arrivalCommand(t, clinic), oldButton = ui.buttons()[0];
+      if (change === "page" || change === "refresh") await ui.fresh(change === "page");
+      else {
+        ui.render.update(jsx(ui.Arrivals, { ...ui.props, ...(change === "actor" ? { actorId: REQUEST_B } : { requestId: REQUEST_B }) }));
+        await ui.render.beforeEffects();
+      }
+      const before = ui.requests.length, stateWrites = ui.render.writes();
+      ui.invoke(oldButton); await ui.render.beforeEffects();
+      assert.equal(ui.requests.length, before); assert.equal(ui.render.writes(), stateWrites);
+    });
+  }
 }
 
 for (const transition of ["A-B", "A-B-A"] as const) {

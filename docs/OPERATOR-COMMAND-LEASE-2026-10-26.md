@@ -76,3 +76,10 @@ matching 094/096 and 105 cloud application, real session-switch matrix, legal
 terms, recruitment commercial activation and all unrelated G1-G8 gates remain.
 No deployment, real account/database, Baspana, salon, WhatsApp, provider, ad,
 paid generation or expense changed.
+
+## Later Arrival And Portal Lifetime Cycle
+
+G1-C7 [arrival command ownership](OPERATOR-ARRIVAL-COMMANDS-2026-10-26.md)
+extends live ownership to confirmation/control-call rows without serializing
+independent patients, and forwards the actual portal profile/session epoch to
+descendants. It does not supersede the durable unknown-outcome/reload gate above.

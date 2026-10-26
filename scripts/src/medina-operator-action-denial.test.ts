@@ -414,13 +414,23 @@ for (const kind of kinds) {
     });
   }
   for (const failure of [409, 503, "network"] as const) {
-    test(`${kind}: non-auth ${failure} preserves the current cards without refreshing`, async (t) => {
+    test(`${kind}: non-auth ${failure} respects request-specific refusal without clearing unrelated authority`, async (t) => {
       const ui = await fixture(t, kind);
       const before = ui.snapshot();
       const mutation = await ui.startAction();
       if (failure === "network") mutation.reject(); else mutation.fail(failure);
       await ui.flush();
       const after = ui.snapshot();
+      if (kind === "requests" && failure === 409) {
+        assert.equal(after.cards, before.cards, "Retain the non-contact agreement summary during its scoped refresh");
+        assert.deepEqual(after.phones, []); assert.deepEqual(after.nested, []);
+        assert.equal(ui.requests.length, 3, "A current request conflict revalidates its list");
+        assert.ok(after.content.includes("Synthetic failure 409"));
+        ui.take("GET").succeed(dto(kind, "reverified")); await ui.flush();
+        assert.equal(ui.snapshot().cards, 1); assert.deepEqual(ui.snapshot().nested, []);
+        assert.equal(ui.snapshot().busy, false);
+        return;
+      }
       assert.equal(ui.requests.length, 2);
       assert.equal(after.cards, before.cards);
       assert.deepEqual(after.phones, before.phones);
@@ -518,7 +528,7 @@ for (const kind of kinds) {
         await ui.flush();
         ui.openNested();
         await ui.flush();
-        const current = await ui.startAction();
+        assert.equal(ui.snapshot().busy, true, "Fresh list data must retain the unresolved original command");
         const before = ui.snapshot();
         const count = ui.requests.length;
         if (outcome === "success") obsolete.succeed(); else obsolete.fail(outcome);
@@ -531,10 +541,8 @@ for (const kind of kinds) {
           assert.equal(ui.requests.length, count + 1, "Same-scope refusal must revalidate the current page once");
           const replacement = ui.take("GET");
           assert.equal(replacement.url, ui.requests[2].url, "Revalidation must retain the current page offset");
-          current.fail(500);
-          await ui.flush();
           hidden(ui.snapshot());
-          assert.ok(ui.snapshot().content.includes(`Synthetic CRM error ${outcome}`), "A now-obsolete failure cannot replace the auth refusal");
+          assert.ok(ui.snapshot().content.includes(`Synthetic CRM error ${outcome}`));
           replacement.succeed(dto(kind, "reverified"));
           await ui.flush();
           assert.equal(ui.snapshot().cards, 1);
@@ -542,10 +550,12 @@ for (const kind of kinds) {
           assert.equal(ui.snapshot().busy, false);
         } else {
           await ui.flush();
-          assert.deepEqual(ui.snapshot(), before);
+          assert.deepEqual({ ...ui.snapshot(), busy: before.busy }, before,
+            "Only the settled row lease may change; no obsolete content/error is published");
+          assert.equal(ui.snapshot().busy, false);
           assert.equal(ui.requests.length, count);
-          assert.equal(current.settled, false);
-          current.fail(409);
+          const next = await ui.startAction();
+          next.fail(409);
           await ui.flush();
         }
       });
