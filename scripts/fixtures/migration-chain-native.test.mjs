@@ -16,6 +16,7 @@ import { exerciseMortgageReportClock, exerciseReportClockRefusals } from './mort
 import { exerciseAnalyticsTimezone, exerciseAnalyticsTimezoneRefusals } from './analytics-timezone-cases.mjs';
 import { exerciseContributorCumulative, exerciseDepartedOperatorAuthor } from './contributor-cumulative-cases.mjs';
 import { reproduceUnboundVideoDispatch, exerciseVideoQuotaDispatch, exerciseVideoQuotaMissing } from './video-quota-dispatch-cases.mjs';
+import { reproduceUnboundOperatorProposal, exerciseOperatorCommands } from './operator-command-recovery-fixture.mjs';
 
 // Native application-chain acceptance, NOT an authority to release migrations.
 // 001-008 require an undocumented legacy baseline; data/*.sql is deliberately
@@ -156,6 +157,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
   let legacyRlsBefore;
   for (const entry of chain) {
     if(entry.file==='106_generated_video_quota_dispatch.sql') await reproduceUnboundVideoDispatch(db,t);
+    if(entry.file==='107_operator_request_commands.sql') await reproduceUnboundOperatorProposal(db,t);
     if (entry.file === '102_appointment_capacity_explicit_identity.sql') {
       let reproduced=false;
       await t.test('before 102, full 009-101 chain still refuses distinct linked namesakes', async () => {
@@ -223,6 +225,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     }
     if(entry.file==='105_contributor_applications.sql') await exerciseContributorCumulative(db,entry.source,t);
     if(entry.file==='106_generated_video_quota_dispatch.sql') await exerciseVideoQuotaDispatch(db,fixture,entry.source,t);
+    if(entry.file==='107_operator_request_commands.sql') await exerciseOperatorCommands(db,fixture,entry.source,t);
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
       await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{
@@ -314,7 +317,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
   }));
 
   await t.test('RPC-only and read-only server boundaries survive later migrations', async () => {
-    for (const table of ['platform_subscription_operations', 'content_telegram_deliveries', 'content_telegram_delivery_guards', 'site_deletion_operations']) {
+    for (const table of ['platform_subscription_operations', 'content_telegram_deliveries', 'content_telegram_delivery_guards', 'site_deletion_operations','growth_operator_request_commands']) {
       const result = await one(db, `select has_table_privilege('service_role',$1,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') as tab,
         has_any_column_privilege('service_role',$1,'SELECT,INSERT,UPDATE,REFERENCES') as col`, [`public.${table}`]);
       assert.deepEqual(result, { tab: false, col: false }, `${table}: no direct service access may be restored`);
@@ -329,6 +332,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'public.accept_crm_site_inquiry(text,uuid,jsonb)', 'public.valid_crm_site_consent_receipt(jsonb)',
       'public.delete_crm_site_inquiry(uuid,text,uuid,uuid[],timestamptz,uuid,uuid,uuid,boolean)',
       'public.lock_site_deletion_operation_actor(uuid,uuid,uuid)', 'public.validate_site_deletion_operation_request(jsonb)',
+      'public.operator_request_command_receipt(public.growth_operator_request_commands)', 'public.confirm_operator_request_command(uuid,uuid,text,uuid,uuid,text)',
       'public.site_deletion_operation_receipt(public.site_deletion_operations,boolean)']) {
       assert.equal((await one(db, "select has_function_privilege('service_role',$1,'EXECUTE') as allowed", [signature])).allowed, false, signature);
     }
@@ -336,7 +340,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'admit_content_telegram_delivery', 'advance_content_telegram_delivery', 'accept_crm_site_inquiry_with_consent',
       'read_lead_team_analytics', 'read_generated_video_workflow', 'read_platform_subscription_operation',
       'prepare_site_deletion_operation', 'read_site_deletion_operations', 'execute_site_deletion_operation', 'close_site_deletion_operation',
-      'apply_growth_contributor', 'review_growth_contributor']) {
+      'apply_growth_contributor', 'review_growth_contributor','execute_clinic_operator_command','execute_growth_operator_command','read_operator_request_command']) {
       const functions = (await db.query(`select p.oid::regprocedure::text as signature,has_function_privilege('service_role',p.oid,'EXECUTE') as allowed
         from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname=$1`, [name])).rows;
       assert.equal(functions.length, 1, name); assert.equal(functions[0].allowed, true, name);

@@ -77,6 +77,13 @@ terms, recruitment commercial activation and all unrelated G1-G8 gates remain.
 No deployment, real account/database, Baspana, salon, WhatsApp, provider, ad,
 paid generation or expense changed.
 
+Later G1-C9/G7-C38 [command-receipt foundation](OPERATOR-COMMAND-RECEIPTS-2026-10-26.md)
+reproduces an actual old proposal replay creating an unintended replacement
+after cooperation ends, and adds local 107 keyed atomic result/replay/read
+primitives. It does not silently make this existing UI lease durable: matching
+API/callers, persisted unresolved commands, committed HTTP/session tests and
+closure of the old unbound executors remain a coordinated next increment.
+
 ## Later Arrival And Portal Lifetime Cycle
 
 G1-C7 [arrival command ownership](OPERATOR-ARRIVAL-COMMANDS-2026-10-26.md)

@@ -8,12 +8,24 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-106, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 98);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 98 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-107, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 99);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 99 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
+});
+
+test('107 adds only private committed operator command receipts and leaves the 096 implementation intact',()=>{
+  const entry=chain.find(item=>item.file.startsWith('107_'));
+  assert.deepEqual(entry.evidence.tables,['public.growth_operator_request_commands']);
+  assert.deepEqual(entry.evidence.rls,entry.evidence.tables);
+  assert.deepEqual(entry.evidence.functions.map(fn=>fn.name),['public.operator_request_command_receipt',
+    'public.confirm_operator_request_command','public.execute_clinic_operator_command','public.execute_growth_operator_command','public.read_operator_request_command']);
+  assert.equal(entry.evidence.dynamicSqlLines.length,0);assert.equal(entry.evidence.storageCatalogueLines.length,0);
+  const previous=chain.find(item=>item.file.startsWith('096_'));
+  for(const fn of previous.evidence.functions)assert.ok(entry.source.includes(digest(fn.body.replaceAll('\r\n','\n'))));
+  assert.doesNotMatch(entry.source,/grant\s+(?:select|insert|update|delete)|on\s+delete\s+cascade/i);
 });
 
 for (const kind of ['missing', 'unknown', 'duplicate', 'reordered', 'renamed']) test(`preflight rejects ${kind} chain membership before any native startup`, () => {

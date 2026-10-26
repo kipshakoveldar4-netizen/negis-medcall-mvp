@@ -282,6 +282,17 @@ with null metadata/720-minute current duration and synthetic partial JSON after 
 schema or target mutation. This is still local fake Auth/SDK/Node-adapter
 composition, not cloud Vercel/Supabase, the full family or release approval.
 
+Later G1-C9/G7-C38 local foundation: [durable cooperation command receipts](OPERATOR-COMMAND-RECEIPTS-2026-10-26.md).
+107 binds new keyed executors/read to the original actor, intent and atomic
+committed result. Actual old proposal retry after end creates an unintended
+replacement; the new executor returns its original receipt instead. Focused
+native 44/44, exact raw 009-107/99 cumulative native 277/277, source review
+43/43 and unchanged fixed isolation 931/931 pass locally. Legacy 096 grants
+and current API/UI remain unchanged: this foundation alone does NOT make those
+callers durable or close the user-facing recovery gate. Matching callers,
+unknown-result persistence/HTTP/session proof and closing unbound writers are
+the next coordinated increment; no target application or release is authorized.
+
 This is a dependency inventory, **not an apply script**. Existing site-test
 receipts are scoped: DELIVERY records selected applications of 072/073/074,
 075, 076/077, 078, 021+079, 080 and 051+081 in their respective R2/O2/G7/G5
@@ -321,6 +332,7 @@ Later local extensions, not an apply instruction:
 | [104](../migrations/104_analytics_report_timezone.sql) | Exact 095/103 reports and mortgage actor helper, reviewed ownership/volatility/search_path/ACLs | Report-owned zones and strict workspace metadata; coordinate API/UI. It does not create or change a workspace time-zone setting. |
 | [105](../migrations/105_contributor_applications.sql) | Existing browser/service roles and built-in UUID generator; no 052 dependency | Additive intake table/RLS/service-only RPCs with review revision. Matching contributor API/UI required. No membership, growth-partner activation, rates or money; 203/203 fresh raw-chain acceptance, not cloud application. |
 | [106](../migrations/106_generated_video_quota_dispatch.sql) | 051/081 quota RPC/ledger and 090 native workflow/actor/envelope; reviewed effective RLS/browser grants and non-superuser BYPASSRLS service role | Atomic original reserved quota binding with immutable unique FK; revokes service EXECUTE on old unbound dispatch. Coordinate matching video API; old/missing-schema producers fail closed. No backfill, quota mutation/refund or provider dispatch. Raw-chain 237/237, not existing-target/cloud acceptance. |
+| [107](../migrations/107_operator_request_commands.sql) | Exact four 096 implementation bodies/ownership/security and staff/operator dependencies; reviewed creator/browser/service roles | Additive private committed-command journal and keyed execution/read RPCs. Legacy 096 grants remain unchanged: current API/UI are NOT durable yet. Requires matching callers/unknown-outcome handling and separately closing old writers before a ready rollout; no standalone cloud authorization. No body/contact copy, money, membership, expiry or GC. |
 
 Consumer source anchors: [operator RPC callers](../lib/crm/operators.ts),
 [report reader](../lib/crm/lead-team-analytics.ts),
