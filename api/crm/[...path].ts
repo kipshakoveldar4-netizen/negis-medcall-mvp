@@ -5,6 +5,7 @@ import { handleSiteBlog } from "../../lib/crm/site-blog";
 import { handleSiteInquiryDeletion, handleSiteInquiryDeletionPreview, handleSiteDeletionOperations } from "../../lib/crm/site-inquiry-deletion";
 import { handlePlatformOperators, handleOperatorAccount, handleOperatorInbox, handleClinicOperators } from "../../lib/crm/operators";
 import { handleContributorAccount, handlePlatformContributors } from "../../lib/crm/contributors";
+import { handlePartnerLedger } from "../../lib/crm/partner-ledger";
 import { handleOperatorLeads, handleClinicOperatorLeads } from "../../lib/crm/operator-leads";
 import { handleOperatorServices } from "../../lib/crm/operator-services";
 import { handleOperatorBookings } from "../../lib/crm/operator-bookings";
@@ -258,6 +259,7 @@ async function dispatch(
       return segments.length === 1 ? handleSiteDeletionOperations(req, res) : notFound(res);
     case "contributor-account": return segments.length === 1 ? handleContributorAccount(req, res) : notFound(res);
     case "platform-contributors": return segments.length === 1 ? handlePlatformContributors(req, res) : notFound(res);
+    case "partner-ledger": return segments.length === 1 ? handlePartnerLedger(req, res) : notFound(res);
     case "platform-operators": return handlePlatformOperators(req, res);
     case "operator-account": return handleOperatorAccount(req, res);
     case "operator-inbox": return handleOperatorInbox(req, res);

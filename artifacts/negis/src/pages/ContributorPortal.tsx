@@ -6,6 +6,7 @@ import { operatorApi } from "@/lib/operatorApi";
 import { validatePasswordRules } from "../../../../lib/auth/password-rules";
 import { isSyntheticEmail, loginOrEmailToAuthEmail } from "../../../../lib/auth/staff-logins";
 import { contributorStatusLabels, parseContributorApplication, parseContributorProfile, type ContributorProfile } from "../../../../lib/crm/contributor-contracts";
+import { PartnerLedger } from "@/components/contributors/PartnerLedger";
 
 export default function ContributorPortal() {
   const [session, setSession] = useState<{ id: string | null; epoch: number } | null>(null);
@@ -91,6 +92,11 @@ function Application({ userId, isActorCurrent }: { userId: string; isActorCurren
   const mutation = useRef<AbortController | null>(null);
   const current = () => mounted.current && isActorCurrent();
   function refresh() { if (!current()) return; generation.current++; setProfile(null); setLoaded(false); setError(""); setRevision(n => n + 1); }
+  function denyPartnerAccess() {
+    if (!current()) return;
+    generation.current++; mutation.current?.abort(); mutation.current = null;
+    setBusy(false); setProfile(null); setLoaded(false); setError("Доступ партнёра изменился. Обновите профиль.");
+  }
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; generation.current++; mutation.current?.abort(); mutation.current = null; };
@@ -139,8 +145,9 @@ function Application({ userId, isActorCurrent }: { userId: string; isActorCurren
       <div className="grid gap-3 sm:grid-cols-2">{(["partner", "creator"] as const).map(role => {
         const status = role === "partner" ? profile.partnerStatus : profile.creatorStatus;
         const Icon = role === "partner" ? Users : Video;
-        return <article key={role} className="min-w-0 rounded-lg border p-4"><div className="flex items-center gap-2 font-medium"><Icon size={18} />{role === "partner" ? "Партнёр" : "Автор контента"}</div><p className="mt-3 text-sm">{status ? contributorStatusLabels[status] : "Заявка не подана"}</p>{status === "approved" && <p className="mt-3 text-sm text-muted-foreground">{role === "partner" ? "Условия и реферальный канал ещё не активированы." : "Заказы и условия работы ещё не согласованы."}</p>}</article>;
+        return <article key={role} className="min-w-0 rounded-lg border p-4"><div className="flex items-center gap-2 font-medium"><Icon size={18} />{role === "partner" ? "Партнёр" : "Автор контента"}</div><p className="mt-3 text-sm">{status ? contributorStatusLabels[status] : "Заявка не подана"}</p>{status === "approved" && role === "creator" && <p className="mt-3 text-sm text-muted-foreground">Заказы и условия работы ещё не согласованы.</p>}</article>;
       })}</div>
+      {profile.partnerStatus === "approved" && <PartnerLedger userId={userId} isActorCurrent={current} onAccessDenied={denyPartnerAccess} />}
       {profile.portfolioUrls.length > 0 && <section className="space-y-3"><h3 className="font-medium">Портфолио</h3>{profile.portfolioUrls.map(url => <a className="flex min-w-0 items-start gap-2 text-sm" key={url} href={url} rel="noopener noreferrer" target="_blank"><ExternalLink className="shrink-0" size={16} /><span className="break-all">{url}</span></a>)}</section>}
     </>}
     {loaded && (!profile || missingRole) && <form onSubmit={event => void submit(event)} className="space-y-5 border-t pt-5">

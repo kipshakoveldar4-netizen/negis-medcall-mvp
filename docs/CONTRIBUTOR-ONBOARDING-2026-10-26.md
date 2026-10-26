@@ -1,5 +1,9 @@
 # Operator And Blogger Recruitment: Intake Milestone
 
+27 October local follow-up: [partner statistics](PARTNER-LEDGER-2026-10-27.md)
+adds an own read-only report after separate commercial activation. It does not
+close the first-source/referral, payment/payout or creator-job gates below.
+
 26 October 2026. Local implementation only, base f3b69fd.
 The owner selected BOTH blogger roles: partner acquisition and content creation.
 This receipt does not claim public recruitment/commercial readiness.

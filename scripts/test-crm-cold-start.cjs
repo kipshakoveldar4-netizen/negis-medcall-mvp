@@ -70,12 +70,13 @@ try {
       entryChecks++;
     }
     (async () => {
-      for (const route of ['auth-context', 'appointments', 'clients', 'staff', 'site-blog', 'site-inquiry-deletion-preview', 'site-inquiry-deletion-operations', 'lead-team-analytics', 'contributor-account']) {
+      for (const route of ['auth-context', 'appointments', 'clients', 'staff', 'site-blog', 'site-inquiry-deletion-preview', 'site-inquiry-deletion-operations', 'lead-team-analytics', 'contributor-account', 'partner-ledger']) {
         await check(route, 401);
       }
       await check('auth-context', 401, 'Bearer invalid-test-token');
       await check('contributor-account', 401, 'Bearer invalid-test-token');
       await check('contributor-account', 401, undefined, 'POST');
+      await check('partner-ledger', 401, 'Bearer invalid-test-token');
       await check('platform-contributors', 404);
       await check('platform-contributors', 404, undefined, 'PATCH');
       await check('site-inquiry-deletion-preview', 401, 'Bearer invalid-test-token');

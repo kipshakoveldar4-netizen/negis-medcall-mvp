@@ -180,6 +180,7 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   "operator-account": { kind: "bootstrap", methods: ["GET", "POST", "PATCH"] },
   "contributor-account": { kind: "bootstrap", methods: ["GET", "POST"] },
   "platform-contributors": { kind: "platform", methods: ["GET", "PATCH"] },
+  "partner-ledger": { kind: "bootstrap", methods: ["GET"] },
   "operator-inbox": { kind: "bootstrap", methods: ["GET", "PATCH"] },
   "operator-leads": { kind: "bootstrap", methods: ["GET", "PATCH"] },
   "operator-services": { kind: "bootstrap", methods: ["GET"] },

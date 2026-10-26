@@ -127,6 +127,61 @@ test('contributor intake and independent platform review in real React, isolated
     await evaluate('window.__contributorQA.release();'); await delay(200);
     assert.equal(await evaluate('return !!document.querySelector(".operator-row");'), false);
   });
+  const ledger = {state:'ready',generatedAt:'2026-10-27T01:02:03.123456Z',firstCommissionBps:1000,renewalCommissionBps:null,
+    registrations:'3',paidCompanies:'2',firstPayments:'2',renewals:'1',balances:[{currency:'KZT',earnedMinor:'900719925474099301',paidMinor:'1',availableMinor:'900719925474099300'}]};
+  async function readyPartner(value=ledger){
+    await navigate('/contributors?seed=1');await wait('return document.querySelectorAll("article").length===2;');
+    await evaluate(`const qa=window.__contributorQA,p=qa.profiles.get('blogger-a');qa.profiles.set('blogger-a',{...p,partnerStatus:'approved'});qa.ledgers.set('blogger-a',${JSON.stringify(value)});document.querySelector('button[title="Обновить профиль"]').click();`);
+    await wait('return !!document.querySelector("section[aria-label]");');
+  }
+  await t.test('partner totals use exact amounts and current terms on mobile/desktop, with no mutation controls',async()=>{
+    await readyPartner();await wait('return document.body.innerText.includes("Доступно");');
+    for(const width of[375,1440]){
+      await cdp.call('Emulation.setDeviceMetricsOverride',{width,height:1100,deviceScaleFactor:1,mobile:width===375});
+      await evaluate('await document.fonts.ready;');
+      assert.equal(await evaluate('return document.documentElement.scrollWidth<=innerWidth;'),true);
+      assert.equal(await evaluate(`const s=document.querySelector('[aria-label="Партнёрская статистика"]');return s.innerText.replaceAll(String.fromCharCode(160),'').replaceAll(String.fromCharCode(8239),'').replaceAll(' ','').includes('9007199254740993,01');`),true);
+      assert.equal(await evaluate(`const s=document.querySelector('[aria-label="Партнёрская статистика"]');return s.innerText.includes('Ставка не согласована') && s.querySelectorAll('button').length===1 && s.querySelectorAll('a,form,input').length===0;`),true);
+      await screenshot(`partner-ledger-${width}.png`);
+    }
+  });
+  await t.test('partner refresh hides the old total and held A reply cannot replace returned A after B',async()=>{
+    await readyPartner();await wait('return document.body.innerText.includes("Доступно");');
+    await evaluate(`window.__contributorQA.holdNext('partner-ledger');document.querySelector('button[title="Обновить статистику партнёра"]').click();`);
+    await wait('return document.body.innerText.includes("Загружаем статистику");');
+    assert.equal(await evaluate('return document.body.innerText.includes("Доступно");'),false);
+    await evaluate(`const qa=window.__contributorQA;qa.switchActor('blogger-b');`);await wait('return !!document.querySelector("input:not([type=checkbox])");');
+    assert.equal(await evaluate('return document.body.innerText.includes("Начислено");'),false);
+    const fresh={...ledger,balances:[{currency:'KZT',earnedMinor:'12345',paidMinor:'0',availableMinor:'12345'}]};
+    await evaluate(`const qa=window.__contributorQA;qa.ledgers.set('blogger-a',${JSON.stringify(fresh)});qa.switchActor('blogger-a');`);
+    await wait(`return document.querySelector('[aria-label="Партнёрская статистика"]')?.innerText.includes('123,45');`);
+    const before=await evaluate('return document.body.innerText;');await evaluate('window.__contributorQA.release();');await delay(150);
+    assert.equal(await evaluate('return document.body.innerText;'),before);
+  });
+  await t.test('denied partner access removes totals and application state without an automatic request loop',async()=>{
+    await readyPartner();await wait('return document.body.innerText.includes("Доступно");');
+    await evaluate(`const qa=window.__contributorQA;qa.ledgers.set('blogger-a',Object.assign(Error('Partner revoked'),{status:403}));document.querySelector('button[title="Обновить статистику партнёра"]').click();`);
+    await wait('return document.body.innerText.includes("Доступ партнёра изменился. Обновите профиль.");');
+    assert.equal(await evaluate('return !!document.querySelector("section[aria-label]");'),false);
+    const calls=await evaluate('return window.__contributorQA.calls.length;');await delay(200);assert.equal(await evaluate('return window.__contributorQA.calls.length;'),calls);
+    await evaluate(`window.__contributorQA.ledgers.set('blogger-a',{state:'suspended'});document.querySelector('button[title="Обновить профиль"]').click();`);
+    await wait('return document.body.innerText.includes("Партнёрство приостановлено.");');assert.equal(await evaluate('return document.body.innerText.includes("Начислено");'),false);
+  });
+  await t.test('malformed ledger is an error, while actual empty receipt history is explicit',async()=>{
+    await readyPartner({state:'ready'});await wait('return document.body.innerText.includes("Не удалось подтвердить партнёрскую статистику.");');
+    assert.equal(await evaluate('return document.body.innerText.includes("Начислено");'),false);
+    const empty={...ledger,firstCommissionBps:null,registrations:'0',paidCompanies:'0',firstPayments:'0',renewals:'0',balances:[]};
+    await evaluate(`window.__contributorQA.ledgers.set('blogger-a',${JSON.stringify(empty)});document.querySelector('button[title="Обновить статистику партнёра"]').click();`);
+    await wait('return document.body.innerText.includes("Подтверждённых начислений и выплат пока нет.");');
+    assert.equal(await evaluate('return document.body.innerText.includes("Начислено");'),false);
+  });
+  await t.test('local partner example is explicit, fictional and reachable without financial mutations',async()=>{
+    await navigate('/contributors?partner=1');await wait('return document.body.innerText.includes("Доступно");');
+    assert.equal(await evaluate('return document.querySelector("[role=note]")?.textContent;'),'Тестовый стенд · вымышленные данные');
+    assert.equal(await evaluate(`return document.body.innerText.replaceAll(String.fromCharCode(160),'').replaceAll(' ','').includes('1400₸');`),true);
+    assert.equal(await evaluate('return window.__contributorQA.calls.every(c=>c.method==="GET");'),true);
+    await screenshot('partner-ledger-example.png');
+  });
   await t.test('no real auth, database, providers or external portfolio fetches', async () => {
     assert.deepEqual(exceptions, []);
     assert.ok(requests.every(url => url.startsWith(server.origin + '/') || url.startsWith('data:')), requests.filter(url => !url.startsWith(server.origin)));

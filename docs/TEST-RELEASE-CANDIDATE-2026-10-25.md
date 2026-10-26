@@ -1,5 +1,12 @@
 # Test Release Candidate: 25 October 2026
 
+**27 October local delta, G6-C3/G7-C40, base 1d33cb1:**
+[partner statistics](PARTNER-LEDGER-2026-10-27.md) adds a GET-only verified-subject
+report and coordinated local 109 reader; no commercial/financial activation.
+Exact raw 009-109 / 101 files pass 325 native checks. The broader tenant suite
+still has its three documented pre-existing transport-verifier/fixture failures,
+not silently credited as green. This is not a Preview or whole-branch release.
+
 **27 October local delta, G1-C10/G7-C39, base 093eba7:**
 [cooperation command workflow](OPERATOR-COMMAND-WORKFLOW-2026-10-27.md) integrates
 current forms/handlers with V2 recovery and forward 108. Both command execution

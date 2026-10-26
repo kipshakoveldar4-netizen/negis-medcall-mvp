@@ -18,6 +18,7 @@ import { exerciseContributorCumulative, exerciseDepartedOperatorAuthor } from '.
 import { reproduceUnboundVideoDispatch, exerciseVideoQuotaDispatch, exerciseVideoQuotaMissing } from './video-quota-dispatch-cases.mjs';
 import { reproduceUnboundOperatorProposal, exerciseOperatorCommands } from './operator-command-recovery-fixture.mjs';
 import { exerciseOperatorCommandClosure, operatorLegacySignatures } from './operator-command-closure-cases.mjs';
+import { exercisePartnerLedger } from './partner-ledger-cases.mjs';
 
 // Native application-chain acceptance, NOT an authority to release migrations.
 // 001-008 require an undocumented legacy baseline; data/*.sql is deliberately
@@ -228,6 +229,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     if(entry.file==='106_generated_video_quota_dispatch.sql') await exerciseVideoQuotaDispatch(db,fixture,entry.source,t);
     if(entry.file==='107_operator_request_commands.sql') await exerciseOperatorCommands(db,fixture,entry.source,t);
     if(entry.file==='108_operator_command_closure.sql') await exerciseOperatorCommandClosure(db,fixture,entry.source,t);
+    if(entry.file==='109_partner_ledger_read.sql') await exercisePartnerLedger(db,fixture,entry.source,t);
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
       await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{
@@ -344,7 +346,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'read_lead_team_analytics', 'read_generated_video_workflow', 'read_platform_subscription_operation',
       'prepare_site_deletion_operation', 'read_site_deletion_operations', 'execute_site_deletion_operation', 'close_site_deletion_operation',
       'apply_growth_contributor', 'review_growth_contributor','execute_clinic_operator_command_v2','execute_growth_operator_command_v2',
-      'read_operator_request_command_v2','close_operator_request_command_v2']) {
+      'read_operator_request_command_v2','close_operator_request_command_v2','read_growth_partner_ledger']) {
       const functions = (await db.query(`select p.oid::regprocedure::text as signature,has_function_privilege('service_role',p.oid,'EXECUTE') as allowed
         from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname=$1`, [name])).rows;
       assert.equal(functions.length, 1, name); assert.equal(functions[0].allowed, true, name);

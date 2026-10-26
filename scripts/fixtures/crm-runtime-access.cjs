@@ -30,6 +30,14 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
   };
   const client = {
     async rpc(name, args) {
+      if (name === 'read_growth_partner_ledger') {
+        assert.deepEqual(Object.keys(args), ['p_actor']);
+        log.push({ rpc: name, actor: args.p_actor });
+        const own = tables.growth_contributor_profiles.find(p => p.auth_user_id === args.p_actor);
+        return own?.partner_status === 'approved'
+          ? { data: { state: 'not_activated' }, error: null }
+          : { data: null, error: { code: 'P1091', message: 'private database diagnostic' } };
+      }
       assert.ok(['execute_site_deletion_operation','read_site_deletion_operations','prepare_site_deletion_operation','close_site_deletion_operation'].includes(name));
       assert.equal(args.p_workspace, workspace);
       assert.equal(args.p_site_key, 'runtime-fixture');
@@ -96,7 +104,7 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
     await handler({ method, url: `/api/crm/${route}`, headers: { 'content-type': 'application/json',
       ...(role ? { authorization: `Bearer fixture.${role}.signature` } : {}) },
       ...(method === 'GET' ? {} : { body: payload }),
-      query: { path: [route], ...(route === 'site-page' ? {} : { workspaceId: workspace }), ...query } }, response);
+      query: { path: [route], ...(['site-page','partner-ledger'].includes(route) ? {} : { workspaceId: workspace }), ...query } }, response);
     assert.equal(status, expected, `${route}: ${role || 'anonymous'}`);
     const serialized = JSON.stringify(body) ?? '';
     if (route === 'site-page' && expected === 503) {
@@ -119,6 +127,11 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
       else assert.equal(contributor.data, null);
       await call('platform-contributors', role, 404);
       assert.ok(!log.some(entry => entry.table === 'growth_contributor_profiles'));
+      await call('partner-ledger', role, 403);
+      assert.deepEqual(log, [{ rpc: 'read_growth_partner_ledger', actor: users.find(u=>u.role===role).auth_user_id }]);
+      await call('partner-ledger', role, 405, {}, 'POST');
+      await call('partner-ledger', role, 400, { workspaceId: workspace });
+      assert.deepEqual(log, []);
       const context = await call('auth-context', role, 200);
       assert.equal(context.mode, 'supabase');
       assert.equal(context.data.workspaceId, workspace);
@@ -200,6 +213,11 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
     assert.ok(!log.some(entry => entry.table === 'appointments'));
     membershipFailure = false;
     process.env.MEDINA_PLATFORM_OWNER_IDS = users[0].auth_user_id;
+    tables.growth_contributor_profiles[0].partner_status = 'approved';
+    const ownLedger = await call('partner-ledger', 'owner', 200);
+    assert.deepEqual(ownLedger.data, { state: 'not_activated' });
+    assert.ok(!log.some(entry=>entry.table==='staff_users'), 'Own partner report does not require clinic membership');
+    await call('partner-ledger', 'owner', 404, { path: ['partner-ledger','unexpected'] });
     const applicants = await call('platform-contributors', 'owner', 200);
     assert.equal(applicants.data.items.length, 2);
     await call('contributor-account', 'owner', 404, { path: ['contributor-account', 'unexpected'] });
