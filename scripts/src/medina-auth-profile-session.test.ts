@@ -201,14 +201,18 @@ type Snapshot = {
 type Init = RequestInit & { accessToken?: string; expectedUserId?: string; dispatchGuard?: () => boolean };
 type PendingRequest = { url: string; init: Init; actor: string | undefined; reply: (body: unknown, status?: number) => void;
   resolve: (response: Response) => void; reject: (error: unknown) => void };
+type SignOutBoundary = { isSignOutPending(): boolean; getSignOutRevision(): number; markSignOutPending(): void; clearSignOutPending(): boolean };
 type Options = { initialActor?: string | null; deferSession?: boolean; storage?: Record<string, string>;
-  sessionStorage?: Record<string, string>; deferSignOut?: boolean };
+  sessionStorage?: Record<string, string>; deferSignOut?: boolean;
+  sharedSignOut?: { storage: ReturnType<typeof memoryStorage>; sessionStorage: ReturnType<typeof memoryStorage>;
+    boundary: SignOutBoundary } };
 
 function setup(options: Options = {}) {
   const renderer = hookRenderer();
-  const storage = memoryStorage(options.storage);
-  const sessionStorage = memoryStorage(options.sessionStorage);
-  const signOutBoundary = evaluate(signOutSource, {}, { window: { localStorage: storage, sessionStorage } });
+  const storage = options.sharedSignOut?.storage ?? memoryStorage(options.storage);
+  const sessionStorage = options.sharedSignOut?.sessionStorage ?? memoryStorage(options.sessionStorage);
+  const signOutBoundary: SignOutBoundary = options.sharedSignOut?.boundary
+    ?? evaluate(signOutSource, {}, { window: { localStorage: storage, sessionStorage } }) as SignOutBoundary;
   const sessionGate = deferred<{ data: { session: ReturnType<typeof localSession> } }>();
   const callbacks = new Set<(event: string, session: ReturnType<typeof localSession>) => void>();
   const requests: PendingRequest[] = [];
@@ -1121,6 +1125,49 @@ test("a completed SDK logout cannot update an unmounted provider or publish old 
     assert.equal(fixture.toasts.length, 0);
     assert.equal(fixture.signOutBoundary.isSignOutPending(), false);
     assert.equal(fixture.subscriptions(), 0);
+  });
+});
+
+for (const oldMounted of [true, false]) for (const outcome of [null, "return", "throw"] as const)
+test(`a previous ${oldMounted ? "mounted" : "unmounted"} provider's late ${outcome ?? "success"} cannot clear a newer logout fence`, async () => {
+  const previous = setup(); let current: Fixture | undefined;
+  try {
+    await previous.renderer.flush(); await confirm(previous, [mortgage()]);
+    const oldGate = previous.holdSignOut(), oldRequest = previous.snapshot().signOut();
+    previous.failSignOut(outcome);
+    await previous.renderer.flush();
+    const oldRevision = previous.signOutBoundary.getSignOutRevision();
+    if (!oldMounted) previous.renderer.dispose();
+    current = setup({ initialActor: actorA, deferSignOut: true, sharedSignOut: {
+      storage: previous.storage, sessionStorage: previous.sessionStorage, boundary: previous.signOutBoundary,
+    } });
+    await current.renderer.flush();
+    const currentRevision = current.signOutBoundary.getSignOutRevision();
+    assert.ok(currentRevision > oldRevision); assert.equal(current.sdkCalls().signOut, 1);
+    assert.equal(current.requests.length, 0); assert.equal(current.snapshot().isSigningOut, true);
+    oldGate.resolve(); await oldRequest; await current.renderer.flush();
+    await previous.renderer.flush();
+    assert.equal(current.signOutBoundary.isSignOutPending(), true, "old completion must not clear the new attempt's tombstone");
+    assert.equal(current.signOutBoundary.getSignOutRevision(), currentRevision);
+    assert.equal(current.snapshot().user, null); assert.equal(current.subscriptions(), 0);
+    assert.deepEqual(previous.locations, []); assert.deepEqual(previous.toasts, []);
+    if (oldMounted) assert.equal(previous.snapshot().signOutFailed, false, "obsolete errors must not be published");
+    current.releaseSignOut(); await current.renderer.flush();
+    assert.equal(current.signOutBoundary.isSignOutPending(), false);
+    assert.equal(current.snapshot().isSigningOut, false); assert.equal(current.subscriptions(), 1);
+  } finally { previous.renderer.dispose(); current?.renderer.dispose(); }
+});
+
+test("a retired logout which has not called the SDK cannot dispatch after a newer exit starts", async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [mortgage()]);
+    const old = fixture.snapshot().signOut();
+    fixture.signOutBoundary.markSignOutPending();
+    await old; await fixture.renderer.flush();
+    assert.equal(fixture.sdkCalls().signOut, 0);
+    assert.equal(fixture.signOutBoundary.isSignOutPending(), true);
+    assert.deepEqual(fixture.locations, []); assert.deepEqual(fixture.toasts, []);
+    assert.equal(fixture.snapshot().signOutFailed, false);
   });
 });
 

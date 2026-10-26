@@ -76,4 +76,6 @@ export const isolatedTestFiles = Object.freeze([
   "scripts/src/medina-mortgage-results-ui.test.ts",
   "scripts/src/medina-mortgage-activity-ui.test.ts",
   "scripts/src/medina-analytics-report-lifetime.test.ts",
+  "scripts/src/medina-auth-profile-session.test.ts",
+  "scripts/src/medina-signout-boundary.test.ts",
 ]);

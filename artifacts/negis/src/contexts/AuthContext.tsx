@@ -1001,6 +1001,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (signOutRequestRef.current) return signOutRequestRef.current;
     const recovering = isSignOutPending();
     markSignOutPending();
+    const signOutRevision = getSignOutRevision();
+    const ownsSignOut = () => getSignOutRevision() === signOutRevision;
     beginAuthResolution(null);
     setIsSigningOut(true);
     setSignOutFailed(false);
@@ -1014,8 +1016,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     clearImpersonationStorage();
     const request = Promise.resolve().then(async () => {
       try {
+        if (!ownsSignOut()) return;
         if (!isDemoMode) {
           const { error } = await supabase.auth.signOut();
+          // A remounted provider may already own a newer exit. This response
+          // must not clear its marker or publish an old completion/error.
+          if (!ownsSignOut()) return;
           if (error) throw error;
         }
         if (!clearSignOutPending()) throw new Error('signout_marker_unavailable');
@@ -1030,7 +1036,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // the subscription; subsequent sign-ins must still be observed.
         if (!isDemoMode && !subscriptionRef.current) await setupSupabaseAuth();
       } catch {
-        if (mountedRef.current) setSignOutFailed(true);
+        if (mountedRef.current && ownsSignOut()) setSignOutFailed(true);
       } finally {
         signOutRequestRef.current = null;
       }
