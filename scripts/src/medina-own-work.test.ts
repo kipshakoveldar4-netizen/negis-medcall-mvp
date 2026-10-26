@@ -498,13 +498,25 @@ test("OW23 переименование карточки не отнимает �
   assert.equal(patched.res.statusCode, 200, JSON.stringify(patched.res.body));
 });
 
-test("OW24 отказ «слот занят» не называет пациента однофамильца", async () => {
+test("OW24 linked namesake does not block my separate resource or expose its patient", async () => {
   const { res } = await callRouter({
     method: "POST",
     body: { client: "Новый", starts_at: NAMESAKE_SLOT, durationMinutes: 30 },
   });
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  assert.equal(res.body.conflict, undefined);
+  assert.ok(!JSON.stringify(res.body).includes("Пациент тёзки"));
+});
+
+test("OW24-legacy name-only identity still refuses the occupied label without disclosing the linked patient's name", async () => {
+  const { res } = await callRouter({
+    linkedCard: false,
+    appointmentRows: [appointment({ id: NAMESAKE_ROW, doctor_id: NAMESAKE_CARD, doctor_name: MY_NAME,
+      client_name: "Пациент тёзки", starts_at: NAMESAKE_SLOT })],
+    method: "POST", body: { client: "Новый", starts_at: NAMESAKE_SLOT, durationMinutes: 30 },
+  });
   assert.equal(res.statusCode, 409, JSON.stringify(res.body));
-  assert.equal((res.body.conflict as Record<string, unknown>).clientName, "", "имя чужого пациента в отказе");
+  assert.equal((res.body.conflict as Record<string, unknown>).clientName, "");
   assert.ok(!JSON.stringify(res.body).includes("Пациент тёзки"));
 });
 

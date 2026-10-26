@@ -16,10 +16,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // any scale, because two registrars on two devices each hold their own array:
 // neither can see the booking the other made a second ago.
 //
-// It stays advisory. Clinics overbook deliberately — an urgent case goes into
-// an occupied slot — so the server refuses with 409 and an explicit
-// `allowConflict` overrides it. What changes is that the override becomes a
-// decision someone made rather than a gap nobody saw.
+// This read is advisory; the database capacity trigger is authoritative under
+// concurrency. No allowConflict flag may bypass either capacity rule.
 //
 // The spy here filters for real (eq/gte/lt), unlike the shared one: the whole
 // point of these tests is the range query and the overlap arithmetic, and a
@@ -88,7 +86,9 @@ function spyClient(
         (rows[table] ?? []).map((r) => r as Record<string, unknown>).filter((row) =>
           applied.every((f) => {
             const value = row[f.column];
-            if (f.op === "eq") return value === f.value;
+            if (f.op === "eq") return /^(?:id|workspace_id|doctor_id|auth_user_id)$/.test(f.column)
+              ? String(value ?? "").toLowerCase() === String(f.value ?? "").toLowerCase()
+              : value === f.value;
             const left = String(value ?? "");
             const right = String(f.value ?? "");
             return f.op === "gte" ? left >= right : left < right;
@@ -559,7 +559,7 @@ test("BC16 кнопки «Сохранить всё равно» при заня
 
 /** Строка справочника с заданной ёмкостью. */
 function doctorRow(capacity: number) {
-  return { id: "d0000000-0000-4000-8000-000000000001", workspace_id: WORKSPACE_A, full_name: DOCTOR, capacity };
+  return { id: "d0000000-0000-4000-8000-000000000001", workspace_id: WORKSPACE_A, full_name: DOCTOR, capacity, is_active: true };
 }
 
 test("BC23 без справочника ёмкость равна единице — поведение клиник не меняется", async () => {
@@ -634,6 +634,53 @@ test("BC29 shrinking an occupied legacy group interval does not book a new place
   const call = await loadRouter({ appointments: [occupiedRow({ duration_minutes: 120 }), occupiedRow({ id: OTHER_ID })], doctors: [doctorRow(1)] });
   const { res } = await call({ method: "PATCH", body: { id: EXISTING_ID, updates: { durationMinutes: 60 } } });
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+});
+
+test("BC30 full namesake group does not consume another explicit doctor's capacity", async () => {
+  const doctor = doctorRow(2);
+  const namesakeId = "d0000000-0000-4000-8000-000000000002";
+  const call = await loadRouter({
+    appointments: [occupiedRow({ doctor_id: namesakeId }), occupiedRow({ id: OTHER_ID, doctor_id: namesakeId })],
+    doctors: [doctor, { ...doctor, id: namesakeId, full_name: "Renamed doctor" }],
+  });
+  const { res, log } = await call({ body: booking({ doctorId: doctor.id }) });
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  assert.equal(writes(log).length, 1);
+});
+
+test("BC31 explicit identity still finds a full group after its labels change or disappear", async () => {
+  const doctor = doctorRow(2);
+  for (const label of ["Previous doctor name", ""]) {
+    const call = await loadRouter({
+      appointments: [occupiedRow({ doctor_id: doctor.id, doctor_name: label }),
+        occupiedRow({ id: OTHER_ID, doctor_id: doctor.id, doctor_name: label })],
+      doctors: [doctor],
+    });
+    const { res, log } = await call({ body: booking({ doctorId: doctor.id.toUpperCase() }) });
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+    assert.equal(writes(log).length, 0);
+    const check = log.find(e => e.table === "appointments" && "starts_at__gte" in e.filters);
+    assert.equal(check?.filters.workspace_id, WORKSPACE_A);
+    assert.equal(check?.filters.doctor_name, undefined, "an old name filter must not hide the same UUID");
+  }
+});
+
+test("BC32 normalized legacy labels still share the explicit group's capacity", async () => {
+  const doctor = doctorRow(2);
+  const call = await loadRouter({
+    appointments: [occupiedRow({ doctor_id: null, doctor_name: `  ${DOCTOR.toUpperCase()}  ` }),
+      occupiedRow({ id: OTHER_ID, doctor_id: doctor.id, doctor_name: "Old label" })],
+    doctors: [doctor],
+  });
+  const { res, log } = await call({ body: booking({ doctorId: doctor.id }) });
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+  assert.equal(writes(log).length, 0);
+});
+
+test("BC33 a legacy candidate still counts linked appointments with the same normalized name", async () => {
+  const call = await loadRouter({ appointments: [occupiedRow({ doctor_id: doctorRow(1).id, doctor_name: ` ${DOCTOR.toUpperCase()} ` })] });
+  const { res } = await call({ body: booking() });
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body));
 });
 
 test("BC-R отказ сервера называется человеку, а не заменяется советом невпопад", async () => {

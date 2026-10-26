@@ -99,6 +99,7 @@ ce26941b100f8fa5b368bb53c383254da03ba7f026b75a88ed3e62314364be61 098_legacy_serv
 12150cb38aed391a1570e8df391129377337e3959a835a583cc897f27ca0a7b7 099_application_function_default_access.sql
 e11717ba583fcacb491db52d85404c71c8a32f49b08afb269726b4fc8a36cfe0 100_legacy_crm_row_security.sql
 8a526e071fbef948b664121e443cadce53865fc898d35b99c9e97d1fdb810e30 101_site_deletion_operations.sql
+e0bebcea54224c0c0184a0aa4d2d554596a059c22827755955d36aadcf19beef 102_appointment_capacity_explicit_identity.sql
 `.trim().split('\n').map(line => line.split(' '));
 
 export const migrationReview = Object.freeze(Object.fromEntries(reviewed.map(([sha256, file]) => [file, sha256])));

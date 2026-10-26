@@ -11,6 +11,7 @@ import { legacyCrmRlsSnapshot,exerciseLegacyCrmRlsRefusals,proveLegacyCrmRlsBase
   proveLegacyCrmRlsChange,proveLegacyCrmRlsEnforcement } from './legacy-crm-rls-cases.mjs';
 import { exerciseDeletionOperations } from './site-deletion-operations-cases.mjs';
 import { proveDeletionOperationConcurrency } from './site-deletion-operations-native-cases.mjs';
+import { reproduceNamesakeCapacityRefusal, exerciseCapacityIdentity, exerciseCapacityMigrationRefusals } from './appointment-capacity-identity-cases.mjs';
 
 // Native application-chain acceptance, NOT an authority to release migrations.
 // 001-008 require an undocumented legacy baseline; data/*.sql is deliberately
@@ -149,6 +150,13 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
   let legacyBefore;
   let legacyRlsBefore;
   for (const entry of chain) {
+    if (entry.file === '102_appointment_capacity_explicit_identity.sql') {
+      let reproduced=false;
+      await t.test('before 102, full 009-101 chain still refuses distinct linked namesakes', async () => {
+        await reproduceNamesakeCapacityRefusal(db);reproduced=true;
+      });
+      assert.ok(reproduced,'Do not accept 102 without reproducing the actual prior refusal');
+    }
     if (entry.file === '100_legacy_crm_row_security.sql') {
       let baselinePassed=false;
       await t.test('before 100, actual temporary read grant exposes both synthetic tenants on the seven unprotected tables',async()=>{
@@ -195,6 +203,10 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     // chain would mislabel dependent SQL as independently accepted.
     assert.ok(passed, `${entry.file} failed; the remaining cumulative gate is unexecuted`);
     if(entry.file==='101_site_deletion_operations.sql') await exerciseDeletionOperations(db,t);
+    if(entry.file==='102_appointment_capacity_explicit_identity.sql') {
+      await exerciseCapacityMigrationRefusals(db,entry.source,t);
+      await exerciseCapacityIdentity(db,t);
+    }
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
       await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{

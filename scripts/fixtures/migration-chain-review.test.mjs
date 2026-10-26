@@ -8,9 +8,9 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-101, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 93);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 93 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-102, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 94);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 94 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
@@ -19,7 +19,7 @@ test('review covers the contiguous actual worktree 009-101, including protected 
 for (const kind of ['missing', 'unknown', 'duplicate', 'reordered', 'renamed']) test(`preflight rejects ${kind} chain membership before any native startup`, () => {
   const value = records();
   if (kind === 'missing') value.splice(31, 1);
-  if (kind === 'unknown') value.push({ file: '102_unknown.sql', source: 'select 1;' });
+  if (kind === 'unknown') value.push({ file: '103_unknown.sql', source: 'select 1;' });
   if (kind === 'duplicate') value.splice(20, 0, value[20]);
   if (kind === 'reordered') [value[0], value[1]] = [value[1], value[0]];
   if (kind === 'renamed') value[0] = { ...value[0], file: '009_changed.sql' };
@@ -54,6 +54,20 @@ test('022 defines future claim state but contains no call to a scheduler or Meta
   assert.equal(entry.evidence.dynamicSqlLines.length, 0);
   assert.equal(entry.evidence.notifications.length, 0);
   assert.ok(entry.evidence.functions.some(fn => fn.name === 'public.claim_due_meta_insights_sync_states'));
+});
+
+test('102 changes only the name-fallback predicate of the reviewed 073 capacity body', () => {
+  const previous = chain.find(entry => entry.file.startsWith('073_'));
+  const current = chain.find(entry => entry.file.startsWith('102_'));
+  assert.deepEqual(current.evidence.tables, []);
+  assert.deepEqual(current.evidence.rls, []);
+  assert.deepEqual(current.evidence.functions.map(fn => fn.name), ['public.guard_appointment_capacity']);
+  const canonical = body => body.replace(/--[^\n]*/g, '').replace(/\s+/g, ' ').trim();
+  const old = canonical(previous.evidence.functions.find(fn => fn.name === 'public.guard_appointment_capacity').body);
+  const intended = old.replace('a.doctor_id = any(doctor_ids) or pg_catalog.lower(pg_catalog.btrim(a.doctor_name)) = any(doctor_names)',
+    'a.doctor_id = any(doctor_ids) or ((new_doctor is null or a.doctor_id is null) and pg_catalog.lower(pg_catalog.btrim(a.doctor_name)) = any(doctor_names))');
+  assert.notEqual(intended, old);
+  assert.equal(canonical(current.evidence.functions[0].body), intended);
 });
 
 test('all local reload notifications are retained and every dynamic SQL line has its original source location', () => {

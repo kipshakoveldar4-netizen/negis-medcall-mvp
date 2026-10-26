@@ -2828,12 +2828,13 @@ async function assertNoAppointmentConflict(
   const start = Date.parse(candidate.startsAt);
   if (!Number.isFinite(start)) return;
   const end = start + candidate.durationMinutes * 60_000;
+  const doctorId = isUuid(candidate.doctorId) ? candidate.doctorId.toLowerCase() : "";
+  const doctorName = candidate.doctorName.trim().toLowerCase();
 
   const readSlot = (columns: string) => supabase
     .from("appointments")
     .select(columns)
     .eq("workspace_id", workspaceId)
-    .eq("doctor_name", candidate.doctorName)
     .gte("starts_at", new Date(start - CONFLICT_LOOKBACK_MS).toISOString())
     .lt("starts_at", new Date(end).toISOString());
 
@@ -2872,6 +2873,11 @@ async function assertNoAppointmentConflict(
     // and the appointment would conflict with itself on every edit.
     if (candidate.id && id.toLowerCase() === candidate.id.toLowerCase()) continue;
     if (!occupiesSlot(readString(row.status))) continue;
+    // Two linked namesakes are different resources. Labels remain a fallback
+    // only when either side lacks an explicit identity, as in the calendar.
+    const otherDoctorId = readString(row.doctor_id).toLowerCase();
+    if (doctorId && otherDoctorId ? doctorId !== otherDoctorId
+      : readString(row.doctor_name).trim().toLowerCase() !== doctorName) continue;
 
     const otherStart = Date.parse(readString(row.starts_at));
     if (!Number.isFinite(otherStart)) continue;
@@ -2906,8 +2912,7 @@ async function assertNoAppointmentConflict(
   // Пояс поверх подтяжек. Мастер записывает только к себе — гейты на создании
   // и правке это обеспечивают, — поэтому пересечение у него всегда со своей же
   // записью. Но отказ, называющий пациента, обязан оставаться безопасным и
-  // тогда, когда какой-то путь эти гейты обойдёт: сравнение идёт по имени, а
-  // у двух однофамильцев записи попадают в проверку друг друга.
+  // тогда, когда путь с устаревшей записью без doctor_id использует имя.
   if (candidate.ownWork && !rowTargetsOnlySelf({ doctor_id: conflict.doctorId, doctor_name: conflict.doctorName }, candidate.ownWork)) {
     throw new AppointmentConflictError({ ...conflict, clientName: "" });
   }

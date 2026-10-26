@@ -82,8 +82,20 @@ accepted 101/101 selected G1/G3/G4 assertions, repaired the G2 missing-scope-set
 fixture and accepted 9/9 under the closed VM/no-network harness. The expanded
 registered isolation suite is 608/608; these overlapping counts are not summed.
 The application, API and SQL did not change in C27. In particular, source-demonstrated
-G2 explicit-ID/name capacity parity and G3 070/078 clock/period gaps remain open;
-green frontend/fixture receipts do not resolve them or constitute Preview acceptance.
+G2 explicit-ID/name capacity parity and G3 070/078 clock/period gaps were open
+at C27; green frontend/fixture receipts did not resolve them or constitute Preview acceptance.
+
+**G7-C28 local delta, base 922e691:** [capacity identity acceptance](CRM-CAPACITY-IDENTITY-2026-10-26.md)
+supersedes C27's local explicit-ID parity residual only. Matching API advisory
+filtering and local forward 102 preserve conservative unlinked-name occupancy,
+real peak/locking and replay semantics. The new separate PGlite lane composes
+actual router/server with 063/064/072/073/076/102, while native identity cases
+also run after the raw 009-102 chain. No table backfill, tenant configuration,
+account/role change or remote call is included. Exact final counts are in
+DELIVERY-CYCLES G7-C28; old native/application counts are not cumulative totals.
+102, this API change and the accumulated branch are NOT deployed/approved by
+this receipt. Preserve current test-only binding/schema/ACL gates and refresh
+the exact release selection before any separately authorized Preview rollout.
 
 ## Latest Recorded Preview
 

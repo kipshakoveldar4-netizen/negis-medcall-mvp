@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { startDisposablePostgres } from './disposable-postgres.mjs';
+import { reproduceNamesakeCapacityRefusal, exerciseCapacityIdentity, exerciseCapacityMigrationRefusals } from './appointment-capacity-identity-cases.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const start = '2090-10-20T09:00:00Z';
@@ -97,7 +98,7 @@ test('atomic appointment capacity on disposable PostgreSQL', { timeout: 300000 }
   });
   const db = await fixture.connect();
   await db.query('create role anon; create role authenticated; create role service_role bypassrls; grant usage on schema public to service_role;');
-  const numbers = new Set([9, 10, 11, 12, 13, 14, 19, 20, 29, 30, 32, 33, 34, 36, 40, 43, 45, 52, 53, 54, 55, 56, 57, 61, 63, 64]);
+  const numbers = new Set([9, 10, 11, 12, 13, 14, 19, 20, 29, 30, 32, 33, 34, 35, 36, 40, 43, 45, 52, 53, 54, 55, 56, 57, 61, 63, 64]);
   for (const file of (await readdir(path.join(root, 'migrations'))).sort()) {
     if (numbers.has(Number(file.slice(0, 3)))) await db.query(await readFile(path.join(root, 'migrations', file), 'utf8'));
   }
@@ -112,7 +113,17 @@ test('atomic appointment capacity on disposable PostgreSQL', { timeout: 300000 }
   await capacityDenied(bridge.create(bridge.a, { appointment: { duration_minutes: 120 } }));
   const peakGuard = await readFile(path.join(root, 'migrations/073_peak_appointment_capacity.sql'), 'utf8');
   await db.query(peakGuard); await db.query(peakGuard);
-  t.diagnostic(`PostgreSQL ${(await row(db, 'show server_version')).server_version}; migrations through 073; synthetic workspaces only`);
+  let reproduced=false;
+  await t.test('before 102, reproduce 073 refusing a distinct linked namesake at capacity two', async () => {
+    await reproduceNamesakeCapacityRefusal(db);reproduced=true;
+  });
+  assert.ok(reproduced,'Do not accept 102 without the actual prior refusal');
+  await db.query(await readFile(path.join(root, 'migrations/076_crm_sale_create_requests.sql'), 'utf8'));
+  const identityGuard = await readFile(path.join(root, 'migrations/102_appointment_capacity_explicit_identity.sql'), 'utf8');
+  await db.query(identityGuard); await db.query(identityGuard);
+  await exerciseCapacityMigrationRefusals(db, identityGuard, t);
+  await exerciseCapacityIdentity(db, t);
+  t.diagnostic(`PostgreSQL ${(await row(db, 'show server_version')).server_version}; focused 073/076/102 composition; synthetic workspaces only`);
 
   await t.test('073 fixes the reproduced 072 refusal for a long visit across adjacent visits', async () => {
     await bridge.create(bridge.a, { appointment: { duration_minutes: 120 } });
@@ -153,6 +164,20 @@ test('atomic appointment capacity on disposable PostgreSQL', { timeout: 300000 }
     assert.ok((await pending).value);
     await capacityDenied(f.create(f.a));
     assert.deepEqual(await f.counts(), { appointments: 2, clients: 2, receipts: 2, deals: 0 });
+  });
+
+  await t.test('a full namesake does not poison a real same-ID wait, while both resources keep their limit', async t => {
+    const f = await makeCase(fixture, db, t, 2), namesake = randomUUID();
+    await db.query("insert into clinic_doctors(id,workspace_id,full_name,capacity) values($1,$2,'Renamed doctor',2)", [namesake, f.workspace]);
+    await f.create(f.a, { appointment: { doctor_id: namesake } });
+    await f.create(f.a, { appointment: { doctor_id: namesake } });
+    await f.a.query('begin'); await f.create(f.a);
+    const pending = observed(f.create(f.b));
+    await f.blocked(); await f.a.query('commit');
+    assert.ok((await pending).value);
+    await capacityDenied(f.create(f.a));
+    await capacityDenied(f.create(f.a, { appointment: { doctor_id: namesake } }));
+    assert.deepEqual(await f.counts(), { appointments: 4, clients: 4, receipts: 4, deals: 0 });
   });
 
   await t.test('a waiting long visit fits adjacent visits, then capacity still rejects a third at the peak', async t => {

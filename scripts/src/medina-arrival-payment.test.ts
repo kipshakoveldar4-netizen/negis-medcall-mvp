@@ -60,7 +60,7 @@ afterEach(() => db.exec("rollback"));
 // successful API responses. This adapter is intentionally test-local/read-write.
 type ApiFilter = [string, "=" | ">=" | "<" | "<=" | "in" | "ilike", unknown];
 type ApiQuery = { table: string; operation: string; columns: string; filters: ApiFilter[] };
-function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "service_role", queries: ApiQuery[] = []) {
+function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "service_role", queries: ApiQuery[] = [], database = db, failConflictRead = false) {
   const ident = (value: string) => {
     assert.match(value, /^[a-z_][a-z0-9_]*$/);
     return `"${value}"`;
@@ -92,16 +92,18 @@ function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "servi
         },
       };
       assert.ok(calls[name], `Unexpected RPC ${name}`);
-      await db.exec(`savepoint api_rpc; set local role ${rpcRole}`);
+      await database.exec(`savepoint api_rpc; set local role ${rpcRole}`);
       try {
-        const result = await db.query<{ item: Record<string, unknown> }>(
+        const result = await database.query<{ item: Record<string, unknown> }>(
           calls[name].sql, calls[name].params,
         );
-        await db.exec("reset role; release savepoint api_rpc");
+        await database.exec("reset role; release savepoint api_rpc");
         return { data: result.rows[0].item, error: null };
       } catch (error) {
-        await db.exec("rollback to savepoint api_rpc; release savepoint api_rpc");
-        return { data: null, error: { code: (error as { code: string }).code, message: "Isolated database rejected the RPC" } };
+        await database.exec("rollback to savepoint api_rpc; release savepoint api_rpc");
+        const failure = error as { code: string; message: string };
+        return { data: null, error: { code: failure.code, message: failure.code === "23P01" && failure.message === "appointment_capacity_exceeded"
+          ? failure.message : "Isolated database rejected the RPC" } };
       }
     },
     from(table: string) {
@@ -111,6 +113,10 @@ function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "servi
     let limit: number | undefined;
     async function execute() {
       queries.push({ table, operation, columns, filters: [...filters] });
+      if (failConflictRead && table === "appointments" && operation === "select"
+        && columns === "id, client_name, doctor_id, doctor_name, starts_at, duration_minutes, status") {
+        return { data: null, error: { code: "57014", message: "Synthetic advisory read timeout" } };
+      }
       const params: unknown[] = [];
       const bind = (value: unknown) => {
         params.push(Array.isArray(value) ? JSON.stringify(value) : value);
@@ -139,14 +145,18 @@ function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "servi
       if (operation === "select" && limit !== undefined) sql += ` limit ${limit}`;
       // Settings read failures must not abort the enclosing fixture transaction.
       const savepoint = operation !== "select" ? "api_write" : table === "workspace_settings" ? "api_settings" : null;
-      if (savepoint) await db.exec(`savepoint ${savepoint}`);
+      if (savepoint) await database.exec(`savepoint ${savepoint}`);
       try {
-        const result = await db.query(sql, params);
-        if (savepoint) await db.exec(`release savepoint ${savepoint}`);
+        const result = await database.query(sql, params);
+        if (savepoint) await database.exec(`release savepoint ${savepoint}`);
+        // PostgREST returns SQL DATE as YYYY-MM-DD, not a JS Date timestamp.
+        if (table === "clinic_doctor_shifts") for (const row of result.rows as Record<string, unknown>[]) {
+          for (const key of ["on_date", "on_date_end"]) if (row[key] instanceof Date) row[key] = row[key].toISOString().slice(0, 10);
+        }
         const rows = JSON.parse(JSON.stringify(result.rows));
         return { data: single ? rows[0] ?? null : rows, error: null };
       } catch (error) {
-        if (savepoint) await db.exec(`rollback to savepoint ${savepoint}; release savepoint ${savepoint}`);
+        if (savepoint) await database.exec(`rollback to savepoint ${savepoint}; release savepoint ${savepoint}`);
         return { data: null, error: { code: (error as { code: string }).code, message: "Isolated database rejected the query" } };
       }
     }
@@ -330,6 +340,78 @@ function apiItem(response: { status: number; body: Record<string, unknown> }, ex
 }
 
 const keyedBooking = () => ({ ...bundleBooking(), requestKey: id(70) });
+
+test("G2 actual router + 063/064/072/073/076/102 separates identities and replays one visit and pending sale", { timeout: 120000 }, async () => {
+  // Separate WASM database: the historical suite below keeps its original
+  // schema. Real native locking and raw full-chain acceptance run separately.
+  const composed = new PGlite();
+  try {
+    await composed.exec("create role anon; create role authenticated; create role service_role bypassrls;");
+    const numbers = new Set([9,10,11,12,13,14,19,20,29,30,32,33,34,36,40,43,45,52,53,54,55,56,57,61,63,64,72,73,76,102]);
+    for (const file of (await readdir(path.join(root, "migrations"))).sort()) if (numbers.has(Number(file.slice(0, 3)))) {
+      // PGlite has built-in UUID support, not native pgcrypto extension files.
+      const source = await readFile(path.join(root, "migrations", file), "utf8");
+      await composed.exec(Number(file.slice(0, 3)) === 9 ? source.replace(/CREATE EXTENSION IF NOT EXISTS pgcrypto;/i, "") : source);
+    }
+    const call = await apiFixture(); // Synthetic Auth identity only; no external Auth request.
+    let advisoryUnavailable = false;
+    serverClient.setSupabaseServerClientFactoryForTests(() => apiDatabase("service_role", [], composed, advisoryUnavailable));
+    await composed.exec(`begin;
+      insert into workspaces(id,name) values('${id(1)}','Owned composed calendar');
+      insert into workspace_settings(workspace_id,key,value) values('${id(1)}','clinic_schedule','{"timeZone":"UTC"}');
+      insert into staff_users(id,workspace_id,auth_user_id,full_name,email,role)
+        values('${id(40)}','${id(1)}','${id(41)}','Test master','composed@example.invalid','owner');
+      insert into clinic_doctors(id,workspace_id,full_name,staff_user_id,capacity) values
+        ('${id(42)}','${id(1)}','Test master','${id(40)}',2),('${id(43)}','${id(1)}','Renamed doctor',null,2);
+      insert into clinic_doctor_shifts(workspace_id,doctor_id,on_date,on_date_end,start_minute,end_minute,is_working)
+        values('${id(1)}','${id(42)}','2090-10-20','2090-10-20',0,1440,true);
+      insert into appointments(workspace_id,doctor_id,doctor_name,client_name,starts_at,duration_minutes,status) values
+        ('${id(1)}','${id(43)}','Test master','Other resource A','2090-10-20T09:00:00Z',60,'confirmed'),
+        ('${id(1)}','${id(43)}','Test master','Other resource B','2090-10-20T09:00:00Z',60,'confirmed');`);
+    const body = { requestKey: id(70), client: "Owned composed new client", doctorId: id(42), doctor: "Test master",
+      startsAt: "2090-10-20T09:00:00Z", status: "confirmed",
+      serviceItems: [{ serviceId: "", name: "Owned service", priceMinor: 700050, durationMinutes: 60 }] };
+    const first = apiItem(await call("appointments", "POST", body), 201);
+    const second = apiItem(await call("appointments", "POST", { ...body, requestKey: id(71), client: "Second owned client" }), 201);
+    assert.notEqual(first.id, second.id);
+    const state = async () => (await composed.query<Record<string, number>>(`select
+      (select count(*)::int from clients) as clients,(select count(*)::int from appointments) as appointments,
+      (select count(*)::int from crm_appointment_create_requests) as receipts,
+      (select count(*)::int from deals) as deals,(select count(*)::int from crm_sale_create_requests) as sale_receipts,
+      (select count(*)::int from audit_logs) as journal`)).rows[0];
+    const full = await state();
+    assert.equal(full.clients, 2); assert.equal(full.appointments, 4); assert.equal(full.receipts, 2); assert.equal(full.deals, 0);
+    const third = await call("appointments", "POST", { ...body, requestKey: id(72), client: "Refused owned client" });
+    assert.equal(third.status, 409, JSON.stringify(third.body));
+    assert.deepEqual(await state(), full);
+    advisoryUnavailable = true;
+    const atomicRefusal = await call("appointments", "POST", { ...body, requestKey: id(74), client: "SQL refuses despite read timeout" });
+    advisoryUnavailable = false;
+    assert.equal(atomicRefusal.status, 409, JSON.stringify(atomicRefusal.body));
+    assert.deepEqual(await state(), full, "the actual trigger, not a canned successful/refused RPC, must roll back every side effect");
+    const replay = await call("appointments", "POST", body); // Simulate dropping the first success reply.
+    assert.deepEqual(apiItem(replay), first);
+    assert.equal((replay.body.data as Record<string, unknown>).replayed, true);
+    assert.deepEqual(await state(), full);
+    const manualSale = { requestKey: id(170), title: "Owned pending sale", amountMinor: 700050, currency: "KZT", status: "pending",
+      appointmentId: first.id, clientId: first.clientId, responsibleUserId: id(40) };
+    const savedSale = apiItem(await call("deals", "POST", manualSale), 201);
+    assert.equal(savedSale.status, "pending"); assert.equal(savedSale.amountMinor, 700050);
+    const withSale = await state();
+    assert.equal(withSale.deals, 1); assert.equal(withSale.sale_receipts, 1);
+    const saleReplay = await call("deals", "POST", manualSale);
+    assert.equal(apiItem(saleReplay).id, savedSale.id);
+    assert.equal((saleReplay.body.data as Record<string, unknown>).replayed, true);
+    assert.deepEqual(await state(), withSale);
+    await composed.query('update appointments set doctor_name=$1 where doctor_id=$2', ['Changed stored label', id(42)]);
+    assert.equal((await call("appointments", "POST", { ...body, requestKey: id(73), client: "Still refused" })).status, 409);
+    assert.deepEqual(await state(), withSale);
+  } finally {
+    await composed.exec("rollback");
+    await composed.close();
+  }
+});
+
 const retryCounts = () => row(`select (select count(*) from clients) as clients,
   (select count(*) from appointments) as appointments, (select count(*) from deals) as sales,
   (select count(*) from crm_appointment_create_requests) as receipts,
