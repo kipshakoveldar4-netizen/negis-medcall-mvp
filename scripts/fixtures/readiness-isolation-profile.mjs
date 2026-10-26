@@ -70,4 +70,5 @@ export const isolatedTestFiles = Object.freeze([
   "scripts/src/medina-isolation-site-build.test.ts",
   "scripts/src/medina-update-prompt-lifetime.test.ts",
   "scripts/src/medina-installable-app.test.ts",
+  "scripts/src/medina-appointment-capacity-identity.test.ts",
 ]);

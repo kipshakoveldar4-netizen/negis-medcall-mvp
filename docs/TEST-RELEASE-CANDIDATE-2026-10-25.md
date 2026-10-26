@@ -66,6 +66,25 @@ source/connection was changed under this task. Native video scope/off/requeue
 semantics and malformed Insights scope require Main's intended-contract decision
 before any worker test/deployment. Current deployed state was not inspected.
 
+**G7-C27 read-only cloud preflight:** the [26 October receipt](PREVIEW-PREFLIGHT-2026-10-26.md)
+now freshly observes the selected old deployment Ready/Preview/f18f411. Its
+Project/SUPABASE metadata contains old-release-branch overrides and common
+Production+Preview rows, not proven bindings for the current local branch.
+Shared/effective values and DB identity remain unverified; no Reveal/edits/SQL
+or deployment occurred. This supersedes only the broad missing-variable claim,
+not the isolation gate. Do not deploy on inherited common settings.
+
+Four retained scoped audits expose exact residuals: [G1 operators](audit/2026-10-26-g1-operators.md),
+[G2 CRM](audit/2026-10-26-g2-crm.md), [G3 analytics](audit/2026-10-26-g3-analytics.md),
+[G4 mobile](audit/2026-10-26-g4-mobile.md). Six-agent completion was interrupted
+by service limits; no new G5/G6/G8 audit completion is credited. Main independently
+accepted 101/101 selected G1/G3/G4 assertions, repaired the G2 missing-scope-set
+fixture and accepted 9/9 under the closed VM/no-network harness. The expanded
+registered isolation suite is 608/608; these overlapping counts are not summed.
+The application, API and SQL did not change in C27. In particular, source-demonstrated
+G2 explicit-ID/name capacity parity and G3 070/078 clock/period gaps remain open;
+green frontend/fixture receipts do not resolve them or constitute Preview acceptance.
+
 ## Latest Recorded Preview
 
 The latest recorded content/security Preview is **6c11l89kr / f18f411**,

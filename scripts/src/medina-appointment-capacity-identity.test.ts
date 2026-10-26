@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import path from "node:path";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Script } from "node:vm";
 import ts from "typescript";
@@ -64,12 +64,49 @@ const compiled = ts.transpileModule(`${helpers}\n${actions}
 `, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }, reportDiagnostics: true });
 assert.deepEqual(compiled.diagnostics?.filter((item) => item.category === ts.DiagnosticCategory.Error), []);
 
-const require = createRequire(import.meta.url);
-const services = require(path.join(root, "lib/crm/appointment-services.ts"));
-const capacity = require(path.join(root, "lib/crm/appointment-capacity.ts"));
-const dates = require(path.join(root, "artifacts/negis/src/lib/clinicDateTime.ts"));
-const attempts = require(path.join(root, "artifacts/negis/src/lib/appointmentCreateAttempt.ts"));
-const { capitalize } = require(path.join(root, "lib/vertical/terms.ts"));
+const helperFiles = new Set([
+  "lib/crm/appointment-services.ts", "lib/crm/appointment-capacity.ts", "lib/vertical/terms.ts",
+  "artifacts/negis/src/lib/clinicDateTime.ts", "artifacts/negis/src/lib/clinicDay.ts",
+  "artifacts/negis/src/lib/dayGrid.ts", "artifacts/negis/src/lib/appointmentCreateAttempt.ts",
+]);
+const helperCache = new Map<string, Record<string, any>>();
+const forbiddenHelperCapabilities: string[] = [];
+function denyHelper(capability: string): never {
+  forbiddenHelperCapabilities.push(capability);
+  assert.fail(`Helper capability forbidden: ${capability}`);
+}
+afterEach(() => assert.deepEqual(forbiddenHelperCapabilities, [], "Even swallowed helper capability attempts must fail"));
+function helper(file: string): Record<string, any> {
+  if (!helperFiles.has(file)) return denyHelper("unknown module");
+  const existing = helperCache.get(file);
+  if (existing) return existing;
+  const module = { exports: {} };
+  helperCache.set(file, module.exports);
+  const result = ts.transpileModule(readFileSync(path.join(root, file), "utf8"), {
+    fileName: file, reportDiagnostics: true,
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  });
+  assert.deepEqual(result.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error), []);
+  new Script(result.outputText, { filename: file }).runInNewContext({
+    module, exports: module.exports, Date, Intl, Error, TypeError, RangeError, DOMException,
+    crypto: { randomUUID },
+    require(name: string) {
+      if (!name.startsWith(".")) return denyHelper("native/application import");
+      const resolved = path.resolve(path.dirname(path.join(root, file)), `${name}.ts`);
+      return helper(path.relative(root, resolved).split(path.sep).join("/"));
+    },
+    fetch() { return denyHelper("fetch"); },
+    process: new Proxy({}, { get() { return denyHelper("ambient process"); } }),
+    WebSocket: class { constructor() { denyHelper("WebSocket"); } },
+    XMLHttpRequest: class { constructor() { denyHelper("XMLHttpRequest"); } },
+  }, { timeout: 1000, contextCodeGeneration: { strings: false, wasm: false } });
+  return module.exports;
+}
+const services = helper("lib/crm/appointment-services.ts");
+const capacity = helper("lib/crm/appointment-capacity.ts");
+const dates = helper("artifacts/negis/src/lib/clinicDateTime.ts");
+const attempts = helper("artifacts/negis/src/lib/appointmentCreateAttempt.ts");
+const { capitalize } = helper("lib/vertical/terms.ts");
 const doctorId = "abcdef00-0000-4000-8000-000000000001";
 const otherDoctorId = "abcdef00-0000-4000-8000-000000000002";
 const savedId = "abcdef00-0000-4000-8000-000000000003";
@@ -113,7 +150,7 @@ function fixture(rows: Visit[] = [], places = 2) {
     activeCatalog: [], activeDoctors: [], terms: { specialist: "specialist", specialistGenitive: "specialist" },
     userRole: "receptionist", clinicTimeZone: "Asia/Qyzylorda", clinicTimeZoneReady: true,
     hasSupabaseFrontendEnv: false, mutationScope: {
-      active: true, workspaceId: "local-workspace", actorId: "local-actor", role: "receptionist", deniedIds: new Set(),
+      active: true, workspaceId: "local-workspace", actorId: "local-actor", role: "receptionist", deniedIds: new Set(), deniedCreateKeys: new Set(),
     },
     isRealWorkspace: () => true, readCurrentWorkspaceId: () => "local-workspace",
     editingId: null, saving: false, submitLock: { current: false }, createAttempt: { current: null },
