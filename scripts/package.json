@@ -25,6 +25,7 @@
     "test:operator-command-closure-postgres": "node --test ./fixtures/operator-command-closure-postgres.test.mjs",
     "test:operator-cooperation-native-http": "node --import tsx --test ./fixtures/operator-cooperation-native-http.test.mjs",
     "test:partner-ledger-postgres": "node --test ./fixtures/partner-ledger-postgres.test.mjs",
+    "test:partner-source-postgres": "node --test ./fixtures/partner-source-postgres.test.mjs",
     "test:partner-ledger": "tsx --test ./src/medina-partner-ledger.test.ts",
     "test:creator-jobs": "tsx --test ./src/medina-creator-jobs.test.ts ./src/medina-creator-jobs-api.test.ts ./src/medina-creator-command-attempt.test.ts",
     "test:creator-jobs-browser": "node --test ./fixtures/creator-jobs-browser.test.mjs",

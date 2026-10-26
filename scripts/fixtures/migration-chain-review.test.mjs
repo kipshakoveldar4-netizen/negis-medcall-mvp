@@ -8,9 +8,9 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-111, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 103);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 103 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-112, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 104);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 104 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
@@ -64,6 +64,15 @@ test('111 closes old creator executors and adds one private stop fence plus scop
   for(const fn of chain.find(item=>item.file.startsWith('110_')).evidence.functions)assert.ok(entry.source.includes(digest(fn.body.replaceAll('\r\n','\n'))));
   assert.match(entry.source,/revoke all on function public\.execute_growth_creator_job\(/);
   assert.doesNotMatch(entry.source,/on\s+delete\s+cascade|grant\s+(?:select|insert|update|delete)/i);
+});
+
+test('112 adds one private source receipt, three closed helpers and four service entries; preserves financial writers',()=>{
+  const entry=chain.find(item=>item.file.startsWith('112_'));
+  assert.deepEqual(entry.evidence.tables,['public.growth_partner_sources']); assert.deepEqual(entry.evidence.rls,entry.evidence.tables);
+  assert.equal(entry.evidence.functions.length,7); assert.deepEqual(entry.evidence.dynamicSqlLines,[]);
+  assert.deepEqual(entry.evidence.storageCatalogueLines,[]); assert.deepEqual(entry.evidence.extensions,[]);
+  assert.match(entry.source,/revoke all on function public\.bind_growth_referral\(uuid,text,text\) from public,anon,authenticated,service_role/);
+  assert.doesNotMatch(entry.source,/on\s+delete\s+cascade|grant\s+(?:select|insert|update|delete)|(?:insert\s+into|update|delete\s+from)\s+public\.(?:platform_subscription|growth_partner_commissions|growth_partner_payouts|staff_users|workspaces|growth_contributor_profiles)/i);
 });
 
 for (const kind of ['missing', 'unknown', 'duplicate', 'reordered', 'renamed']) test(`preflight rejects ${kind} chain membership before any native startup`, () => {
