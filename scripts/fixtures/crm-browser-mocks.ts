@@ -230,7 +230,7 @@ export async function crmFetch(input: string, init?: ClinicArrivalGuardedInit): 
     });
     const generatedAt = new Date().toISOString();
     return Response.json({ success: true, mode: "supabase", data: { analytics: {
-      generatedAt, period: { days, from: new Date(Date.parse(generatedAt) - days * 86_400_000).toISOString(), to: generatedAt },
+      timeZone: snapshot.timeZone, generatedAt, period: { days, from: new Date(Date.parse(generatedAt) - days * 86_400_000).toISOString(), to: generatedAt },
       totalLeads: snapshot.metrics.totalLeads, unassignedLeads: snapshot.metrics.unassignedLeads,
       otherAssigneeLeads: snapshot.contacts.filter((contact) => contact.responsibleUserId && !members.some((member) => member.staffId === contact.responsibleUserId)).length,
       activityStatus: "available", members,

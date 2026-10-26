@@ -13,6 +13,7 @@ import { exerciseDeletionOperations } from './site-deletion-operations-cases.mjs
 import { proveDeletionOperationConcurrency } from './site-deletion-operations-native-cases.mjs';
 import { reproduceNamesakeCapacityRefusal, exerciseCapacityIdentity, exerciseCapacityMigrationRefusals } from './appointment-capacity-identity-cases.mjs';
 import { exerciseMortgageReportClock, exerciseReportClockRefusals } from './mortgage-report-clock-cases.mjs';
+import { exerciseAnalyticsTimezone, exerciseAnalyticsTimezoneRefusals } from './analytics-timezone-cases.mjs';
 
 // Native application-chain acceptance, NOT an authority to release migrations.
 // 001-008 require an undocumented legacy baseline; data/*.sql is deliberately
@@ -211,6 +212,10 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     if(entry.file==='103_mortgage_report_clock.sql') {
       await exerciseReportClockRefusals(db,entry.source,t);
       await exerciseMortgageReportClock(db,t);
+    }
+    if(entry.file==='104_analytics_report_timezone.sql') {
+      await exerciseAnalyticsTimezoneRefusals(db,entry.source,t);
+      await exerciseAnalyticsTimezone(db,t);
     }
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;

@@ -15,6 +15,7 @@ type Activity = {
 };
 
 type Analytics = {
+  timeZone: string;
   generatedAt: string;
   period: { days: number; from: string; to: string };
   totalLeads: number;
@@ -46,7 +47,23 @@ function hasCounts(value: unknown, keys: readonly string[]): boolean {
 }
 
 function isTimestamp(value: unknown): value is string {
-  return typeof value === "string" && value.trim() !== "" && Number.isFinite(Date.parse(value));
+  if (typeof value !== "string"
+    || !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,6})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(value)
+    || !Number.isFinite(Date.parse(value))) return false;
+  const day = value.slice(0, 10);
+  const calendar = new Date(`${day}T00:00:00Z`);
+  return Number.isFinite(calendar.getTime()) && calendar.toISOString().slice(0, 10) === day;
+}
+
+function compareInstants(left: string, right: string): number {
+  const remainder = (value: string) => Number((value.match(/\.(\d{1,6})/)?.[1] ?? "").padEnd(6, "0").slice(3));
+  return (Date.parse(left) - Date.parse(right)) * 1000 + remainder(left) - remainder(right);
+}
+
+function isTimeZone(value: unknown): value is string {
+  if (typeof value !== "string" || !value) return false;
+  try { new Intl.DateTimeFormat("en-GB", { timeZone: value }).format(0); return true; }
+  catch { return false; }
 }
 
 export function teamBookingConversion(booked: number, assigned: number): number | null {
@@ -70,7 +87,7 @@ function percent(value: number | null): string {
 function readAnalytics(body: unknown, days: number): Analytics {
   const analytics = isRecord(body) && body.success === true && body.mode === "supabase" && isRecord(body.data)
     ? body.data.analytics : null;
-  if (!isRecord(analytics) || !isTimestamp(analytics.generatedAt)
+  if (!PERIODS.some((period) => period === days) || !isRecord(analytics) || !isTimeZone(analytics.timeZone) || !isTimestamp(analytics.generatedAt)
     || !isRecord(analytics.period) || analytics.period.days !== days
     || !isTimestamp(analytics.period.from) || !isTimestamp(analytics.period.to)
     || !hasCounts(analytics, ["totalLeads", "unassignedLeads", "otherAssigneeLeads"])
@@ -93,8 +110,8 @@ function readAnalytics(body: unknown, days: number): Analytics {
   })) } as Analytics;
   const ids = new Set(result.members.map((member) => member.staffId));
   if (ids.size !== result.members.length
-    || Date.parse(result.period.to) - Date.parse(result.period.from) !== days * 86_400_000
-    || Date.parse(result.period.to) !== Date.parse(result.generatedAt)
+    || compareInstants(result.period.to, result.period.from) !== days * 86_400_000_000
+    || compareInstants(result.period.to, result.generatedAt) !== 0
     || result.members.some((member) => safeSum(ASSIGNED_FIELDS.filter((key) => key !== "total").map((key) => member.assigned[key])) !== member.assigned.total)
     || safeSum([result.unassignedLeads, result.otherAssigneeLeads, ...result.members.map((member) => member.assigned.total)]) !== result.totalLeads) {
     throw new Error("Inconsistent team analytics response");
@@ -102,9 +119,9 @@ function readAnalytics(body: unknown, days: number): Analytics {
   return result;
 }
 
-function dateTime(value: string): string {
+function dateTime(value: string, timeZone: string): string {
   return new Date(value).toLocaleString("ru-RU", {
-    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short",
+    timeZone, day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short",
   });
 }
 
@@ -257,10 +274,10 @@ export function LeadTeamAnalytics({ access, initiallyExpanded = false, heading =
                 <dd className="text-xl font-semibold tabular-nums" style={{ color: "var(--negis-text)" }}>{count}</dd>
               </div>)}
             </dl>
-            <p className="mt-2 text-xs" style={{ color: "var(--negis-muted)" }}>Снимок: {dateTime(analytics.generatedAt)}</p>
+            <p className="mt-2 text-xs" style={{ color: "var(--negis-muted)" }}>Снимок: {dateTime(analytics.generatedAt, analytics.timeZone)}</p>
           </div>
           <div className="text-xs" style={{ color: "var(--negis-muted)" }}>
-            <p>Ручные события · последние {analytics.period.days} дней: {dateTime(analytics.period.from)} – {dateTime(analytics.period.to)}</p>
+            <p>Ручные события · последние {analytics.period.days} дней: {dateTime(analytics.period.from, analytics.timeZone)} – {dateTime(analytics.period.to, analytics.timeZone)}</p>
             <p>Журнал сохранений: возможны пропуски.</p>
             {analytics.activityStatus === "unavailable" && <p>Активность недоступна.</p>}
           </div>
@@ -298,7 +315,7 @@ export function LeadTeamAnalytics({ access, initiallyExpanded = false, heading =
                       </td>
                     ))}
                     <td className="whitespace-nowrap px-2 py-3" title={activity ? undefined : "Активность недоступна"}>
-                      {activity?.lastRecordedAt ? dateTime(activity.lastRecordedAt) : "-"}
+                      {activity?.lastRecordedAt ? dateTime(activity.lastRecordedAt, analytics.timeZone) : "-"}
                     </td>
                   </tr>;
                 })}</tbody>

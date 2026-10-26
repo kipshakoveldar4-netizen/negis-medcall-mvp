@@ -101,6 +101,7 @@ e11717ba583fcacb491db52d85404c71c8a32f49b08afb269726b4fc8a36cfe0 100_legacy_crm_
 8a526e071fbef948b664121e443cadce53865fc898d35b99c9e97d1fdb810e30 101_site_deletion_operations.sql
 e0bebcea54224c0c0184a0aa4d2d554596a059c22827755955d36aadcf19beef 102_appointment_capacity_explicit_identity.sql
 e77b5457680a491e421748a79d3ac74b5e39116db204f78ac6e98aa4585d0a11 103_mortgage_report_clock.sql
+3a8afb0ec9229728f584943755f436e1b3ef8b04bcfe7a7ad36cc5c77c5bc929 104_analytics_report_timezone.sql
 `.trim().split('\n').map(line => line.split(' '));
 
 export const migrationReview = Object.freeze(Object.fromEntries(reviewed.map(([sha256, file]) => [file, sha256])));

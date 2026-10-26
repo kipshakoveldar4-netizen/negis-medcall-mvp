@@ -55,7 +55,9 @@ export async function mortgageBrowserRequest(url:URL,init:RequestInit|undefined,
     const ownedActivities=activities.filter(a=>visible.some(c=>c.id===a.leadId)&&(!leadId||a.leadId===leadId));
     const members=[{id:manager,name:'Тестовая Александра Константинопольская',role:'lead_manager',status:'active'},
       {id:second,name:'Тестовый менеджер 2',role:'lead_manager',status:'active'},mortgageFixtureAdmin].filter(m=>role!=='lead_manager'||m.id===manager);
-    const data:MortgageSnapshot={timeZone:'Asia/Almaty',contacts:selected.slice(page*100,(page+1)*100),contactsTotal:selected.length,page,pageSize:100,
+    const generatedAt=new Date().toISOString();
+    const data:MortgageSnapshot={generatedAt,period:{days,from:new Date(Date.parse(generatedAt)-days*86400000).toISOString(),to:generatedAt},
+      timeZone:'Asia/Almaty',contacts:selected.slice(page*100,(page+1)*100),contactsTotal:selected.length,page,pageSize:100,
       activities:ownedActivities,activitiesTruncated:false,members,events:[],periodDays:days,
       metrics:{totalLeads:visible.length,unassignedLeads:visible.filter(c=>!c.responsibleUserId).length,inProgressLeads:visible.filter(c=>c.status==='in_progress').length,
         meetingsToday:ownedActivities.filter(a=>a.kind==='meeting'&&a.status!=='cancelled'&&a.startsAt&&new Date(a.startsAt).toLocaleDateString('en-CA',{timeZone:'Asia/Almaty'})===today).length,

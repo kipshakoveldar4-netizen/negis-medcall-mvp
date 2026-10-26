@@ -60,6 +60,7 @@ export async function handleMortgageOutcomes(req: VercelRequest, res: VercelResp
       const errors: Record<string, [number, string, string]> = {
         P7001: [403, "workspace_access_denied", "Доступ отозван"],
         P7002: [404, "resource_not_found", "Клиент или договор недоступны"],
+        P7008: [503, "timezone_not_configured", "Не указан часовой пояс пространства"],
         P7803: [400, "invalid_contract", "Проверьте данные и дату заключения договора"],
         P7804: [409, "contract_already_recorded", "Договор для этого клиента уже учтён. Обновите карточку"],
         P7805: [409, "contract_already_corrected", "Запись уже исправлена. Обновите карточку"],
@@ -74,6 +75,11 @@ export async function handleMortgageOutcomes(req: VercelRequest, res: VercelResp
       throw new Error("outcomes_unavailable");
     }
     if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("invalid_response");
+    if (resource === "results") {
+      const timeZone = record(data).timeZone;
+      if (typeof timeZone !== "string" || !timeZone) throw new Error("invalid_response");
+      new Intl.DateTimeFormat("en-GB", { timeZone }).format(0);
+    }
     return json(res, 200, { success: true, mode: "supabase", data });
   } catch {
     return json(res, 502, { success: false, code: "outcomes_unavailable", error: "Не удалось загрузить результаты" });

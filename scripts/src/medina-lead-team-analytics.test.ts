@@ -34,7 +34,7 @@ const emptyAssigned = () => ({ total: 0, new: 0, inProgress: 0, booked: 0, postp
 const emptyActivity = () => ({ updatedEvents: 0, createdEvents: 0, touchedLeads: 0, lastRecordedAt: null as string | null });
 function snapshot(days = 30) {
   return {
-    workspaceId: workspace, generatedAt,
+    workspaceId: workspace, timeZone: "Asia/Almaty", generatedAt,
     period: { days, from: new Date(Date.parse(generatedAt) - days * 86_400_000).toISOString(), to: generatedAt },
     totalLeads: 10, unassignedLeads: 1, otherAssigneeLeads: 1, activityStatus: "available",
     members: [
@@ -246,7 +246,7 @@ for (const days of ["", "0", "365", "31", "30x", "07", " 7", "7 ", "7.0", "1e1",
 }
 
 for (const [code, status, publicCode] of [
-  ["P7001", 403, "workspace_access_denied"], ["P8303", 400, "invalid_period"], ["P8304", 502, "analytics_incomplete"],
+  ["P7001", 403, "workspace_access_denied"], ["P7008", 503, "timezone_not_configured"], ["P8303", 400, "invalid_period"], ["P8304", 502, "analytics_incomplete"],
   ["PGRST202", 503, undefined], ["42883", 503, undefined],
   ["42P01", 502, undefined], ["XX000", 502, undefined], ["42501", 502, undefined], ["23505", 502, undefined],
 ] as const) {
@@ -279,10 +279,18 @@ function replace(data: Row, field: string, value: unknown, remove = false) {
   for (const key of keys.slice(0, -1)) parent = parent[key];
   if (remove) delete parent[keys.at(-1)!]; else parent[keys.at(-1)!] = value;
 }
-const requiredFields = ["workspaceId", "generatedAt", "period", "period.days", "period.from", "period.to", "totalLeads", "unassignedLeads",
+const requiredFields = ["workspaceId", "timeZone", "generatedAt", "period", "period.days", "period.from", "period.to", "totalLeads", "unassignedLeads",
   "otherAssigneeLeads", "activityStatus", "members", "members.1.staffId", "members.1.name", "members.1.role", "members.1.status",
   "members.1.assigned", ...Object.keys(emptyAssigned()).map(key => `members.1.assigned.${key}`),
   "members.1.activity", ...Object.keys(emptyActivity()).map(key => `members.1.activity.${key}`)];
+test("missing or malformed report zones fail without reading settings separately", async () => {
+  for (const zone of [undefined, null, 5, {}, [], "", " UTC ", "Invalid/Zone"]) {
+    const data: Row = snapshot(); data.timeZone = zone; result.data = data;
+    failure(await call(), 502, "analytics_incomplete");
+  }
+  assert.equal(calls.length, 8);
+  assert.ok(calls.every(call => call.name === "read_lead_team_analytics"));
+});
 for (const field of requiredFields) {
   test(`missing aggregate field ${field} fails closed without defaults`, async () => {
     const data = snapshot(); replace(data, field, undefined, true); result.data = data;

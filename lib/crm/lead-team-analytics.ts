@@ -25,6 +25,8 @@ function timestamp(value: unknown): string {
 function normalizeAnalytics(value: unknown, workspaceId: string, days: number) {
   const data = record(value), period = record(data.period);
   if (typeof data.workspaceId !== "string" || data.workspaceId.toLowerCase() !== workspaceId.toLowerCase()) return invalid();
+  if (typeof data.timeZone !== "string" || !data.timeZone) return invalid();
+  try { new Intl.DateTimeFormat("en-GB", { timeZone: data.timeZone }).format(0); } catch { return invalid(); }
   const generatedAt = timestamp(data.generatedAt), from = timestamp(period.from), to = timestamp(period.to);
   // Validate PostgreSQL's sub-millisecond remainder before ISO normalization
   // drops it; otherwise a different cutoff or duration can appear identical.
@@ -68,7 +70,7 @@ function normalizeAnalytics(value: unknown, workspaceId: string, days: number) {
       activity: normalizedActivity };
   }).sort((a, b) => a.name.localeCompare(b.name, "ru") || a.staffId.localeCompare(b.staffId));
   if (eventTotal > 30_000 || assignedTotal + data.unassignedLeads + data.otherAssigneeLeads !== data.totalLeads) return invalid();
-  return { generatedAt, period: { days, from, to }, totalLeads: data.totalLeads, unassignedLeads: data.unassignedLeads,
+  return { timeZone: data.timeZone, generatedAt, period: { days, from, to }, totalLeads: data.totalLeads, unassignedLeads: data.unassignedLeads,
     otherAssigneeLeads: data.otherAssigneeLeads, activityStatus: data.activityStatus, members };
 }
 
@@ -98,6 +100,7 @@ export async function handleLeadTeamAnalytics(req: VercelRequest, res: VercelRes
       const code = record(error).code;
       if (code === "P7001") return json(res, 403, { success: false, code: "workspace_access_denied", error: "Недостаточно прав" });
       if (code === "P8303") return json(res, 400, { success: false, code: "invalid_period", error: "Недопустимый период" });
+      if (code === "P7008") return json(res, 503, { success: false, code: "timezone_not_configured", error: "Не указан часовой пояс пространства" });
       if (code === "42883" || code === "PGRST202") return json(res, 503, { success: false, code: "analytics_unavailable", error: "Сводка команды временно недоступна" });
       return json(res, 502, { success: false, code: "analytics_incomplete", error: "Не удалось загрузить полную сводку команды" });
     }

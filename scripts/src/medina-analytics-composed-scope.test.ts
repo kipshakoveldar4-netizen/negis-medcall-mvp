@@ -9,7 +9,7 @@ import { analyticsBundle, ids, ownedAnalyticsBrowser, panels, stopAnalyticsBundl
 // both real child reports over owned loopback HTTP with fake auth and data.
 // It proves observable frontend lifetimes, not backend permissions or SQL.
 type Wire = Record<string, any>;
-type SyntheticSnapshot = { members: Wire[]; memberMetrics: Wire[]; contacts: Wire[]; metrics: Wire };
+type SyntheticSnapshot = { timeZone: string; members: Wire[]; memberMetrics: Wire[]; contacts: Wire[]; metrics: Wire };
 const { mortgageBrowserRequest } = await import(new URL("../fixtures/mortgage-browser-store.ts", import.meta.url).href) as {
   mortgageBrowserRequest(url: URL, init: RequestInit | undefined, role: string): Promise<Response>;
 };
@@ -57,6 +57,7 @@ test("G3 composed analytics scope with actual React and owned Chromium/HTTP", { 
       assert.ok([7, 30, 90].includes(days));
       const name = marker(workspace, panel, seen.length), phase = plans[panel];
       const snapshot = (await (await mortgageBrowserRequest(url, undefined, role)).json() as { data: SyntheticSnapshot }).data;
+      snapshot.timeZone = workspace === ids.workspaceA ? "Asia/Almaty" : "UTC";
       snapshot.members.forEach((member: Wire, i: number) => { member.name = `${name}-member-${i}`; });
       snapshot.memberMetrics.forEach((member: Wire, i: number) => { member.name = `${name}-member-${i}`; });
       // Synthetic fixtures have no mutations here. Give the current lead cohort
@@ -74,7 +75,7 @@ test("G3 composed analytics scope with actual React and owned Chromium/HTTP", { 
       if (panel === "lead-team-analytics") {
         const generatedAt = "2026-10-25T10:00:00.000Z";
         payload = { success: true, mode: "supabase", data: { analytics: {
-          generatedAt, period: { days, from: new Date(Date.parse(generatedAt) - days * 86_400_000).toISOString(), to: generatedAt },
+          timeZone: snapshot.timeZone, generatedAt, period: { days, from: new Date(Date.parse(generatedAt) - days * 86_400_000).toISOString(), to: generatedAt },
           totalLeads: snapshot.metrics.totalLeads, unassignedLeads: snapshot.metrics.unassignedLeads, otherAssigneeLeads: 0,
           activityStatus: "available", members: snapshot.members.map((member: Wire) => {
             const mine = snapshot.contacts.filter((contact: Wire) => contact.responsibleUserId === member.id);
@@ -150,6 +151,7 @@ test("G3 composed analytics scope with actual React and owned Chromium/HTTP", { 
     await t.test(`${role} positive composition and same-actor token refresh keep all three reports usable`, async () => {
       await clean(role); const before = await ready();
       assert.equal(before.rows.length, 12); assert.ok(before.meters.includes(33.3)); assert.match(before.text, /20%/);
+      assert.ok(before.text.includes("15:00 GMT+5"), "The actual DOM must use workspace A's +5 report zone");
       assert.equal(before.alerts.length, 0); assert.equal(before.listeners, 2);
       for (const item of seen) assert.ok(before.text.includes(item.marker));
       await run("f.refresh();"); const refreshed = await snapshot();
@@ -177,13 +179,18 @@ test("G3 composed analytics scope with actual React and owned Chromium/HTTP", { 
       else hidden = await run("f.aba();return f.snapshot();");
       noReport(hidden);
       if (change === "workspace" || change === "actor") {
-        await requests(6); await ready();
+        await requests(6); const switched = await ready();
+        if (change === "workspace") {
+          assert.ok(switched.text.includes("10:00 UTC"), "Workspace B's report must use its own zone");
+          assert.ok(!switched.text.includes("GMT+5"), "No timestamp may retain workspace A's report zone");
+        }
         await run(change === "workspace" ? `f.patch({clinicId:${JSON.stringify(ids.workspaceA)}});` : `f.actor(${JSON.stringify(ids.actorA)});`);
       } else if (change === "role") {
         assert.equal(seen.length, 3); await run("f.patch({userRole:'owner'});");
       }
       const expected = change === "workspace" || change === "actor" ? 9 : 6;
       await requests(expected); const fresh = await ready();
+      assert.ok(fresh.text.includes("15:00 GMT+5"), "The fresh A lifetime must restore A's report-owned zone");
       await run("f.stale();f.refresh();"); const after = await assertNoLateMarkers(old);
       assert.deepEqual(after.rows, fresh.rows); assert.deepEqual(after.stats, fresh.stats);
       assert.deepEqual(after.cells, fresh.cells);

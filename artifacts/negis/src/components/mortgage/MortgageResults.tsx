@@ -17,6 +17,7 @@ export type MortgageResultsMember = Record<CountField, number> & {
 };
 
 export type MortgageResultsData = {
+  timeZone: string;
   generatedAt: string;
   period: { days: number; from: string; to: string };
   unassignedLeads: number;
@@ -47,6 +48,12 @@ function isInstant(value: unknown): value is string {
   return Number.isFinite(calendar.getTime()) && calendar.toISOString().slice(0, 10) === day;
 }
 
+function isTimeZone(value: unknown): value is string {
+  if (typeof value !== "string" || !value) return false;
+  try { new Intl.DateTimeFormat("en-GB", { timeZone: value }).format(0); return true; }
+  catch { return false; }
+}
+
 function compareInstants(left: string, right: string): number {
   // PostgreSQL timestamps retain microseconds beyond Date's millisecond precision.
   const remainder = (value: string) => Number((value.match(/\.(\d{1,6})/)?.[1] ?? "").padEnd(6, "0").slice(3));
@@ -66,7 +73,7 @@ function safeSum(values: readonly number[]): number {
 export function parseMortgageResults(body: unknown, requestedDays: number): MortgageResultsData {
   const data = isRecord(body) && body.success === true && body.mode === "supabase" ? body.data : null;
   if (!PERIODS.some((days) => days === requestedDays) || !isRecord(data)
-    || !isInstant(data.generatedAt) || !isRecord(data.period)
+    || !isTimeZone(data.timeZone) || !isInstant(data.generatedAt) || !isRecord(data.period)
     || data.period.days !== requestedDays || !isInstant(data.period.from) || !isInstant(data.period.to)
     || compareInstants(data.period.to, data.period.from) !== requestedDays * 86_400_000_000
     || compareInstants(data.period.to, data.generatedAt) !== 0
@@ -107,9 +114,9 @@ function percent(numerator: number, denominator: number): string {
   return ratio === null ? "—" : `${ratio.toLocaleString("ru-RU", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
 }
 
-function dateTime(value: string): string {
+function dateTime(value: string, timeZone: string): string {
   return new Date(value).toLocaleString("ru-RU", {
-    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short",
+    timeZone, day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short",
   });
 }
 
@@ -257,7 +264,7 @@ function ResultsTables({ data }: { data: MortgageResultsData }) {
     </section>
     <section className="min-w-0 max-w-full border-t border-[var(--negis-border)] pt-4" aria-label="Заключённые договоры за период">
       <h3 className="break-words text-xs font-semibold">Заключённые договоры за период</h3>
-      <p className="mt-2 break-words text-xs text-[var(--negis-muted)]">{data.period.days} дней · {dateTime(data.period.from)} — {dateTime(data.period.to)}</p>
+      <p className="mt-2 break-words text-xs text-[var(--negis-muted)]">{data.period.days} дней · {dateTime(data.period.from, data.timeZone)} — {dateTime(data.period.to, data.timeZone)}</p>
       <p className="my-3 break-words text-xs text-[var(--negis-muted)]">По ответственному, сохранённому при заключении договора. Смена текущего ответственного не переносит результат. Аннулированные записи исключены. Количество может превышать число текущих клиентов сотрудника и не используется в конверсиях выше.</p>
       {data.members.length === 0 ? <MortgageState kind="empty">Нет сотрудников для отчёта за период.</MortgageState>
         : <div className={mortgageTableClass} role="region" aria-label="Договоры за период по сохранённому ответственному" tabIndex={0}>
@@ -277,6 +284,6 @@ function ResultsTables({ data }: { data: MortgageResultsData }) {
           </table>
         </div>}
     </section>
-    <p className="break-words text-xs text-[var(--negis-muted)]">Снимок: {dateTime(data.generatedAt)}</p>
+    <p className="break-words text-xs text-[var(--negis-muted)]">Снимок: {dateTime(data.generatedAt, data.timeZone)}</p>
   </div>;
 }

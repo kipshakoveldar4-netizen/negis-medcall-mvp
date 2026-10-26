@@ -17,7 +17,7 @@ export function mortgageOutcomesBrowserRequest(url: URL, init: RequestInit | und
     if (![7, 30, 90].includes(days)) return fail(400, 'Некорректный период');
     const now = new Date().toISOString(), from = new Date(Date.parse(now) - days * 86400000).toISOString();
     const active = contracts.filter(c => !c.voidedAt);
-    return ok({ generatedAt: now, period: { days, from, to: now }, unassignedLeads: snapshot.metrics.unassignedLeads,
+    return ok({ timeZone: snapshot.timeZone, generatedAt: now, period: { days, from, to: now }, unassignedLeads: snapshot.metrics.unassignedLeads,
       otherAssigneeLeads: snapshot.contacts.filter(c => c.responsibleUserId && !snapshot.members.some(m => m.id === c.responsibleUserId)).length,
       members: snapshot.members.map(m => {
         const mine = snapshot.contacts.filter(c => c.responsibleUserId === m.id);

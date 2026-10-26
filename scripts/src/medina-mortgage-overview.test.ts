@@ -117,7 +117,8 @@ const snapshot = (overrides: Record<string, any> = {}) => ({
     { id: "synthetic-team-b", name: "Synthetic team beta", role: "admin", assignedLeads: 42431,
       openTasks: 52531, overdueTasks: 0, doneTasks: 62631, plannedMeetings: 72731, doneMeetings: 82831, missedMeetings: 0 },
   ],
-  periodDays: 37, page: 0, pageSize: 100, ...overrides,
+  generatedAt: "2026-10-20T12:00:00.123456Z", period: { days: 90, from: "2026-07-22T12:00:00.123456Z", to: "2026-10-20T12:00:00.123456Z" },
+  periodDays: 90, page: 0, pageSize: 100, ...overrides,
 });
 
 function expectedMetrics(data: ReturnType<typeof snapshot>, role = "owner") {
@@ -612,7 +613,7 @@ for (const role of ["owner", "admin"]) test(`${role} sees actual team loads, una
     assert.ok(compact(text(row)).includes(countText(member.assignedLeads)));
     assert.match(text(row), /Задач:.*Плановых встреч:/);
   }
-  assert.match(text(team), /Отметки сотрудников.*37 дней/);
+  assert.match(text(team), /Отметки сотрудников.*90 дней/);
   assert.ok(compact(text(team)).includes(countText(data.memberMetrics.reduce((sum, member) => sum + member.doneTasks, 0))));
   assert.ok(compact(text(team)).includes(countText(data.memberMetrics.reduce((sum, member) => sum + member.doneMeetings, 0))));
   assert.match(text(contacts), /Заявки без ответственного/);

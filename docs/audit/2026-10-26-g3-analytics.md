@@ -48,4 +48,14 @@ a refusal regression, not current behavior. Device-zone rendering, workspace
 metadata consumption, real current Preview and the unfinished B-to-A form are
 still open; neither the historical audit nor this local follow-up proves them.
 
-**Main-gated exact-candidate G3 report parity/clock lane:** once Main proves an available isolated Preview and separately authorizes schema/owned fixtures, verify 029/070 -> 083 -> 095 plus matching API/UI; use one owned nonzero portfolio to reconcile current booking, held/signing order, void/re-record and reassignment credit at 7/30/90 with workspace +5/device UTC. Observe an authorization-lock wait with period-edge events and revocation, explicitly distinguishing team 095 from unchanged 070/078. Finish with real B -> A unfinished-form plus report refresh/late-response refusal, owner/admin positive and manager/foreign denials, then owned cleanup equality. Record each unmet exact-period/zone expectation as pending or owner-decided; do not make the whole page green from one report's pass. This lane is proposed, not executed or authorized by this card.
+**Main follow-up G7-C30, application base 9a260e2:**
+[zone acceptance](../ANALYTICS-TIMEZONE-2026-10-26.md) closes the selected local
+device-zone and workspace metadata gaps. 104 returns a locked, validated zone
+inside each child report RPC; API/UI require it and format dates explicitly.
+The workspace consumer validates 103's exact requested period and microsecond
+cutoff. Final native 009-104, device-zone UI matrix and actual React/owned HTTP
+A(+5) -> B(UTC) -> A controls pass. The prior component reproduced five failures
+under UTC. No formula, common-page snapshot or actual Supabase/Preview acceptance
+is inferred; the older findings above remain historical to their named bases.
+
+**Main-gated exact-candidate G3 report parity/clock lane:** once Main proves an available isolated Preview and separately authorizes schema/owned fixtures, verify 029/070 -> 083 -> 095 and 078 -> 103 -> 104 plus matching API/UI; use one owned nonzero portfolio to reconcile current booking, held/signing order, void/re-record and reassignment credit at 7/30/90 with workspace +5/device UTC. Observe authorization and zone-lock waits with period-edge events and revocation. Finish with real B -> A unfinished-form plus report refresh/late-response refusal, owner/admin positive and manager/foreign denials, then owned cleanup equality. Record each unmet exact-period/zone expectation as pending or owner-decided; do not make the whole page green from one report's pass. This cloud lane is proposed, not executed by this card.

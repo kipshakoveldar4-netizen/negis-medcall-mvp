@@ -152,7 +152,17 @@ function hasCounts(value: unknown, keys: readonly string[]): boolean {
   return isRecord(value) && keys.every((key) => isCount(value[key]));
 }
 function isInstant(value: unknown): value is string {
-  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
+  if (typeof value !== "string"
+    || !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,6})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(value)
+    || !Number.isFinite(Date.parse(value))) return false;
+  const day = value.slice(0, 10);
+  const calendar = new Date(`${day}T00:00:00Z`);
+  return Number.isFinite(calendar.getTime()) && calendar.toISOString().slice(0, 10) === day;
+}
+function compareInstants(left: string, right: string): number {
+  // Keep the PostgreSQL microsecond remainder when checking report boundaries.
+  const remainder = (value: string) => Number((value.match(/\.(\d{1,6})/)?.[1] ?? "").padEnd(6, "0").slice(3));
+  return (Date.parse(left) - Date.parse(right)) * 1000 + remainder(left) - remainder(right);
 }
 function isNullableString(value: unknown): boolean { return value === null || typeof value === "string"; }
 function isNullableInstant(value: unknown): boolean { return value === null || isInstant(value); }
@@ -183,16 +193,20 @@ function isMemberMetrics(value: unknown): boolean {
   return isRecord(value) && hasStrings(value, ["id", "name", "role"]) && Boolean(value.id)
     && hasCounts(value, ["assignedLeads", "openTasks", "overdueTasks", "doneTasks", "plannedMeetings", "doneMeetings", "missedMeetings"]);
 }
-function snapshotFrom(body: Record<string, unknown>): MortgageSnapshot {
+function snapshotFrom(body: Record<string, unknown>, requestedDays: number): MortgageSnapshot {
   const data = body.data;
-  if (!isRecord(data) || typeof data.timeZone !== "string"
+  if (![7, 30, 90].includes(requestedDays) || !isRecord(data) || typeof data.timeZone !== "string"
+    || !isInstant(data.generatedAt) || !isRecord(data.period) || data.period.days !== requestedDays
+    || !isInstant(data.period.from) || !isInstant(data.period.to)
+    || compareInstants(data.period.to, data.period.from) !== requestedDays * 86_400_000_000
+    || compareInstants(data.period.to, data.generatedAt) !== 0
     || !Array.isArray(data.contacts) || !data.contacts.every(isContact) || !isCount(data.contactsTotal)
     || !Array.isArray(data.activities) || !data.activities.every(isActivity) || typeof data.activitiesTruncated !== "boolean"
     || !Array.isArray(data.members) || !data.members.every(isMember)
     || !Array.isArray(data.events) || !data.events.every(isEvent)
     || !hasCounts(data.metrics, ["totalLeads", "unassignedLeads", "inProgressLeads", "meetingsToday", "overdueTasks", "activeManagers"])
     || !Array.isArray(data.memberMetrics) || !data.memberMetrics.every(isMemberMetrics)
-    || !isCount(data.periodDays) || data.periodDays < 1 || !isCount(data.page) || !isCount(data.pageSize) || data.pageSize < 1) {
+    || data.periodDays !== requestedDays || !isCount(data.page) || !isCount(data.pageSize) || data.pageSize < 1) {
     throw new MortgageRequestError("Сервер не вернул данные рабочего пространства.", "invalid_response", 200);
   }
   requireMortgageTimeZone(data.timeZone);
@@ -207,6 +221,7 @@ export function useMortgageWorkspace(query: MortgageSnapshotQuery = {}) {
     if (query[key] !== undefined && query[key] !== "") params.set(key, String(query[key]));
   }
   const path = `/api/crm/mortgage-workspace?${params}`;
+  const requestedDays = query.days ?? 30;
   const [revision, setRevision] = useState(0);
   const [state, setState] = useState<{ path: string; data: MortgageSnapshot | null; loading: boolean; error: string }>({ path: "", data: null, loading: true, error: "" });
   const refresh = useCallback(() => { if (access.isCurrent()) setRevision((value) => value + 1); }, [access]);
@@ -220,13 +235,13 @@ export function useMortgageWorkspace(query: MortgageSnapshotQuery = {}) {
       try {
         const response = await access.request(path, { signal: controller.signal });
         const body = await readResult(access, response);
-        if (current()) setState({ path, data: snapshotFrom(body), loading: false, error: "" });
+        if (current()) setState({ path, data: snapshotFrom(body, requestedDays), loading: false, error: "" });
       } catch (error) {
         if (current() && !controller.signal.aborted) setState({ path, data: null, loading: false, error: messageFor(error) });
       }
     })();
     return () => { active = false; controller.abort(); };
-  }, [access, path, revision]);
+  }, [access, path, requestedDays, revision]);
 
   const mutate = useCallback(async (endpoint: string, method: string, body: unknown) => {
     const response = await access.request(`${endpoint}?workspaceId=${encodeURIComponent(access.workspaceId)}`, {
@@ -254,7 +269,7 @@ export function useMortgageWorkspace(query: MortgageSnapshotQuery = {}) {
     const search = new URLSearchParams({ workspaceId: access.workspaceId, q, page: "0" });
     const response = await access.request(`/api/crm/mortgage-workspace?${search}`);
     const body = await readResult(access, response);
-    const snapshot = snapshotFrom(body);
+    const snapshot = snapshotFrom(body, 30);
     if (!access.isCurrent()) throw ended();
     return snapshot.contacts;
   }, [access]);

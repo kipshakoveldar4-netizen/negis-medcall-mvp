@@ -44,6 +44,7 @@ const canonicalTask = {
 const scope = { p_workspace_id: workspaceId, p_staff_user_id: staffUserId, p_auth_user_id: userId };
 const privateDetail = "fixture-private: mortgage_activities SQL SELECT internal_column service_role";
 const snapshot = () => ({
+  generatedAt: "2026-10-20T12:00:00.123456Z", period: { days: 30, from: "2026-09-20T12:00:00.123456Z", to: "2026-10-20T12:00:00.123456Z" },
   timeZone: "Asia/Qyzylorda", contacts: [{
     id: leadId, name: "Offline client", phone: "", notes: "", status: "new", source: "manual",
     createdAt: expectedUpdatedAt, updatedAt: expectedUpdatedAt, responsibleUserId: staffUserId,

@@ -57,7 +57,7 @@ const WORKSPACE = "00000000-0000-4000-8000-000000000011";
 const GENERATED_AT = "2026-10-25T10:00:00.000Z";
 function rawReport(days = 30, name = "Current fixture") {
   return {
-    workspaceId: WORKSPACE, generatedAt: GENERATED_AT,
+    workspaceId: WORKSPACE, timeZone: "Asia/Almaty", generatedAt: GENERATED_AT,
     period: { days, from: new Date(Date.parse(GENERATED_AT) - days * 86_400_000).toISOString(), to: GENERATED_AT },
     totalLeads: 20, unassignedLeads: 5, otherAssigneeLeads: 4, activityStatus: "available",
     members: [
@@ -206,6 +206,38 @@ test("authorized component uses the server-defined assigned cohort and lazy posi
   await f.toggle(false); assertHidden(f);
   await f.toggle(true); assertHidden(f); assert.equal(f.requests[2].days, 7);
   await f.reply(2); assertReady(f); f.driver.dispose();
+});
+
+for (const [at, zone, localDay, localTime] of [
+  ["2026-01-01T20:10:00.000Z", "Asia/Almaty", "02.01.2026", "01:10"],
+  ["2026-01-01T20:10:00.000Z", "Pacific/Chatham", "02.01.2026", "09:55"],
+  ["2026-03-08T06:30:00.000Z", "America/New_York", "08.03.2026", "01:30"],
+  ["2026-03-08T07:30:00.000Z", "America/New_York", "08.03.2026", "03:30"],
+  ["2026-01-01T20:10:00.000Z", "UTC", "01.01.2026", "20:10"],
+]) test(`team snapshot, period and last-activity labels use report zone ${zone} at ${at}`, async t => {
+  const raw = rawReport(); raw.timeZone = zone; raw.generatedAt = raw.period.to = at;
+  raw.period.from = new Date(Date.parse(at) - 30 * 86400000).toISOString(); raw.members[0].activity.lastRecordedAt = at;
+  const f = fixture(); t.after(() => f.driver.dispose());
+  await f.driver.flush(); await f.reply(0, envelope(raw)); assertReady(f);
+  const expected = new Date(at).toLocaleString("ru-RU", { timeZone: zone, day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" });
+  assert.ok(expected.includes(localDay) && expected.includes(localTime));
+  assert.ok(f.driver.text().split(expected).length >= 4, "Snapshot, period.to and activity timestamp must all use the supplied zone");
+  const from = new Date(raw.period.from).toLocaleString("ru-RU", { timeZone: zone, day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" });
+  assert.ok(f.driver.text().includes(from));
+});
+
+test("team UI refuses missing/invalid zones and mismatched microsecond cutoffs even after a successful load", async t => {
+  for (const edit of [
+    (data: Json) => { delete data.timeZone; }, (data: Json) => { data.timeZone = "Invalid/Zone"; },
+    (data: Json) => { data.generatedAt = data.generatedAt.replace(".000Z", ".000001Z"); },
+    (data: Json) => { data.generatedAt = data.period.to = data.period.to.replace(".000Z", ".000001Z"); },
+    (data: Json) => { data.period.from = "2026-02-30T10:00:00Z"; },
+  ]) {
+    const f = fixture(); t.after(() => f.driver.dispose());
+    await f.driver.flush(); await f.reply(0); assertReady(f); await f.refresh();
+    const malformed = envelope(); edit(malformed.data.analytics); await f.reply(1, malformed);
+    assertHidden(f); assert.equal(f.driver.nodes().some(node => node.props.role === "alert"), true);
+  }
 });
 
 test("same actor token refresh and replacement wrapper retain the original authorized bound loader", async () => {

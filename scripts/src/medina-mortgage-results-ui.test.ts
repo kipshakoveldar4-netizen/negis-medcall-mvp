@@ -51,7 +51,7 @@ function evaluate(input: string, imports: Record<string, unknown> = {}) {
   return exports;
 }
 const pure = evaluate(select([
-  "PERIODS", "COUNT_FIELDS", "isRecord", "isCount", "isInstant", "compareInstants", "safeSum",
+  "PERIODS", "COUNT_FIELDS", "isRecord", "isCount", "isInstant", "isTimeZone", "compareInstants", "safeSum",
   "parseMortgageResults", "mortgageResultsRatio",
 ]));
 const parse = pure.parseMortgageResults as (body: unknown, days: number) => ReturnType<typeof envelope>["data"];
@@ -67,7 +67,7 @@ function envelope(days = 30, members = [member()]) {
   const to = "2026-10-20T12:00:00.123456Z";
   const from = new Date(Date.parse(to) - days * 86_400_000).toISOString().replace(/Z$/, "456Z");
   return { success: true, mode: "supabase", data: {
-    generatedAt: to, period: { days, from, to }, unassignedLeads: 3, otherAssigneeLeads: 2, members,
+    timeZone: "Asia/Almaty", generatedAt: to, period: { days, from, to }, unassignedLeads: 3, otherAssigneeLeads: 2, members,
   } };
 }
 function freeze<T>(value: T): T {
@@ -95,6 +95,17 @@ test("empty and zero portfolios are valid, and historical signing credit can exc
   assert.equal(parse(body, 30).members[0]!.signedInPeriod, MAX);
   assert.equal(parse(envelope(30, [member({ assignedLeads: 10, heldLeads: 10, signedLeads: 10, heldSignedLeads: 0 })]), 30).members[0]!.heldSignedLeads, 0,
     "contracts preceding meetings need not count toward contracts after a meeting");
+});
+
+test("results require a report-owned valid timezone, without a browser-zone fallback", () => {
+  for (const timeZone of [undefined, null, 5, {}, [], "", " UTC ", "Invalid/Zone"]) {
+    const body: any = envelope(); body.data.timeZone = timeZone;
+    assert.throws(() => parse(body, 30));
+  }
+  for (const timeZone of ["UTC", "Asia/Almaty", "America/New_York", "Pacific/Chatham"]) {
+    const body = envelope(); body.data.timeZone = timeZone;
+    assert.equal(parse(body, 30).timeZone, timeZone);
+  }
 });
 
 test("safe integer boundaries are accepted for every count independently of period credit", () => {
@@ -427,6 +438,25 @@ test("actual table totals are weighted, include inactive staff, and use after-me
   assert.notEqual(40, (ratio(2, 2)! + ratio(6, 18)!) / 2);
   assert.notEqual(37.5, ratio(5, 8), "all signed clients / held clients is not the after-meeting conversion");
   assert.match(text(tables[0]), /Договор после встречи/);
+});
+
+for (const [at, zone, localDay, localTime] of [
+  ["2026-01-01T20:10:00.000Z", "Asia/Almaty", "02.01.2026", "01:10"],
+  ["2026-01-01T20:10:00.000Z", "Pacific/Chatham", "02.01.2026", "09:55"],
+  ["2026-03-08T06:30:00.000Z", "America/New_York", "08.03.2026", "01:30"],
+  ["2026-03-08T07:30:00.000Z", "America/New_York", "08.03.2026", "03:30"],
+  ["2026-01-01T20:10:00.000Z", "UTC", "01.01.2026", "20:10"],
+]) test(`results snapshot and period labels use report zone ${zone} at ${at}`, async t => {
+  const f = componentFixture(); t.after(() => f.driver.unmount()); await f.driver.flush();
+  const body = envelope(); body.data.timeZone = zone; body.data.generatedAt = body.data.period.to = at;
+  body.data.period.from = new Date(Date.parse(at) - 30 * 86400000).toISOString();
+  f.calls[0]!.deferred.resolve(response(body)); await f.driver.flush();
+  assert.equal(renderedTables(f).length, 2);
+  const expected = new Date(at).toLocaleString("ru-RU", { timeZone: zone, day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" });
+  assert.ok(expected.includes(localDay) && expected.includes(localTime));
+  assert.ok(text(f.driver.tree).split(expected).length >= 3, "Snapshot and period.to must both use the supplied zone");
+  const from = new Date(body.data.period.from).toLocaleString("ru-RU", { timeZone: zone, day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" });
+  assert.ok(text(f.driver.tree).includes(from));
 });
 
 test("actual zero-denominator cells display dashes, not 0% or infinity", async (t) => {

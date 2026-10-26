@@ -104,10 +104,12 @@ const selfStaffId = "22222222-2222-4222-8222-222222222222";
 const selfAuthId = "11111111-1111-4111-8111-111111111111";
 const otherStaffId = "33333333-3333-4333-8333-333333333333";
 const contact = { id: "local-client", name: "Local Client", phone: "000", notes: "", status: "new", source: "manual", createdAt: "2026-10-14T10:00:00Z", updatedAt: "2026-10-14T10:00:00.123456Z", responsibleUserId: "local-manager", responsibleName: "Local Manager" };
-const snapshot = () => ({ timeZone: "Asia/Qyzylorda", contacts: [contact], contactsTotal: 1, activities: [], members: [{ id: "local-manager", name: "Local Manager", role: "lead_manager", status: "active" }], events: [],
+const snapshot = (days = 30) => ({ generatedAt: "2026-10-20T12:00:00.123456Z",
+  period: { days, from: new Date(Date.parse("2026-10-20T12:00:00.123Z") - days * 86400000).toISOString().replace(/Z$/, "456Z"), to: "2026-10-20T12:00:00.123456Z" },
+  timeZone: "Asia/Qyzylorda", contacts: [contact], contactsTotal: 1, activities: [], members: [{ id: "local-manager", name: "Local Manager", role: "lead_manager", status: "active" }], events: [],
   metrics: { totalLeads: 1, unassignedLeads: 0, inProgressLeads: 0, meetingsToday: 0, overdueTasks: 0, activeManagers: 1 },
   memberMetrics: [{ id: "local-manager", name: "Local Manager", role: "lead_manager", assignedLeads: 1, openTasks: 0, overdueTasks: 0, doneTasks: 0, plannedMeetings: 0, doneMeetings: 0, missedMeetings: 0 }],
-  periodDays: 90, page: 0, pageSize: 100, activitiesTruncated: false });
+  periodDays: days, page: 0, pageSize: 100, activitiesTruncated: false });
 const response = (data: unknown = snapshot()) => new Response(JSON.stringify({ success: true, mode: "supabase", data }), { status: 200 });
 function moduleFixture(d = driver(), fetcher: (path: string, init: any) => Promise<Response> = async () => response()) {
   const listeners = new Set<(event: string, session: any) => void>();
@@ -415,18 +417,51 @@ test("schema errors are real errors, with no demo data or fallback writes", asyn
 
 test("successful snapshots validate every required collection, metric, count, paging field and nested row", async () => {
   const valid: Record<string, any> = { ...snapshot(), activities: [activity()], events: [{ id: "event", activityId: "activity-1", action: "created", title: "Local activity", actorName: "Local actor", createdAt: "2026-10-14T10:00:00Z" }] };
-  assert.equal(pure.fixture.snapshotFrom({ data: valid }).contacts[0].updatedAt, "2026-10-14T10:00:00.123456Z");
+  assert.equal(pure.fixture.snapshotFrom({ data: valid }, 30).contacts[0].updatedAt, "2026-10-14T10:00:00.123456Z");
   for (const key of Object.keys(valid)) {
     const missing = { ...valid }; delete missing[key];
-    assert.throws(() => pure.fixture.snapshotFrom({ data: missing }), `missing ${key}`);
+    assert.throws(() => pure.fixture.snapshotFrom({ data: missing }, 30), `missing ${key}`);
   }
   for (const [key, value] of [["metrics", {}], ["metrics", { ...valid.metrics, activeManagers: "1" }], ["contactsTotal", -1], ["contactsTotal", "1"], ["page", -1], ["pageSize", 0], ["periodDays", 0], ["activitiesTruncated", "false"], ["events", {}], ["memberMetrics", [{}]], ["contacts", [{ ...contact, phone: [] }]], ["activities", [activity({ priority: ["normal"] })]], ["activities", [activity({ status: ["open"] })]], ["members", [{ id: "manager", name: 4, role: "lead_manager", status: "active" }]], ["events", [{ ...valid.events[0], createdAt: "invalid" }]]]) {
-    assert.throws(() => pure.fixture.snapshotFrom({ data: { ...valid, [key as string]: value } }), `invalid ${key}`);
+    assert.throws(() => pure.fixture.snapshotFrom({ data: { ...valid, [key as string]: value } }, 30), `invalid ${key}`);
   }
   const malformed = hookFixture(async () => response({ ...valid, metrics: {} }));
   const result = await malformed.d.flush();
   assert.equal(result.data, null); assert.equal(result.loading, false); assert.match(result.error, /данные рабочего пространства/);
   malformed.d.unmount();
+});
+
+test("workspace periods use the requested exact interval and microsecond cutoff, not an unrelated response label", () => {
+  for (const days of [7, 30, 90]) {
+    const data = snapshot(days);
+    assert.equal(pure.fixture.snapshotFrom({ data }, days).period, data.period);
+    assert.throws(() => pure.fixture.snapshotFrom({ data }, days === 30 ? 7 : 30));
+    for (const change of [
+      { generatedAt: "2026-10-20T12:00:00.123457Z" },
+      { periodDays: days + 1 }, { period: { ...data.period, days: days + 1 } },
+      { period: { ...data.period, from: data.period.from.replace("123456", "123455") } },
+      { period: { ...data.period, to: data.period.to.replace("123456", "123457") } },
+      { generatedAt: "2026-02-30T12:00:00Z" }, { generatedAt: "2026-10-20T24:00:00Z" },
+      { generatedAt: "2026-10-20" }, { generatedAt: "2026-10-20T12:00:00" },
+      { generatedAt: "2026-10-20T12:00:00.1234567Z" },
+    ]) assert.throws(() => pure.fixture.snapshotFrom({ data: { ...data, ...change } }, days));
+  }
+  for (const days of [0, 31, undefined, null, "30", NaN]) assert.throws(() => pure.fixture.snapshotFrom({ data: snapshot() }, days));
+  const data = snapshot(); data.period.to = "2026-10-20T17:00:00.123456+05:00";
+  assert.equal(pure.fixture.snapshotFrom({ data }, 30), data, "Equivalent instants with different offsets are valid");
+});
+
+test("workspace period changes hide old data and contact search validates its own default period", async (t) => {
+  let wrong = false;
+  const f = hookFixture(async path => response(snapshot(wrong ? 7 : Number(new URL(path, "http://fixture.invalid").searchParams.get("days") ?? 30))));
+  t.after(() => f.d.unmount());
+  let result = await f.d.flush(); assert.equal(result.data.period.days, 30);
+  f.setQuery({ days: 90 }); assert.equal(f.d.paint().data, null);
+  result = await f.d.flush(); assert.equal(result.data.period.days, 90);
+  assert.equal((await result.searchContacts("Local")).length, 1, "Search defaults to 30 even while the main report requests 90");
+  wrong = true; result.refresh(); result = await f.d.flush();
+  assert.equal(result.data, null); assert.match(result.error, /данные рабочего пространства/);
+  await assert.rejects(result.searchContacts("Local"), /данные рабочего пространства/);
 });
 
 test("activity retries retain requestId; PATCH carries the expected version and no assignee/clinical fields", async () => {
@@ -1293,7 +1328,7 @@ test("meeting creation uses the displayed start and every clickable half-hour pr
 });
 
 test("calendar range toggles make no requests and period navigation retains the authorized scoped query without writes", async (t) => {
-  const data = snapshot(), original = JSON.stringify(data), requests: Array<{ path: string; init: any }> = [];
+  const data = snapshot(90), original = JSON.stringify(data), requests: Array<{ path: string; init: any }> = [];
   const session = moduleFixture(driver(), async (path, init) => { requests.push({ path, init });return response(data); });
   t.after(() => session.d.unmount());
   const live = { current: { ...scope } };
@@ -1378,7 +1413,9 @@ for (const kind of ["meeting", "task"] as const) {
 
   test(`${kind} individual filters reuse the authorized HTTP snapshot without broader reads or writes`, async () => {
     const data = readFilterSnapshot(kind), requests: any[] = [];
-    const session = moduleFixture(driver(), async (path, init) => { requests.push({ path, init }); return response(data); });
+    const session = moduleFixture(driver(), async (path, init) => { requests.push({ path, init });
+      const period = snapshot(Number(new URL(path, "http://fixture.invalid").searchParams.get("days") ?? 30));
+      return response({ ...data, generatedAt: period.generatedAt, period: period.period, periodDays: period.periodDays }); });
     const boundScope = { ...scope, role: "admin" }, live = { current: boundScope };
     session.d.mount(() => session.module.fixture.MortgageSession({ scope: boundScope, live, children: "Synthetic read filters" }));
     const access = (await session.d.flush()).props.value;

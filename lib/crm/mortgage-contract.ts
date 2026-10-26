@@ -26,6 +26,7 @@ export type MortgageMemberMetrics = {
   plannedMeetings: number; doneMeetings: number; missedMeetings: number;
 };
 export type MortgageSnapshot = {
+  generatedAt: string; period: { days: number; from: string; to: string };
   timeZone: string; contacts: MortgageContact[]; contactsTotal: number;
   activities: MortgageActivity[]; activitiesTruncated: boolean;
   members: MortgageMember[]; events: MortgageActivityEvent[];

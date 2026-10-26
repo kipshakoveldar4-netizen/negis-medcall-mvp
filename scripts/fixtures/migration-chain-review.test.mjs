@@ -8,9 +8,9 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-103, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 95);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 95 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-104, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 96);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 96 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
@@ -19,7 +19,7 @@ test('review covers the contiguous actual worktree 009-103, including protected 
 for (const kind of ['missing', 'unknown', 'duplicate', 'reordered', 'renamed']) test(`preflight rejects ${kind} chain membership before any native startup`, () => {
   const value = records();
   if (kind === 'missing') value.splice(31, 1);
-  if (kind === 'unknown') value.push({ file: '104_unknown.sql', source: 'select 1;' });
+  if (kind === 'unknown') value.push({ file: '105_unknown.sql', source: 'select 1;' });
   if (kind === 'duplicate') value.splice(20, 0, value[20]);
   if (kind === 'reordered') [value[0], value[1]] = [value[1], value[0]];
   if (kind === 'renamed') value[0] = { ...value[0], file: '009_changed.sql' };
@@ -100,6 +100,22 @@ test('103 preserves 078 result cohorts/attribution and captures one exact clock 
   const actual=chain.find(e=>e.file.startsWith('103_')).evidence.functions[1].body;
   assert.equal(canonical(actual),canonical(expected));
   assert.equal((actual.match(/clock_timestamp\(/g)||[]).length,1);
+});
+
+test('104 preserves both report business statements and adds only a locked authorized timezone', () => {
+  const current=chain.find(e=>e.file.startsWith('104_'));
+  assert.deepEqual(current.evidence.tables,[]);assert.deepEqual(current.evidence.rls,[]);
+  assert.deepEqual(current.evidence.functions.map(fn=>fn.name),['public.read_lead_team_analytics','public.read_mortgage_results']);
+  const canonical=body=>body.replace(/--[^\n]*/g,'').replace(/\s+/g,' ').trim();
+  const zone="select w.value->>'timeZone' into v_zone from public.workspace_settings w where w.workspace_id=p_workspace_id and w.key='clinic_schedule' for share; if v_zone is null or not exists(select 1 from pg_catalog.pg_timezone_names where name=v_zone) then raise exception using errcode='P7008',message='timezone_not_configured'; end if;";
+  for(const [index,number,name] of [[0,'095_','public.read_lead_team_analytics'],[1,'103_','public.read_mortgage_results']]) {
+    const old=canonical(chain.find(e=>e.file.startsWith(number)).evidence.functions.find(fn=>fn.name===name).body);
+    const expected=old.replace('v_role text;','v_role text; v_zone text;')
+      .replace('with report_clock as materialized',zone+' with report_clock as materialized')
+      .replace("'generatedAt',c.at,","'timeZone',v_zone,'generatedAt',c.at,");
+    assert.notEqual(expected,old);assert.equal(canonical(current.evidence.functions[index].body),expected);
+    assert.equal((expected.match(/clock_timestamp\(/g)||[]).length,1);
+  }
 });
 
 test('all local reload notifications are retained and every dynamic SQL line has its original source location', () => {

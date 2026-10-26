@@ -221,7 +221,7 @@ for (const method of ["POST", "PATCH", "PUT", "DELETE"]) test(`results reject ${
   failure(await call({ resource: "results", method, body: draft() }), 405, "method_not_allowed"); untouched();
 });
 for (const role of ["owner", "admin"]) for (const days of [undefined, "7", "30", "90"]) test(`${role} results period ${days ?? "default"} uses scoped RPC`, async () => {
-  result.data = { members: [], period: { days: Number(days ?? 30) } };
+  result.data = { timeZone: "Asia/Almaty", members: [], period: { days: Number(days ?? 30) } };
   assert.equal((await call({ resource: "results", context: { ...verified, role },
     query: { days, workspaceId: id(90), staffUserId: id(91), userId: id(92) }, body: { days: "90", ...verified } })).statusCode, 200);
   assert.deepEqual(calls, [{ name: "read_mortgage_results", args: { ...scope, p_days: Number(days ?? 30) } }]);
@@ -232,8 +232,18 @@ for (const days of ["", "0", "31", "365", "07", " 7", "7 ", "7.0", 7, null, ["7"
   });
 }
 
+test("results require the RPC-owned valid timezone without an extra settings query", async () => {
+  for (const timeZone of [undefined, null, 5, {}, [], "", " UTC ", "Invalid/Zone"]) {
+    result.data = { timeZone, members: [] };
+    failure(await call({ resource: "results" }), 502, "outcomes_unavailable");
+  }
+  assert.equal(calls.length, 8);
+  assert.ok(calls.every(call => call.name === "read_mortgage_results"));
+});
+
 const errors: [string, number, string][] = [
   ["P7001", 403, "workspace_access_denied"], ["P7002", 404, "resource_not_found"],
+  ["P7008", 503, "timezone_not_configured"],
   ["P7803", 400, "invalid_contract"], ["P7804", 409, "contract_already_recorded"],
   ["P7805", 409, "contract_already_corrected"], ["P7806", 409, "lead_requires_assignment"],
   ["P7807", 409, "request_conflict"], ["PGRST202", 503, "schema_not_ready"],
