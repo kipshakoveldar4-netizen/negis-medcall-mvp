@@ -6332,6 +6332,81 @@ SQL 110/111 не менялся: прежний native/source результат
 Глобальный G1–G8 не завершён. Production, Baspana, салоны, WhatsApp, облако,
 платные генерации, реклама, доставки и расходы не менялись.
 
+### Цикл G1-C15/G7-C46: сквозной API/native путь заданий — локально, 27 октября
+
+Base 5baf5a3. Прежняя browser-модель G7-C45 не засчитана за базу: добавлен
+отдельный установленный браузер → настоящие CreatorJobs/operatorApi/crmFetch/
+serverAuth → loopback HTTP → собранный целиком CRM catch-all → нынешние модули
+Auth/membership/permissions/purpose → узкий SDK adapter → service_role настоящего
+одноразового PostgreSQL 17.11 → фактические RPC. Компиляция не заменяет отдельные
+обработчики и не прикрепляет готовый workspace context извне: роль, staff и
+workspace выбирает нынешний сервер из реального SQL-чтения.
+
+Только внешний Supabase Auth authority и браузерный SDK сеанса — синтетические:
+строгая временная карта фиктивных токенов/UUID. Это не проверка криптографии JWT,
+настоящего Supabase/Auth/PostgREST, Vercel Protection, почты или облачных ACL.
+Внутренний fetch собранного сервера допускает лишь фиксированный fake Auth URL,
+другие обращения запрещены/учитываются. Adapter разрешает только два narrow
+read-table пути для identity/purpose и шесть действующих creator RPC; не
+эмулирует состояние заданий и не имеет collection write или старого writer.
+HTTP сохраняет raw JSON parser, duplicate selectors и подлинную маршрутизацию.
+Сам fixture до обработчика ограничивает raw body 32 KiB ради своих ресурсов;
+это не доказательство лимита общего API в опубликованной среде. Размер/ранняя
+остановка входящего тела остаются отдельной G8-проверкой до нового выпуска.
+
+Применены исходные **009–111 / 103 SQL файла** без переписывания к отдельному
+проверенному native cluster; Auth/Storage service не поднимается, две Storage
+catalogue relations минимально подготовлены как в прежней chain-проверке.
+Это новая интеграционная матрица **13/13**, не повторный зачёт всей 376-case
+SQL-матрицы. Проверены:
+
+- отсутствие/подмена токена; active owner/admin, отказ doctor/независимому
+  автору в company API; creator без membership, ownership без creator approval;
+  raw malformed JSON, body identity/paid поля, number вместо точной суммы,
+  лишние/дублированные selectors, extra path, неизвестный путь и purpose-запрет;
+  ошибки Auth и membership не открывают RPC;
+- administrator create → exact replay → отказ изменённым исходным условиям →
+  cancel; действительный staff/admin берётся из БД. Чужой разрешённый company
+  actor не присваивает квитанцию. После отзыва членства receipt закрыт до RPC;
+- полный UI путь company → creator → submit → changes → resubmit → approve на
+  **375/1440**. В SQL ровно **1 job / 6 commands / 2 versions / 6 events**, без
+  платежа, комиссии или выплаты. Сумма **900719925474099301** сохранена как
+  точная decimal string/SQL bigint; чужим creator и workspace отказано;
+- реальный обрыв HTTP-ответа после create и submit, затем **настоящая загрузка
+  новой страницы**, восстановление только metadata и строгий receipt-read:
+  нет второго job/submission и нет сырого brief/amount/URL в browser storage;
+- reload до обработки исходного пакета → unknown read → явное close → поздняя
+  доставка оригинала: в SQL **0 jobs/commands/versions/events и 1 stop fence**;
+- held committed reply после A–B–A не публикует прежний результат, новая жизнь
+  A читает сохранённую квитанцию без новой записи;
+- staff/creator approval отзываются после разрешения маршрутизатора, но до
+  SQL: реальная RPC отказывает, формы/brief исчезают, счётчики не меняются;
+- malformed result после настоящего commit не выдаётся за успех; отдельный
+  строгий read восстанавливает его без новой business row;
+- сырой SDK actor меняется до уведомления React parent: настоящий клиентский
+  transport останавливает POST ещё до HTTP.
+
+Чтения/отказы проверены no-store, приватные diagnostics/идентификаторы не
+просачиваются; браузер обращался только к собственным loopback assets/API.
+375/1440 PNG визуально проверены, overflow отсутствует. В конце все публичные
+business tables пусты; свои browsers/HTTP/cluster удалены. Прежние пользовательские
+demo 5260/5264/5266, защищённые raw 059/065, SQL и продуктовый код не менялись.
+Первый прогон выявил только неверные имена setting/column в новой фикстуре:
+исправлены до passing-run, ожидаемый purpose-отказ не ослаблялся.
+
+Root build (API в обоих режимах/types, Vite, cold-start **341**) и fixed
+no-network **931/931** прошли; прежние 41 readers/key set/network/IPC guards не
+расширены. Повторяемая команда: `test:creator-jobs-native-http`, только с явным
+`MEDINA_TEST_POSTGRES_NATIVE=1`; нет DSN, скачивания или remote fallback.
+Изменения этого цикла — fixture/tests/регистрация/документация, не новый выпуск.
+
+Готово локально для выбранного пути, но не весь G1–G8: точный Preview/runtime/
+test schema/ACL/drain старых writers и настоящие сессии ещё нужны. До набора
+авторов остаются публичные условия, retention/support и согласование выпуска;
+партнёрский first-source/онбординг компаний и merchant sandbox также не закрыты.
+Production, Baspana, салоны, WhatsApp, облачные данные/настройки, генерации,
+настоящие отправки, реклама и расходы не затронуты.
+
 ### Цикл G2-C13: статус «Отложенные» — готов только локально, 22 октября
 
 - Код/тесты/документация в **9c42ef82f335fc621b8d985325d14d7c889d28f3**.

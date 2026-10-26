@@ -29,6 +29,7 @@
     "test:partner-ledger": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-ledger",
     "test:creator-jobs": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:creator-jobs",
     "test:creator-jobs-browser": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:creator-jobs-browser",
+    "test:creator-jobs-native-http": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:creator-jobs-native-http",
     "test:creator-jobs-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:creator-jobs-postgres",
     "test:lead-taxonomy-access-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:lead-taxonomy-access-postgres",
     "test:operator-request-lifecycle-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:operator-request-lifecycle-postgres",

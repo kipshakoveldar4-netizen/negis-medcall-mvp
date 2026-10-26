@@ -262,6 +262,58 @@ is used. Actual HTTP/native integration, exact isolated Preview/schema/ACL and
 real sessions, recruitment/legal/retention gates remain open. No Production,
 Baspana, salon, WhatsApp, cloud setting, paid generation or expense changed.
 
+### Creator Compiled HTTP / Native Acceptance
+
+Base 5baf5a3. `test:creator-jobs-native-http`, explicit
+`MEDINA_TEST_POSTGRES_NATIVE=1`, now runs the real CreatorJobs/client transports
+through owned HTTP and the entire compiled CRM catch-all into real service-role
+PostgreSQL. Actual server Auth/membership/role/purpose code stays in the bundle;
+it resolves staff/workspace from native SQL, not an attached test context.
+Only the Auth authority and browser SDK session are synthetic. This is not JWT
+cryptography, Supabase/PostgREST, email, cloud ACL or Vercel Protection evidence.
+
+The raw reviewed 009-111 chain (103 files) is applied without SQL rewriting to
+the owned attested PostgreSQL 17.11 cluster, with only the established minimal
+Storage catalogues. The SDK adapter allows two narrow read-only identity/purpose
+tables and six current creator RPCs, no direct creator collection or legacy
+writer. The compiled server's fetch allows only its fixed fake Auth authority;
+browser traffic stays at the owned loopback origin. No provider/real token or
+environment-selected database may be used.
+The owned HTTP fixture caps raw input at 32 KiB before dispatch; it does not
+attest the published API's body budget or early input termination. That remains
+a separate G8 pre-release check rather than an implied result of this matrix.
+
+13/13 integrated cases prove closed raw JSON/selectors, real company owner/admin
+and doctor denial, independent approved creators, purpose narrowing and safe
+Auth/read failures. Administrator creates, replays exactly, cannot change the
+original intent, cancels, and loses receipt access after revocation. Another
+allowed company actor cannot adopt that command. Full 375/1440 workflow creates
+exactly one job, six commands/events and two immutable submissions, preserves
+900719925474099301 minor units, and denies the other creator/workspace.
+
+Real dropped create/submit HTTP replies survive actual document reload and
+strict receipt inspection without another business row. Reload before the
+original executes, followed by explicit close, fences its late delivery with
+zero jobs/commands/submissions/events. Held A-B-A replies cannot publish stale
+success. Revocation after router permission but before SQL saves nothing and
+removes private forms; malformed committed replies remain unconfirmed until
+read. A raw SDK identity change before parent notification is blocked by the
+real client transport before HTTP. Metadata, cache and private diagnostic
+checks remain intact; no payment, commission or payout was made.
+
+All owned public business rows, browsers, HTTP servers and cluster are cleaned.
+Current build/type modes/Vite/cold-start 341 and unchanged fixed 931 pass.
+Prior full SQL 376-case evidence is unchanged, not relabelled as this matrix.
+The first integration attempt caught incorrect fixture setting/column names,
+which were corrected without relaxing the purpose refusal. Application code,
+SQL, protected 059/065 and user demos did not change in this test-only cycle.
+
+This closes the selected local HTTP/native gap, not the whole rollout. Exact
+isolated Preview, actual runtime/schema/ACL/legacy-writer drain, real identities,
+public legal/retention/support and recruitment release acceptance remain.
+Partner first-source/company intake and merchant sandbox are still open. No
+Production, Baspana, salon, WhatsApp, cloud setting or expense changed.
+
 1. Isolate and attest a new Preview's build/runtime test database before applying
    105 there. Inherited/shared Production settings remain forbidden. Then test
    real sign-up email redirects, application/review and two-user session changes.
