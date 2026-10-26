@@ -1280,7 +1280,7 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
       model: config.videoModel,
     });
   } catch {
-    await cancelUnsentVideo(nativeConfig, context, generationKey);
+    // The quota RPC may have committed. Keep the same native reservation for proof-based recovery.
     return sendJson(res, 503, {
       success: false,
       error: "Не удалось проверить лимит генерации",
@@ -1288,7 +1288,9 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
       code: "generation_usage_unavailable",
     });
   }
-  if (!usage.allowed) {
+  const reservedQuotaReplay = usage.duplicate === true && usage.reason === "duplicate_request" && usage.tracked
+    && typeof usage.limit === "number" && Number.isSafeInteger(usage.limit) && usage.limit >= seconds;
+  if (!usage.allowed && !reservedQuotaReplay) {
     // A concurrent accepted request may have linked its job while quota was being checked.
     try {
       const current = await readGeneratedVideoWorkflow(nativeConfig, context, generationKey);
@@ -1307,7 +1309,8 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
   const dispatchId = randomUUID();
   try {
     await requireCurrentVideoActor(req, context, lifetime);
-    const dispatched = await beginGeneratedVideoDispatch(nativeConfig, context, generationKey, dispatchId);
+    const dispatched = await beginGeneratedVideoDispatch(nativeConfig, context, generationKey, dispatchId,
+      { usageId: usage.usageId, requestDigest, units: seconds, limit: usage.limit as number, model: config.videoModel });
     state = generatedVideoApiState(dispatched, generationKey);
     if (state.providerJobId) {
       await requireCurrentVideoActor(req, context, lifetime);
@@ -1317,7 +1320,7 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
     await requireCurrentVideoActor(req, context, lifetime);
   } catch (error) {
     // An uncertain begin may have committed: never release its quota or dispatch again.
-    return sendVideoWorkflowFailure(res, error);
+    return sendVideoWorkflowFailure(res, error, undefined, true);
   }
 
   let job: Awaited<ReturnType<typeof createVideoJob>>;

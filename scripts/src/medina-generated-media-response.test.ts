@@ -16,6 +16,7 @@ import { Script } from "node:vm";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const requireFromRoot = createRequire(path.join(root, "package.json"));
 const ts = requireFromRoot("typescript") as typeof import("typescript");
+const { VideoRequestLifetime } = await import(new URL("../../lib/content-studio/video-request-lifetime.ts", import.meta.url).href);
 const baseline = process.argv.find((arg) => arg.startsWith("--baseline="))?.slice("--baseline=".length);
 assert.ok(!baseline || ["b301f1f", "fc597ad"].includes(baseline), "only reviewed local baselines are supported");
 
@@ -95,7 +96,7 @@ type Response = {
   setHeader(name: string, value: string): Response;
   json(body: unknown): void;
 };
-type Handler = (req: Json, res: Response, context: Json) => Promise<unknown>;
+type Handler = (req: Json, res: Response, context: Json, lifetime?: unknown) => Promise<unknown>;
 type StoreInput = { workspaceId: string; fileName: string; mimeType: string; buffer: Buffer; metadata?: Json; idempotencyKey?: string };
 type DecoderInput = { buffer: Buffer; fileName: string; mimeType: string };
 type LibraryInput = { workspaceId: string; body: Json };
@@ -167,7 +168,7 @@ function fixture(options: Options = {}) {
   function evaluate(program: Script, bindings: Json = {}): Json {
     const exports: Json = {};
     program.runInNewContext({
-      exports, Buffer, Error, Date: FixedDate, URL, AbortController, setTimeout, clearTimeout,
+      exports, Buffer, Error, Date: FixedDate, URL, TextDecoder, AbortController, setTimeout, clearTimeout,
       process: Object.freeze({ env: SYNTHETIC_ENV }),
       fetch: () => forbidden("real/global fetch"),
       require: (id: string) => forbidden(`unexpected import ${id}`),
@@ -261,8 +262,9 @@ function fixture(options: Options = {}) {
         }
       } else {
         assert.ok(op, "fixture RPC receipts describe only the admitted generation");
-        if (name === "begin_generated_video_dispatch") {
-          Object.assign(op, { status: "dispatching", dispatch_id: args.p_dispatch_id });
+        if (name === "begin_generated_video_dispatch_with_usage") {
+          assert.equal(args.p_usage_id, USAGE_ID); assert.equal(args.p_request_digest, op.request_digest);
+          Object.assign(op, { status: "dispatching", dispatch_id: args.p_dispatch_id, quota_usage_id: args.p_usage_id });
           return { data: { ...envelope(), dispatchAccepted: true }, error: null };
         }
         if (name === "link_generated_video_provider") Object.assign(op, { status: "rendering", provider_job_id: args.p_provider_job_id });
@@ -359,8 +361,8 @@ function fixture(options: Options = {}) {
   async function providerFetch(url: string, init?: { method?: string }) {
     const method = init?.method ?? "GET";
     providerCalls.push({ url, method });
-    const json = (body: Json) => ({ ok: true, status: 200, text: async () => JSON.stringify(body),
-      arrayBuffer: () => forbidden("unexpected provider JSON as bytes") });
+    const json = (body: Json) => Object.assign(new globalThis.Response(JSON.stringify(body), { headers: { "content-type": "application/json" } }),
+      { arrayBuffer: () => forbidden("unexpected provider JSON as bytes") });
     if (url === "https://api.openai.com/v1/images/generations" && method === "POST") {
       events.push("provider.image");
       return json({ data: [{ b64_json: (options.imageBytes ?? PNG).toString("base64") }] });
@@ -424,7 +426,8 @@ function fixture(options: Options = {}) {
     randomUUID: () => REQUEST_KEY,
     async reserveContentGeneration(input: Json) {
       events.push("usage.reserve");
-      reservations.push(clone(input));
+      const { requestLifetime: _lifetime, ...data } = input;
+      reservations.push(clone(data));
       return { allowed: true, tracked: true, duplicate: false, usageId: USAGE_ID, kind: input.kind,
         used: input.units, limit: 100, remaining: 100 - Number(input.units), periodStart: "2026-10-01" };
     },
@@ -470,9 +473,11 @@ function fixture(options: Options = {}) {
       json(value) { replies.push(clone(value) as Json); },
     };
     const name = action === "photo" ? "handleGeneratePhoto" : action === "start" ? "handleGenerateVideo" : "handleVideoGeneration";
+    const lifetime = new VideoRequestLifetime();
     try {
-      await handlers[name]!(req, res, { workspaceId: WORKSPACE, staffUserId: STAFF, userId: AUTH_USER, role: "owner" });
+      await handlers[name]!(req, res, { workspaceId: WORKSPACE, staffUserId: STAFF, userId: AUTH_USER, role: "owner" }, lifetime);
     } finally {
+      lifetime.close();
       assert.deepEqual(external, [], "no real network, credentials, provider jobs or database access");
     }
     assert.equal(replies.length, 1, "one actual handler response");
@@ -508,7 +513,7 @@ function fixture(options: Options = {}) {
     invoke,
     async start() {
       const reply = await invoke("start");
-      assert.equal(reply.status, 202);
+      assert.equal(reply.status, 202, JSON.stringify(reply));
       assert.equal(reply.body.success, true);
       const handle = record(reply.body.data).handle;
       assert.equal(typeof handle, "string");
@@ -535,7 +540,7 @@ function assertCharged(f: Fixture, kind: Kind) {
   if (kind === "video") {
     assert.deepEqual(f.stores, [], "raw generated video cannot use the direct public writer");
     assert.ok(f.events.indexOf("admit_generated_video_workflow") < f.events.indexOf("usage.reserve"));
-    assert.ok(f.events.indexOf("begin_generated_video_dispatch") < f.events.indexOf("provider.start"));
+    assert.ok(f.events.indexOf("begin_generated_video_dispatch_with_usage") < f.events.indexOf("provider.start"));
     assert.ok(f.events.indexOf("link_generated_video_provider") < f.events.indexOf("usage.succeeded"));
   }
   const paid = f.providerCalls.filter((call) => call.method === "POST");

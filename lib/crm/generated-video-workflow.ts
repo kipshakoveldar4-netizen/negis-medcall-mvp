@@ -284,14 +284,21 @@ export async function admitGeneratedVideoWorkflow(config: GeneratedVideoWorkflow
   return normalize(reply);
 }
 
-export async function beginGeneratedVideoDispatch(config: GeneratedVideoWorkflowConfig, actor: GeneratedVideoActor, key: string, dispatchId: string): Promise<GeneratedVideoWorkflowState> {
+export async function beginGeneratedVideoDispatch(config: GeneratedVideoWorkflowConfig, actor: GeneratedVideoActor, key: string, dispatchId: string,
+  quota: { usageId: string; requestDigest: string; units: number; limit: number; model: string }): Promise<GeneratedVideoWorkflowState> {
   validateConfig(config); identity(actor, key);
-  if (typeof dispatchId !== "string" || !UUID4.test(dispatchId)) throw invalid();
+  if (typeof dispatchId !== "string" || !UUID4.test(dispatchId) || !quota || typeof quota.usageId !== "string" || !UUID.test(quota.usageId)
+    || !hash(quota.requestDigest) || !Number.isSafeInteger(quota.units) || quota.units < 1 || quota.units > 3600
+    || !Number.isSafeInteger(quota.limit) || quota.limit < quota.units || quota.limit > 2_147_483_647
+    || typeof quota.model !== "string" || !quota.model || quota.model.length > 120 || quota.model.trim() !== quota.model
+    || /[\u0000-\u001f\u007f]/.test(quota.model)) throw invalid();
   if (!config.enabled) throw new GeneratedVideoWorkflowError(409, "generated_video_native_worker_required");
-  const reply = envelope(config, actor, key, await rpc(config, "begin_generated_video_dispatch", {
+  const reply = envelope(config, actor, key, await rpc(config, "begin_generated_video_dispatch_with_usage", {
     ...actorArgs(actor), p_generation_key: key, p_dispatch_id: dispatchId,
+    p_usage_id: quota.usageId, p_request_digest: quota.requestDigest, p_units: quota.units, p_limit_units: quota.limit, p_model: quota.model,
   }));
-  if (typeof reply.dispatchAccepted !== "boolean" || (reply.dispatchAccepted && (reply.operation.status !== "dispatching" || reply.operation.dispatch_id !== dispatchId))) throw unavailable();
+  if (reply.operation.quota_usage_id !== quota.usageId || reply.operation.request_digest !== quota.requestDigest
+    || typeof reply.dispatchAccepted !== "boolean" || (reply.dispatchAccepted && (reply.operation.status !== "dispatching" || reply.operation.dispatch_id !== dispatchId))) throw unavailable();
   return normalize(reply);
 }
 

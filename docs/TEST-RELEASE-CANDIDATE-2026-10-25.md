@@ -228,6 +228,16 @@ same-key/free-poll recovery of selected late commits. Final expanded set:
 two-route wait gap, not real host/Storage/worker acceptance, lost provider-ID or
 unknown quota reconciliation, other request families, or the G5 family gate.
 
+Later G5-C60/G7-C37 local acceptance: [quota lost-ACK recovery](VIDEO-QUOTA-RECOVERY-2026-10-26.md).
+An unchanged retry may dispatch only after atomic proof of its original reserved
+quota receipt, native author/digest and current positive entitlement. 106 binds
+the immutable receipt and revokes the old unbound service dispatch RPC; deploy
+with its matching API, never a mixed-producer fallback. Exact raw 009-106/98
+files passes 237/237 on owned PostgreSQL; expanded local regression 1524/1524,
+fixed no-network 931/931 and full build/169 cold starts. This closes only original
+unexpired pre-dispatch quota uncertainty, not unknown provider-ID reconciliation,
+real Storage/host/Auth acceptance or the full G5/G1-G8 scope. No cloud change.
+
 Later local G1-C6/G7-C36 acceptance: [operator command / raw-chain receipt](OPERATOR-COMMAND-LEASE-2026-10-26.md).
 Exact raw 009-105, 97 files, native 203/203; 105 composes with final default ACLs
 and all effective browser/row-security checks. Four departed-author accept/decline
@@ -240,7 +250,7 @@ This is a dependency inventory, **not an apply script**. Existing site-test
 receipts are scoped: DELIVERY records selected applications of 072/073/074,
 075, 076/077, 078, 021+079, 080 and 051+081 in their respective R2/O2/G7/G5
 cycles. They do not attest every 009-081 body, effective grant or later branch
-snapshot. No cloud application of 082-105 is credited from the reviewed local
+snapshot. No cloud application of 082-106 is credited from the reviewed local
 records. Prove the exact target baseline before calculating a delta.
 
 | Migration/source | Required predecessor/schema | Release coupling or owner-review effect |
@@ -274,6 +284,7 @@ Later local extensions, not an apply instruction:
 | [103](../migrations/103_mortgage_report_clock.sql) | Exact 070/078 report and actor helper signatures, postgres ownership, volatility/search_path and reviewed effective ACLs | Fresh post-authorization clock for both mortgage readers. No formula/role/data change; matching consumers need explicit period metadata. |
 | [104](../migrations/104_analytics_report_timezone.sql) | Exact 095/103 reports and mortgage actor helper, reviewed ownership/volatility/search_path/ACLs | Report-owned zones and strict workspace metadata; coordinate API/UI. It does not create or change a workspace time-zone setting. |
 | [105](../migrations/105_contributor_applications.sql) | Existing browser/service roles and built-in UUID generator; no 052 dependency | Additive intake table/RLS/service-only RPCs with review revision. Matching contributor API/UI required. No membership, growth-partner activation, rates or money; 203/203 fresh raw-chain acceptance, not cloud application. |
+| [106](../migrations/106_generated_video_quota_dispatch.sql) | 051/081 quota RPC/ledger and 090 native workflow/actor/envelope; reviewed effective RLS/browser grants and non-superuser BYPASSRLS service role | Atomic original reserved quota binding with immutable unique FK; revokes service EXECUTE on old unbound dispatch. Coordinate matching video API; old/missing-schema producers fail closed. No backfill, quota mutation/refund or provider dispatch. Raw-chain 237/237, not existing-target/cloud acceptance. |
 
 Consumer source anchors: [operator RPC callers](../lib/crm/operators.ts),
 [report reader](../lib/crm/lead-team-analytics.ts),

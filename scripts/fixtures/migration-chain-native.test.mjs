@@ -15,6 +15,7 @@ import { reproduceNamesakeCapacityRefusal, exerciseCapacityIdentity, exerciseCap
 import { exerciseMortgageReportClock, exerciseReportClockRefusals } from './mortgage-report-clock-cases.mjs';
 import { exerciseAnalyticsTimezone, exerciseAnalyticsTimezoneRefusals } from './analytics-timezone-cases.mjs';
 import { exerciseContributorCumulative, exerciseDepartedOperatorAuthor } from './contributor-cumulative-cases.mjs';
+import { reproduceUnboundVideoDispatch, exerciseVideoQuotaDispatch, exerciseVideoQuotaMissing } from './video-quota-dispatch-cases.mjs';
 
 // Native application-chain acceptance, NOT an authority to release migrations.
 // 001-008 require an undocumented legacy baseline; data/*.sql is deliberately
@@ -151,8 +152,10 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
   t.diagnostic('Protected dirty 059 and restored 065 are executed exactly as read, not modified/staged/replaced. This is not an applied/released manifest.');
 
   let legacyBefore;
+  await exerciseVideoQuotaMissing(db,chain.find(entry=>entry.file==='106_generated_video_quota_dispatch.sql').source,t);
   let legacyRlsBefore;
   for (const entry of chain) {
+    if(entry.file==='106_generated_video_quota_dispatch.sql') await reproduceUnboundVideoDispatch(db,t);
     if (entry.file === '102_appointment_capacity_explicit_identity.sql') {
       let reproduced=false;
       await t.test('before 102, full 009-101 chain still refuses distinct linked namesakes', async () => {
@@ -219,6 +222,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       await exerciseAnalyticsTimezone(db,t);
     }
     if(entry.file==='105_contributor_applications.sql') await exerciseContributorCumulative(db,entry.source,t);
+    if(entry.file==='106_generated_video_quota_dispatch.sql') await exerciseVideoQuotaDispatch(db,fixture,entry.source,t);
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
       await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{

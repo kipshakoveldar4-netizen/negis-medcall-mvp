@@ -9,7 +9,7 @@ test("generated native video: one paid render stays private until the exact nati
   assert.deepEqual(f.counts(), { providerCreates: 1, providerReads: 0, providerDownloads: 0 });
   assert.equal(f.usageCalls.length, 1); assert.equal(f.operations.size, 1); assert.equal(f.assets.size, 0);
   assert.ok(f.events.indexOf("admit_generated_video_workflow") < f.events.indexOf("usage:reserve"));
-  assert.ok(f.events.indexOf("begin_generated_video_dispatch") < f.events.indexOf("provider:create"));
+  assert.ok(f.events.indexOf("begin_generated_video_dispatch_with_usage") < f.events.indexOf("provider:create"));
   const handle = first.body.data.handle;
   const pending = await f.request("video-generation", { query: { handle } });
   assert.equal(pending.body.success, true); assert.equal(pending.body.data.status, "in_progress");
@@ -58,7 +58,7 @@ test("generated native video: changed intent on the same paid key conflicts with
   assert.equal(changed.code, 409); assert.equal(f.usageCalls.length, 1); assert.equal(f.counts().providerCreates, 1);
 });
 
-for (const rpcName of ["begin_generated_video_dispatch", "link_generated_video_provider"] as const) {
+for (const rpcName of ["begin_generated_video_dispatch_with_usage", "link_generated_video_provider"] as const) {
   test(`generated native video: one lost ${rpcName} ACK is retried with exactly the same nonce and no second paid call`, async t => {
     const f = await fixture(t, { lostAck: { name: rpcName, count: 1 } }), first = await f.request("generate-video");
     assert.equal(first.code, 202); assert.equal(f.counts().providerCreates, 1); assert.equal(f.usageCalls.length, 1);

@@ -45,18 +45,18 @@ test("late quota reservation leaves its original native reservation and cannot c
   const op = [...f.operations.values()][0]!; assert.equal(op.status, "reserved");
   gate.resolve(); await flush(); assert.equal(op.status, "reserved"); timeout(response);
   assert.equal(f.rpcCounts.has("cancel_generated_video_workflow"), false);
-  assert.equal(f.rpcCounts.has("begin_generated_video_dispatch"), false); assert.equal(f.counts().providerCreates, 0);
+  assert.equal(f.rpcCounts.has("begin_generated_video_dispatch_with_usage"), false); assert.equal(f.counts().providerCreates, 0);
 });
 
 test("auth and quota waits consume the dispatch budget; a late committed begin never reaches the provider", async t => {
   const advance = clock(t), auth = deferred(), quota = deferred(), begin = deferred(); let authorized = false;
   const f = await fixture(t, { beforeAuthorize: () => authorized ? undefined : auth.promise,
-    beforeQuota: () => quota.promise, beforeRpc: (name: string) => name === "begin_generated_video_dispatch" ? begin.promise : undefined });
+    beforeQuota: () => quota.promise, beforeRpc: (name: string) => name === "begin_generated_video_dispatch_with_usage" ? begin.promise : undefined });
   const pending = tracked(f.request("generate-video")); await flush();
   await advance(19_000); authorized = true; auth.resolve(); await flush(); assert.equal(f.usageCalls.length, 1);
-  await advance(19_000); quota.resolve(); await flush(); assert.equal(f.rpcCounts.get("begin_generated_video_dispatch"), 1);
+  await advance(19_000); quota.resolve(); await flush(); assert.equal(f.rpcCounts.get("begin_generated_video_dispatch_with_usage"), 1);
   await advance(11_999); assert.equal(pending.ended, false); await advance(1);
-  const response = await pending.promise; timeout(response); assert.equal(f.rpcCounts.get("begin_generated_video_dispatch"), 1);
+  const response = await pending.promise; timeout(response); assert.equal(f.rpcCounts.get("begin_generated_video_dispatch_with_usage"), 1);
   begin.resolve(); await flush(); assert.equal([...f.operations.values()][0]!.status, "dispatching");
   assert.equal(f.counts().providerCreates, 0); assert.equal(f.completions.length, 0); timeout(response);
 });

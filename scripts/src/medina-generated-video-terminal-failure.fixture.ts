@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -67,7 +66,7 @@ export async function terminalFixture(t: TestContext, options: Row = {}) {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
   const routeFile = path.join(root, "api/content-studio/[...path].ts"), requireRoute = createRequire(routeFile);
   const ts = createRequire(path.join(root, "package.json"))("typescript") as typeof import("typescript");
-  const exports: Row = {}, usageKeys = new Set<string>();
+  const exports: Row = {};
   let currentActor = { ...actor };
   const originalChangeActor = f.changeActor;
   f.changeActor = () => { originalChangeActor(); currentActor = { ...currentActor, userId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" }; };
@@ -95,13 +94,8 @@ export async function terminalFixture(t: TestContext, options: Row = {}) {
         } };
       if (specifier === "../../lib/content-studio/usage") return {
         billableVideoSeconds: () => 4,
-        async reserveContentGeneration(value: Row) {
-          f.usageCalls.push(value); f.events.push("usage:reserve");
-          const duplicate = usageKeys.has(value.requestKey); usageKeys.add(value.requestKey);
-          return { allowed: !duplicate, tracked: true, duplicate, usageId: randomUUID(), kind: "video_seconds", used: 0, limit: 40,
-            remaining: 40, periodStart: null, reason: duplicate ? "duplicate_request" : null, warning: "" };
-        },
-        async completeContentGeneration(value: Row) { f.completions.push(value); },
+        reserveContentGeneration: f.reserveUsage,
+        completeContentGeneration: f.completeUsage,
         getContentUsageSummary: async () => { throw new Error("Unused endpoint"); },
       };
       return requireRoute(specifier);

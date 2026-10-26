@@ -9,6 +9,7 @@ import { Script } from "node:vm";
 const { generatedVideoRequestDigest } = createRequire(import.meta.url)("../../lib/content-studio/generated-video-handle.ts") as {
   generatedVideoRequestDigest(prompt: unknown, format: unknown): string;
 };
+const { VideoRequestLifetime } = await import(new URL("../../lib/content-studio/video-request-lifetime.ts", import.meta.url).href);
 const { generatedCreativeIdentity, isLegacyGeneratedVideoIdentity } = createRequire(import.meta.url)("../../lib/crm/generated-identity.ts") as {
   generatedCreativeIdentity(input: { workspaceId: unknown; idempotencyKey: unknown; mimeType: unknown }): {
     assetId: string; fileName: string; storagePath: string; keyDigest: string;
@@ -60,7 +61,7 @@ type Response = {
   setHeader(name: string, value: string): Response;
   json(payload: unknown): PublicJson;
 };
-type Selected = Record<HandlerName, (req: Request, res: Response, ctx: typeof context) => Promise<unknown>> & {
+type Selected = Record<HandlerName, (req: Request, res: Response, ctx: typeof context, lifetime?: unknown) => Promise<unknown>> & {
   sendProviderFailure(res: Response, error: unknown, subject: string): unknown;
   GenerationProviderError: new (status: number, message: string) => Error & { status: number };
 };
@@ -155,6 +156,7 @@ function fixture(options: Options = {}) {
     readGeneratedVideoWorkflow: async () => { events.push("native.read"); return native; },
     admitGeneratedVideoWorkflow: async () => { events.push("native.admit"); return native = pending("reserved", null); },
     beginGeneratedVideoDispatch: async () => { events.push("native.dispatch"); return native = { ...pending("dispatching", null), dispatchAccepted: true }; },
+    ackGeneratedVideoProviderFailure: async () => { events.push("native.provider-failed"); return native = { ...pending("cancelled"), failureCode: "generated_video_provider_failed" }; },
     cancelGeneratedVideoWorkflow: async () => { events.push("native.cancel"); return native = pending("cancelled", null); },
     linkGeneratedVideoProvider: async () => { events.push("native.link"); return native = pending("rendering"); },
     resumeGeneratedVideoWorkflow: async () => {
@@ -187,7 +189,8 @@ function fixture(options: Options = {}) {
     readGeneratedVideoJobHandle: () => ({ workspaceId: context.workspaceId, generationKey, providerJobId: "synthetic-job", legacy: false }),
     async reserveContentGeneration(input: Record<string, unknown>) {
       events.push("reserve");
-      reserves.push(plain(input));
+      const { requestLifetime: _lifetime, ...data } = input;
+      reserves.push(plain(data));
       if (options.failAt === "reserve") fail();
       return { ...reservation, kind: input.kind };
     },
@@ -288,7 +291,11 @@ function fixture(options: Options = {}) {
     finishNative: () => { nativeReady = true; },
     invoke: (name: HandlerName) => {
       if (name === "handleVideoGeneration" && native === null) native = pending("rendering");
-      return capture((res) => selected[name](request, res, context));
+      return capture(async (res) => {
+        const lifetime = new VideoRequestLifetime();
+        try { return await selected[name](request, res, context, lifetime); }
+        finally { lifetime.close(); }
+      });
     },
     providerFailure: (error: unknown) => capture((res) => selected.sendProviderFailure(res, error, "Synthetic generation failure")),
   };
@@ -410,7 +417,7 @@ for (const [name, kind, units] of [
     assert.deepEqual(f.calls, { text: 0, image: 0, create: 0, poll: 0, download: 0, network: 0 });
     assert.deepEqual(f.completions, [], "no receipt to bill or finalize");
     assert.deepEqual(f.events, name === "handleGenerateVideo"
-      ? ["native.read", "native.preflight", "native.admit", "reserve", "native.cancel"] : ["reserve"]);
+      ? ["native.read", "native.preflight", "native.admit", "reserve"] : ["reserve"]);
     assertNoAssetWrites(f);
     assertPrivate(result);
   });
@@ -510,11 +517,11 @@ test("content privacy: failed video job remains HTTP 200 success with failed sta
   assert.equal(result.status, 200);
   assert.equal(result.reply.success, true);
   assert.equal(result.reply.data?.status, "failed");
-  assert.equal(result.reply.data?.progress, 37);
+  assert.equal(result.reply.data?.progress, 0);
   assert.equal(Object.hasOwn(result.reply.data!, "creativeUrl"), false);
   assert.equal(result.reply.data?.phase, "generation");
   assert.ok(typeof result.reply.data?.failureReason === "string" && result.reply.data.failureReason.trim());
-  assert.deepEqual(f.events, ["native.read", "native.resume", "native.preflight", "poll"]);
+  assert.deepEqual(f.events, ["native.read", "native.resume", "poll", "native.provider-failed"]);
   assert.deepEqual(f.reserves, []);
   assert.deepEqual(f.completions, []);
   assert.equal(f.calls.create, 0);
@@ -533,7 +540,7 @@ test("content privacy: completed video storage failure preserves paid-render pol
   assert.match(result.reply.error!, /принят.*не подтверждена/iu);
   assert.match(result.reply.hint!, /проверку.*не запускайте новую платную/iu);
   assert.deepEqual(result.reply.data, { handle: "synthetic-signed-handle", status: "in_progress", phase: "validation" });
-  assert.deepEqual(f.events, ["native.read", "native.resume", "native.preflight", "poll", "download", "native.receive"]);
+  assert.deepEqual(f.events, ["native.read", "native.resume", "poll", "native.preflight", "download", "native.receive"]);
   assert.equal(f.calls.create, 0, "polling never starts another paid render");
   assert.deepEqual(f.reserves, []);
   assert.deepEqual(f.completions, []);
@@ -551,7 +558,7 @@ test("content privacy: completed provider video stays pending until native valid
   assert.equal(result.reply.data?.phase, "validation");
   assert.equal(result.reply.data?.validationJobId, videoId);
   assert.equal(Object.hasOwn(result.reply.data!, "creativeUrl"), false);
-  assert.deepEqual(f.events, ["native.read", "native.resume", "native.preflight", "poll", "download", "native.receive"]);
+  assert.deepEqual(f.events, ["native.read", "native.resume", "poll", "native.preflight", "download", "native.receive"]);
   assert.equal(f.calls.create, 0);
   assert.deepEqual(f.reserves, []);
   assert.deepEqual(f.completions, []);

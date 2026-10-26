@@ -122,3 +122,13 @@ permission. Actual private Storage/version/fence and legacy-object plan, native
 Linux/host resource acceptance, real isolated Auth/session/provider/queue matrix
 and the current G7 Preview isolation/release gate remain. G1-G8 and recruitment
 commercial/legal gates are not redefined around this local increment.
+
+## Later Local Quota Recovery
+
+G5-C60 / G7-C37 [quota recovery](VIDEO-QUOTA-RECOVERY-2026-10-26.md) supersedes
+only the unexpired, original pre-dispatch quota-ACK gap above. A same-key retry
+must prove its original reserved receipt through coordinated forward 106; the
+old unbound dispatch RPC is revoked. No new render is allowed for unknown
+provider dispatch, expired/cancelled native rows, mismatched/ambiguous receipts
+or failed/unknown quota. The 50-second wait budget and all other limits remain.
+106 is prepared and verified locally only, not applied to any cloud database.

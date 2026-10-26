@@ -41,7 +41,28 @@ async function fixture(t: TestContext, options: Row = {}) {
   const operations = new Map<string, Row>(), assets = new Map<string, Row>(), jobs = new Map<string, Row>();
   const privateFiles = new Map<string, Buffer>(), publicFiles = new Map<string, Buffer>();
   const calls: Row[] = [], events: string[] = [], usageCalls: Row[] = [], completions: Row[] = [];
-  const usageKeys = new Set<string>();
+  const usageReceipts = new Map<string, Row>();
+  async function reserveUsage(value: Row) {
+    usageCalls.push(value); events.push("usage:reserve");
+    if (options.beforeQuota) await options.beforeQuota(value);
+    if (options.revokeAfterQuota) member.status = "inactive";
+    let receipt = usageReceipts.get(value.requestKey);
+    const duplicate = Boolean(receipt), allowed = !options.quotaDenied && !duplicate;
+    if (allowed) {
+      receipt = { id: randomUUID(), ...value, status: "reserved", createdAt: new Date().toISOString() };
+      delete receipt.requestLifetime; usageReceipts.set(value.requestKey, receipt);
+    }
+    if (options.afterQuota) await options.afterQuota(receipt);
+    const limit = options.quotaLimit ?? 40, used = receipt?.units ?? 0;
+    return { allowed, tracked: true, duplicate, usageId: receipt?.id ?? "", kind: "video_seconds", used,
+      limit, remaining: Math.max(0, limit - used), periodStart: "2026-10-01",
+      reason: duplicate ? "duplicate_request" : options.quotaDenied ? "quota_exceeded" : null, warning: "" };
+  }
+  async function completeUsage(value: Row) {
+    completions.push(value); if (options.beforeCompletion) await options.beforeCompletion(value);
+    const receipt = [...usageReceipts.values()].find(row => row.id === value.reservation?.usageId);
+    if (receipt?.status === "reserved") receipt.status = value.status;
+  }
   const rpcCounts = new Map<string, number>();
   const member: Row = { id: S, workspace_id: W, auth_user_id: U, status: "active", role: "owner" };
   let providerCreates = 0, providerReads = 0, providerDownloads = 0;
@@ -99,9 +120,17 @@ async function fixture(t: TestContext, options: Row = {}) {
         }
       } else {
         if (!op) return denied("P9003");
-        if (name === "begin_generated_video_dispatch") {
+        if (name === "begin_generated_video_dispatch_with_usage") {
+          const quota = usageReceipts.get(args.p_generation_key.slice(3));
+          if (!quota || quota.id !== args.p_usage_id || quota.staffUserId !== S || quota.workspaceId !== W
+            || quota.operation !== "generated_video" || quota.kind !== "video_seconds" || quota.units !== args.p_units
+            || quota.provider !== "openai" || quota.model !== args.p_model || args.p_limit_units < args.p_units
+            || op.created_by_staff_user_id !== S || op.created_by_auth_user_id !== U || op.request_digest !== args.p_request_digest
+            || quota.createdAt < op.created_at || (op.quota_usage_id && op.quota_usage_id !== quota.id)) return denied("P9002");
           dispatchAccepted = op.status === "reserved" || (op.status === "dispatching" && op.dispatch_id === args.p_dispatch_id);
-          if (op.status === "reserved") { op.status = "dispatching"; op.dispatch_id = args.p_dispatch_id; }
+          if (dispatchAccepted && quota.status !== "reserved") return denied("P9002");
+          if (op.status === "reserved" && Date.parse(op.reserved_until) <= Date.now()) return denied("P9003");
+          if (op.status === "reserved") { op.status = "dispatching"; op.dispatch_id = args.p_dispatch_id; op.quota_usage_id = quota.id; }
         } else if (name === "link_generated_video_provider") {
           if (op.dispatch_id !== args.p_dispatch_id || (op.provider_job_id && op.provider_job_id !== args.p_provider_job_id)) return denied("P9002");
           op.provider_job_id = args.p_provider_job_id; op.status = "rendering";
@@ -256,13 +285,8 @@ async function fixture(t: TestContext, options: Row = {}) {
       };
       if (specifier === "../../lib/content-studio/usage") return {
         billableVideoSeconds: () => 4,
-        async reserveContentGeneration(value: Row) { usageCalls.push(value); events.push("usage:reserve");
-          if (options.beforeQuota) await options.beforeQuota(value);
-          if (options.revokeAfterQuota) member.status = "inactive";
-          const duplicate = usageKeys.has(value.requestKey); usageKeys.add(value.requestKey);
-          return { allowed: !options.quotaDenied && !duplicate, tracked: true, duplicate, usageId: randomUUID(), kind: "video_seconds",
-            used: 0, limit: 40, remaining: 40, periodStart: null, reason: options.quotaDenied ? "quota_exceeded" : null, warning: "" }; },
-        async completeContentGeneration(value: Row) { completions.push(value); if (options.beforeCompletion) await options.beforeCompletion(value); },
+        reserveContentGeneration: reserveUsage,
+        completeContentGeneration: completeUsage,
         getContentUsageSummary: async () => { throw new Error("Unused usage endpoint"); },
       };
       return requireRoute(specifier);
@@ -302,7 +326,7 @@ async function fixture(t: TestContext, options: Row = {}) {
     return { op, job, asset, receipt };
   }
   return { request, requestKey, operations, assets, jobs, privateFiles, publicFiles, calls, events, usageCalls, completions, member,
-    rpcCounts, sdk, supplyNativeReceipt, changeActor: () => { currentActor = { ...currentActor, userId: B }; },
+    rpcCounts, sdk, usageReceipts, reserveUsage, completeUsage, supplyNativeReceipt, changeActor: () => { currentActor = { ...currentActor, userId: B }; },
     counts: () => ({ providerCreates, providerReads, providerDownloads }) };
 }
 

@@ -23,7 +23,7 @@
   "supabase/functions/_shared/wazzup.ts": "28b8c8a445253b693814a7eb50b3f67825b8c2c3002fddf31b000efc798f749d",
   "supabase/functions/wazzup-send/index.ts": "3aea74e83c500f5b92da3a5801f11332475bfb9cbf2020c6103bedc15b008874",
   "artifacts/api-server/src/routes/webhook.ts": "0347fc5d720a9540b7ad3c66eb1ed968fbde713be9dca3c26f30e99819f4d0d2",
-  "api/content-studio/[...path].ts": "a91e38915dc382661366a9983df5e706bb3f8fd2c61f9bd6830d91d8288b844e",
+  "api/content-studio/[...path].ts": "bf4eb91dd1dfdf4855cf9fcdec28f4bcdb9db7573d5984b5f66346a77d91243c",
   "lib/meta/marketing.ts": "de0e18a68f4e7723414b91e139f335bbbbfab6a5a8e8b31ebf21f7522abee4a2",
   "lib/meta/workspace.ts": "5188c4961deccbb31df3c3b1660fd7d6e750d0bcd2b8568e9c925611719706f4",
   "lib/tiktok/setup.ts": "9acc534df2c7cf615ed13190e0957e4bb7e29baa32840c5caaa9218c9e941658",

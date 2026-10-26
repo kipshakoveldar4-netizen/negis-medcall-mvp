@@ -103,6 +103,7 @@ e0bebcea54224c0c0184a0aa4d2d554596a059c22827755955d36aadcf19beef 102_appointment
 e77b5457680a491e421748a79d3ac74b5e39116db204f78ac6e98aa4585d0a11 103_mortgage_report_clock.sql
 3a8afb0ec9229728f584943755f436e1b3ef8b04bcfe7a7ad36cc5c77c5bc929 104_analytics_report_timezone.sql
 f392419d625826ece3d002737b8ebc5ebd82b769b9b2b615a62fbfd07bfdfa5c 105_contributor_applications.sql
+15267fb3ffd06ad4e67120661c3938eb580eaa8c39e50ae5cf08c5780e2b246f 106_generated_video_quota_dispatch.sql
 `.trim().split('\n').map(line => line.split(' '));
 
 export const migrationReview = Object.freeze(Object.fromEntries(reviewed.map(([sha256, file]) => [file, sha256])));
