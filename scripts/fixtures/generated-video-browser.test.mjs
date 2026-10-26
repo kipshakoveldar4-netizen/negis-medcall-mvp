@@ -202,7 +202,8 @@ test("actual pending poll keeps the media private and schedules only another GET
 test("actual complete poll displays only the native validated receipt", async () => {
   const fixture = runtime(); const stop = fixture.poll(); await flush();
   assert.equal(fixture.state().video.nativeValidated, true); assert.equal(fixture.state().video.validationJobId, ids.job);
-  assert.equal(fixture.state().job.status, "completed"); assert.deepEqual(fixture.toasts, ["Ролик готов"]); stop();
+  assert.equal(fixture.state().job.status, "completed"); assert.equal(fixture.state().notice, null);
+  assert.deepEqual(fixture.toasts, [], "The live completed card must not be covered by a duplicate floating toast"); stop();
 });
 test("actual incomplete ready response keeps the original handle for a free retry", async () => {
   const fixture = runtime({ nextResponse: async () => ({ ok: true, status: 200, payload: { success: true,

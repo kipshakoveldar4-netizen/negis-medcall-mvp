@@ -160,9 +160,11 @@ export async function recoveryBundle() {
 export const stopRecoveryBundler = () => esbuild.stop();
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-export async function ownedRecoveryBrowser(origin: string) {
+export async function ownedRecoveryBrowser(origin: string, options: { settleTimeoutMs?: number } = {}) {
   const parsed = new URL(origin);
   assert.equal(parsed.hostname, "127.0.0.1"); assert.equal(parsed.protocol, "http:");
+  const settleTimeoutMs = options.settleTimeoutMs ?? 4500;
+  assert.ok(Number.isInteger(settleTimeoutMs) && settleTimeoutMs >= 4500 && settleTimeoutMs <= 30000);
   const browserPath = [process.env.MEDINA_TEST_BROWSER_PATH, "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
     "C:/Program Files/Google/Chrome/Application/chrome.exe", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"]
     .find(value => value && existsSync(value));
@@ -222,12 +224,20 @@ export async function ownedRecoveryBrowser(origin: string) {
       assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails)); return result.result.value;
     };
     const waitFor = async (expression: string) => {
-      for (let i = 0; i < 150; i++) { if (await evaluate<boolean>(`return !!(${expression});`)) return; await delay(30); }
+      for (let i = 0; i < Math.ceil(settleTimeoutMs / 30); i++) { if (await evaluate<boolean>(`return !!(${expression});`)) return; await delay(30); }
       const state = await evaluate("return f?.snapshot?.();");
       throw Error(`Owned fixture did not settle: ${expression}; ${JSON.stringify({ exceptions, state })}`);
     };
     const load = async () => { await call("Page.navigate", { url: origin }); await waitFor("f && f.view && f.view.isCurrentMutationScope()"); };
     await load();
-    return { evaluate, waitFor, load, close, requests, exceptions };
+    const viewport = async (width: number, height: number) => {
+      assert.ok(Number.isInteger(width) && width >= 320 && width <= 2560 && Number.isInteger(height) && height >= 480 && height <= 2000);
+      await call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: width < 768 });
+    };
+    const screenshot = async () => {
+      const result = await call("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+      return Buffer.from(result.data as string, "base64");
+    };
+    return { evaluate, waitFor, load, close, requests, exceptions, viewport, screenshot };
   } catch (error) { await close(); throw error; }
 }

@@ -14,6 +14,7 @@ const states = ["generation", "validation", "ready", "failed", "invalid", "held"
 const initial = new URL(location.href).searchParams.get("video") || "validation";
 if (!states.includes(initial)) throw Error("Unknown local video state");
 const savedFetch = window.fetch.bind(window);
+let sceneEpoch = 0, settledSceneEpoch = -1;
 window.fetch = (input, init) => {
   const url = new URL(typeof input === "string" || input instanceof URL ? String(input) : input.url, location.origin);
   if (url.origin !== location.origin) return Promise.reject(Error("External fetch forbidden in generated video fixture"));
@@ -44,9 +45,12 @@ function Fixture() {
   const [error, setError] = React.useState("");
   const pending = React.useRef(false);
   React.useEffect(() => {
+    sceneEpoch = epoch;
+    settledSceneEpoch = -1;
     const timer = setTimeout(() => {
       const heading = [...document.querySelectorAll("h1,h2,h3")].find(node => node.textContent === "Генерация изображения и видео");
       heading?.closest("section")?.scrollIntoView({ block: "start", behavior: "instant" });
+      settledSceneEpoch = epoch;
     }, 250);
     return () => clearTimeout(timer);
   }, [epoch]);
@@ -95,6 +99,13 @@ async function boot() {
   await control(initial);
   reportsAuthFixture.reset(); seed(initial);
   createRoot(document.getElementById("root")!).render(<React.StrictMode><Router><Fixture /></Router></React.StrictMode>);
+  Object.assign(window, { __appointmentRecovery: {
+    view: { isCurrentMutationScope: () => Boolean(document.querySelector('[role="progressbar"]')) && settledSceneEpoch === sceneEpoch },
+    layoutSettled: () => settledSceneEpoch === sceneEpoch,
+    snapshot: () => ({ state: initial, ready: Boolean(document.querySelector("video")), sceneEpoch, settledSceneEpoch,
+      progress: document.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow"),
+      headings: [...document.querySelectorAll("h1,h2,h3")].map(n => n.textContent) }),
+  } });
 }
 const timer = setTimeout(() => { document.getElementById("root")!.textContent = "Не удалось подготовить изолированный обработчик файлов. Внешние запросы не разрешены."; }, 15_000);
 void boot().then(() => clearTimeout(timer)).catch(() => {

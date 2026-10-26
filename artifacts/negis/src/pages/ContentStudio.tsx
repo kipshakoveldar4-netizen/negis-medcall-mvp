@@ -1924,8 +1924,8 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
 
         if (confirmed.status === "completed" && confirmed.receipt && completedUrl) {
           displayGeneratedVideoReceipt(confirmed.receipt);
+          // The live job card announces completion without covering mobile file actions.
           setGenNotice(null);
-          toast.success("Ролик готов");
           return;
         }
       } catch (error) {
