@@ -38,4 +38,14 @@ The following source/test assertions were inspected, not rerun unless covered ab
 
 ## Next Single Acceptance Lane
 
+**Main follow-up G7-C29, local base 85c481e:** the later
+[clock acceptance](../ANALYTICS-CLOCK-2026-10-26.md) supersedes the selected
+070/078 stale-clock and exact-period residuals above. Actual native waits first
+reproduced both failures; forward 103 and matching results/team parsers now
+pass their scoped receipts. Original formulas, write RPCs, attribution and
+access policy are unchanged. The old one-microsecond acceptance test is now
+a refusal regression, not current behavior. Device-zone rendering, workspace
+metadata consumption, real current Preview and the unfinished B-to-A form are
+still open; neither the historical audit nor this local follow-up proves them.
+
 **Main-gated exact-candidate G3 report parity/clock lane:** once Main proves an available isolated Preview and separately authorizes schema/owned fixtures, verify 029/070 -> 083 -> 095 plus matching API/UI; use one owned nonzero portfolio to reconcile current booking, held/signing order, void/re-record and reassignment credit at 7/30/90 with workspace +5/device UTC. Observe an authorization-lock wait with period-edge events and revocation, explicitly distinguishing team 095 from unchanged 070/078. Finish with real B -> A unfinished-form plus report refresh/late-response refusal, owner/admin positive and manager/foreign denials, then owned cleanup equality. Record each unmet exact-period/zone expectation as pending or owner-decided; do not make the whole page green from one report's pass. This lane is proposed, not executed or authorized by this card.

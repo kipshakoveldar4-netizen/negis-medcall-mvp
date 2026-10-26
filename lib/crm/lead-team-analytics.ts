@@ -26,7 +26,11 @@ function normalizeAnalytics(value: unknown, workspaceId: string, days: number) {
   const data = record(value), period = record(data.period);
   if (typeof data.workspaceId !== "string" || data.workspaceId.toLowerCase() !== workspaceId.toLowerCase()) return invalid();
   const generatedAt = timestamp(data.generatedAt), from = timestamp(period.from), to = timestamp(period.to);
-  if (period.days !== days || generatedAt !== to || Date.parse(to) - Date.parse(from) !== days * 86_400_000) return invalid();
+  // Validate PostgreSQL's sub-millisecond remainder before ISO normalization
+  // drops it; otherwise a different cutoff or duration can appear identical.
+  const remainder = (value: unknown) => Number((String(value).match(/\.(\d{1,6})/)?.[1] ?? "").padEnd(6, "0").slice(3));
+  if (period.days !== days || generatedAt !== to || Date.parse(to) - Date.parse(from) !== days * 86_400_000
+    || remainder(data.generatedAt) !== remainder(period.to) || remainder(period.from) !== remainder(period.to)) return invalid();
   if (!validCount(data.totalLeads, 20_000) || !validCount(data.unassignedLeads, 20_000)
     || !validCount(data.otherAssigneeLeads, 20_000) || !Array.isArray(data.members) || data.members.length > 1000
     || typeof data.activityStatus !== "string" || !["available", "unavailable"].includes(data.activityStatus)) return invalid();

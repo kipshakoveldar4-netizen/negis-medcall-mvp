@@ -5416,6 +5416,60 @@ React → native router/SQL при committed remount/A-B-A, generic task replay,
 G3 clock/period и свежие mobile pixels остаются отдельными задачами. Облачных
 миграций/выпусков, изменения Baspana/салонов/WhatsApp, генераций и расходов нет.
 
+### Цикл G7-C29: время отчётов после ожидания прав — локально, 26 октября
+
+База `85c481e`; [точная приёмка](ANALYTICS-CLOCK-2026-10-26.md). Два старых
+отчёта 070/078 на настоящем локальном PG сначала воспроизвели проблему: новые
+строки после ожидания видны, но прежняя отсечка считает устаревшее событие и
+пропускает два свежих. Ни Production, ни site-test/Preview не вызывались.
+
+- Локальная **103** заменяет только два read RPC, с проверкой известных тел,
+  owner/search_path/SECURITY DEFINER/volatility и закрытого browser EXECUTE.
+  Workspace фиксирует время после membership/purpose/timezone/own-lead waits;
+  строка timezone удерживается FOR SHARE. Добавлены generatedAt/period.
+  Results фиксирует единственный clock внутри прежнего business SELECT после
+  авторизации. В обоих случаях 7/30/90 суток — elapsed hours, не DST-calendar
+  days. Не изменены cohorts, формулы, статусы, суммы, signing attribution,
+  voided-фильтры, write RPC, роли, данные и настройки клиентов. Старые 070/078
+  и защищённые 059/065 не переписывались. Raw SHA 103:
+  `e77b5457680a491e421748a79d3ac74b5e39116db204f78ac6e98aa4585d0a11`.
+- Results parser больше не принимает микросекундный «30-дневный» период или
+  generatedAt, отличающийся от to. Team API сверяет микросекунды до прежней
+  нормализации в миллисекунды; три новых actual-router теста сначала получили
+  старый HTTP 200 и теперь отказывают. Корректные nonzero fractions/offsets
+  остаются разрешены; valid payload не меняет существующую форму ответа.
+- PG17.11 focused **37/37**: старые отказы воспроизведены до 103, шесть unknown
+  baseline/access отказов + reapply, owner/admin × 7/30/90 × оба access waits,
+  schedule wait, lead-manager own-lead wait/overdue cutoff и восемь actual
+  revocation waits. Семантика «договор до встречи не является после встречи»
+  сохранена. Изменения роли/привязки Auth/purpose во время ожидания дают отказ.
+- Полная raw **009–103 / 95 файлов** — **180/180**; те же rollback-проверки
+  выполняются после всех прежних кандидатов. UTC/+5/Berlin/New York SQL-сессии
+  дают exact elapsed periods; фиксированный DST-пример не зависит от даты
+  запуска. Финальный serial native process **217/217**, exit 0; числа частично
+  перекрываются, это не 217 разных гарантий. Все owned PG-кластеры закрыты,
+  тестовые строки/каталоги удалены штатно, старые чужие cache-каталоги не трогали.
+- Actual API/UI lifetime + actual React/owned Chromium/HTTP composition:
+  **421/421**. Fake Auth/ответы не доказывают облачный вход или SQL authority.
+  Source contract **41/41** подтверждает только заявленные изменения тел;
+  no-network isolation **649/649** теперь включает 41 results UI case,
+  без исключений для транспорта/IPC и без замены reader snapshot.
+- Полная сборка — exit 0: оба режима API TypeScript, workspace/scripts types,
+  cold start normal 16+56 / broken-site 16+55 (**143**), Vite. Первые ошибки
+  тестового anonymous-parameter DDL и ожидания converted=3 вместо 2 не зачтены
+  как успех: исправлены фикстуры под действительные имена/правило прежней 078.
+
+Отдельно по просьбе владельца был открыт локальный визуальный стенд **5260**:
+настоящие страницы главной/заявок/карточки/календаря 08–19/аналитики с только
+вымышленными данными. Демонстрация не применяет 103 и не является Preview/
+Auth/SQL-приёмкой. Рабочая CRM, салоны, Baspana и WhatsApp не затронуты; расходов нет.
+
+Не закрыты: отображение timestamp в поясе рабочего пространства вместо
+устройства, использование/валидация новых period metadata consumer-ом
+workspace, общий snapshot/refresh всех трёх панелей, новый действительно
+изолированный Preview и фактический незавершённый B→A form cycle. Отдельные
+G1/G2/worker/storage/legal/retention/banking gates остаются в матрице. Это не 100%.
+
 ### Цикл G2-C13: статус «Отложенные» — готов только локально, 22 октября
 
 - Код/тесты/документация в **9c42ef82f335fc621b8d985325d14d7c889d28f3**.

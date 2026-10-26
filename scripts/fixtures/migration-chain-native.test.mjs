@@ -12,6 +12,7 @@ import { legacyCrmRlsSnapshot,exerciseLegacyCrmRlsRefusals,proveLegacyCrmRlsBase
 import { exerciseDeletionOperations } from './site-deletion-operations-cases.mjs';
 import { proveDeletionOperationConcurrency } from './site-deletion-operations-native-cases.mjs';
 import { reproduceNamesakeCapacityRefusal, exerciseCapacityIdentity, exerciseCapacityMigrationRefusals } from './appointment-capacity-identity-cases.mjs';
+import { exerciseMortgageReportClock, exerciseReportClockRefusals } from './mortgage-report-clock-cases.mjs';
 
 // Native application-chain acceptance, NOT an authority to release migrations.
 // 001-008 require an undocumented legacy baseline; data/*.sql is deliberately
@@ -206,6 +207,10 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     if(entry.file==='102_appointment_capacity_explicit_identity.sql') {
       await exerciseCapacityMigrationRefusals(db,entry.source,t);
       await exerciseCapacityIdentity(db,t);
+    }
+    if(entry.file==='103_mortgage_report_clock.sql') {
+      await exerciseReportClockRefusals(db,entry.source,t);
+      await exerciseMortgageReportClock(db,t);
     }
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;

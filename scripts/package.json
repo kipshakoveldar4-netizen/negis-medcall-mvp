@@ -23,6 +23,7 @@
     "test:lead-taxonomy-access-postgres": "node --test ./fixtures/lead-taxonomy-access-postgres.test.mjs",
     "test:operator-request-lifecycle-postgres": "node --test ./fixtures/operator-request-lifecycle-postgres.test.mjs",
     "test:lead-team-analytics-locks-postgres": "node --test ./fixtures/lead-team-analytics-locks-postgres.test.mjs",
+    "test:mortgage-report-clock-postgres": "node --test ./fixtures/mortgage-report-clock-postgres.test.mjs",
     "test:generated-video-terminal-failure": "tsx --test ./src/medina-generated-video-terminal-failure.test.ts",
     "test:generated-video-terminal-failure-postgres": "node --test ./fixtures/generated-video-terminal-failure-postgres.test.mjs",
     "test:mobile-nav-modality": "tsx --test ./src/medina-mobile-nav-modality.test.ts",

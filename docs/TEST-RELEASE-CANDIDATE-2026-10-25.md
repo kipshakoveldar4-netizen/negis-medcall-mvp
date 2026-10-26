@@ -99,6 +99,15 @@ the exact release selection before any separately authorized Preview rollout.
 
 ## Latest Recorded Preview
 
+**G7-C29 local delta, base 85c481e:** [report clock acceptance](ANALYTICS-CLOCK-2026-10-26.md)
+supersedes the selected local 070/078 pre-lock clock and elapsed-period residuals.
+Forward 103 changes only the two read bodies/metadata and schedule-row lock;
+results UI and team API reject inconsistent periods before precision is lost.
+Raw 009-103 chain, real clock/authorization waits and frontend composition have
+separate local receipts, not current Preview acceptance. Device-zone formatting,
+workspace-consumer metadata validation and real isolated rollout remain open.
+103, the matching parsers and this accumulated branch were not deployed.
+
 The latest recorded content/security Preview is **6c11l89kr / f18f411**,
 deployment `dpl_8CXaiuXmMfBY1EfrjqtMT2GNVjWv`: READY, target=null, aliases=[],
 846/846 sources matched. G5-C45 records site-test in loaded JS, absence of the

@@ -50,7 +50,7 @@ function isInstant(value: unknown): value is string {
 function compareInstants(left: string, right: string): number {
   // PostgreSQL timestamps retain microseconds beyond Date's millisecond precision.
   const remainder = (value: string) => Number((value.match(/\.(\d{1,6})/)?.[1] ?? "").padEnd(6, "0").slice(3));
-  return Date.parse(left) - Date.parse(right) || remainder(left) - remainder(right);
+  return (Date.parse(left) - Date.parse(right)) * 1000 + remainder(left) - remainder(right);
 }
 
 function safeSum(values: readonly number[]): number {
@@ -68,8 +68,8 @@ export function parseMortgageResults(body: unknown, requestedDays: number): Mort
   if (!PERIODS.some((days) => days === requestedDays) || !isRecord(data)
     || !isInstant(data.generatedAt) || !isRecord(data.period)
     || data.period.days !== requestedDays || !isInstant(data.period.from) || !isInstant(data.period.to)
-    || compareInstants(data.period.from, data.period.to) >= 0
-    || compareInstants(data.period.to, data.generatedAt) > 0
+    || compareInstants(data.period.to, data.period.from) !== requestedDays * 86_400_000_000
+    || compareInstants(data.period.to, data.generatedAt) !== 0
     || !isCount(data.unassignedLeads) || !isCount(data.otherAssigneeLeads)
     || !Array.isArray(data.members)) {
     throw new Error("Сервер вернул некорректный отчёт.");

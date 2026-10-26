@@ -358,6 +358,9 @@ const malformed: [string, (data: Row) => void][] = [
   ["unsafe event sum", data => { data.members[2].activity.updatedEvents = Number.MAX_SAFE_INTEGER; }],
   ["null generatedAt", data => { data.generatedAt = null; }],
   ["generatedAt differs from period.to", data => { data.generatedAt = recent; }],
+  ["generatedAt differs by one microsecond", data => { data.generatedAt = data.generatedAt.replace('.000Z', '.000001Z'); }],
+  ["rolling period shorter by one microsecond", data => { data.period.from = data.period.from.replace('.000Z', '.000001Z'); }],
+  ["rolling period longer by one microsecond", data => { data.generatedAt = data.period.to = data.period.to.replace('.000Z', '.000001Z'); }],
   ["period start after end", data => { data.period.from = "2026-10-16T12:00:00.000Z"; }],
   ["wrong rolling duration", data => { data.period.from = "2026-09-16T12:00:00.000Z"; }],
   ["same start and end", data => { data.period.from = data.period.to; }],
@@ -398,6 +401,15 @@ test("explicit timezone offsets and PostgreSQL microseconds normalize to ISO ins
   data.members[2].activity.lastRecordedAt = data.members[0].activity.lastRecordedAt = "2026-10-15T16:59:00.000000+05:00";
   result.data = data;
   success(await call(), expected); oneRpc();
+});
+
+test("matching nonzero PostgreSQL microseconds are valid before ISO millisecond normalization", async () => {
+  const expected = snapshot(), data: Row = structuredClone(expected);
+  for (const field of ["generatedAt", "period.to", "period.from"]) {
+    replace(expected, field, field === "period.from" ? "2026-09-15T12:00:00.123Z" : "2026-10-15T12:00:00.123Z");
+    replace(data, field, field === "period.from" ? "2026-09-15T17:00:00.123456+05:00" : "2026-10-15T17:00:00.123456+05:00");
+  }
+  result.data = data; success(await call(), expected); oneRpc();
 });
 test("DST offset change still requires exactly days times 86,400,000 milliseconds", async () => {
   const data: Row = snapshot(7);

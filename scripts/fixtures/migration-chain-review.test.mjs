@@ -8,9 +8,9 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-102, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 94);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 94 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-103, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 95);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 95 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
@@ -19,7 +19,7 @@ test('review covers the contiguous actual worktree 009-102, including protected 
 for (const kind of ['missing', 'unknown', 'duplicate', 'reordered', 'renamed']) test(`preflight rejects ${kind} chain membership before any native startup`, () => {
   const value = records();
   if (kind === 'missing') value.splice(31, 1);
-  if (kind === 'unknown') value.push({ file: '103_unknown.sql', source: 'select 1;' });
+  if (kind === 'unknown') value.push({ file: '104_unknown.sql', source: 'select 1;' });
   if (kind === 'duplicate') value.splice(20, 0, value[20]);
   if (kind === 'reordered') [value[0], value[1]] = [value[1], value[0]];
   if (kind === 'renamed') value[0] = { ...value[0], file: '009_changed.sql' };
@@ -68,6 +68,38 @@ test('102 changes only the name-fallback predicate of the reviewed 073 capacity 
     'a.doctor_id = any(doctor_ids) or ((new_doctor is null or a.doctor_id is null) and pg_catalog.lower(pg_catalog.btrim(a.doctor_name)) = any(doctor_names))');
   assert.notEqual(intended, old);
   assert.equal(canonical(current.evidence.functions[0].body), intended);
+});
+
+test('103 preserves 070 business formulas and authorization while moving the clock after its waits', () => {
+  const current=chain.find(e=>e.file.startsWith('103_'));
+  assert.deepEqual(current.evidence.tables,[]);assert.deepEqual(current.evidence.rls,[]);
+  assert.deepEqual(current.evidence.functions.map(fn=>fn.name),['public.read_mortgage_workspace','public.read_mortgage_results']);
+  const canonical=body=>body.replace(/--[^\n]*/g,'').replace(/\s+/g,' ').trim();
+  let expected=chain.find(e=>e.file.startsWith('070_')).evidence.functions.find(fn=>fn.name==='public.read_mortgage_workspace').body;
+  const timing="  v_from:=coalesce(p_from,case when p_to is not null then p_to-interval '180 days' else v_now-interval '90 days' end);\n  v_to:=coalesce(p_to,case when p_from is not null then p_from+interval '180 days' else v_now+interval '90 days' end);\n  v_period:=v_now-make_interval(days=>p_days);\n  if v_to<=v_from or v_to-v_from>interval '366 days' then raise exception using errcode='P7003',message='invalid_range'; end if;\n";
+  expected=expected.replace('v_now timestamptz := statement_timestamp();','v_now timestamptz;')
+    .replace("where w.workspace_id=p_workspace_id and w.key='clinic_schedule';","where w.workspace_id=p_workspace_id and w.key='clinic_schedule' for share;")
+    .replace(timing,'')
+    .replace("if p_lead_id is not null and not (p_lead_id=any(v_ids)) then raise exception using errcode='P7002',message='lead_not_found'; end if;",
+      "if p_lead_id is not null and not (p_lead_id=any(v_ids)) then raise exception using errcode='P7002',message='lead_not_found'; end if;\n v_now:=clock_timestamp();\n"+timing.replace('v_now-make_interval(days=>p_days)',"v_now-p_days*interval '24 hours'"))
+    .replace("'metrics',v_metrics,'memberMetrics',v_member_metrics,'periodDays',p_days);",
+      "'metrics',v_metrics,'memberMetrics',v_member_metrics,'periodDays',p_days, 'generatedAt',v_now,'period',jsonb_build_object('days',p_days,'from',v_period,'to',v_now));");
+  assert.equal(canonical(current.evidence.functions[0].body),canonical(expected));
+});
+
+test('103 preserves 078 result cohorts/attribution and captures one exact clock inside its business statement', () => {
+  const canonical=body=>body.replace(/--[^\n]*/g,'').replace(/\s+/g,' ').trim();
+  let expected=chain.find(e=>e.file.startsWith('078_')).evidence.functions.find(fn=>fn.name==='public.read_mortgage_results').body;
+  expected=expected.replace('v_role text; v_now timestamptz:=statement_timestamp(); v_from timestamptz; v_result jsonb;','v_role text; v_result jsonb;')
+    .replace('v_from:=v_now-make_interval(days=>p_days);\n  with portfolio as (',"with report_clock as materialized (select clock_timestamp() as at), portfolio as (")
+    .replaceAll('<=v_now','<=(select at from report_clock)')
+    .replace('between v_from and v_now',"between (select at-p_days*interval '24 hours' from report_clock) and (select at from report_clock)")
+    .replace("'generatedAt',v_now,'period',jsonb_build_object('days',p_days,'from',v_from,'to',v_now)",
+      "'generatedAt',c.at,'period',jsonb_build_object('days',p_days,'from',c.at-p_days*interval '24 hours','to',c.at)")
+    .replace("from members m),'[]'::jsonb)) into v_result;","from members m),'[]'::jsonb)) into v_result from report_clock c;");
+  const actual=chain.find(e=>e.file.startsWith('103_')).evidence.functions[1].body;
+  assert.equal(canonical(actual),canonical(expected));
+  assert.equal((actual.match(/clock_timestamp\(/g)||[]).length,1);
 });
 
 test('all local reload notifications are retained and every dynamic SQL line has its original source location', () => {
