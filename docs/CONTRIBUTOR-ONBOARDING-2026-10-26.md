@@ -77,6 +77,60 @@ Database persistence/replay are separately exercised by the SQL suites.
 
 ## Gates Before Recruitment
 
+### Creator Workflow Foundation: 27 October
+
+Base 7a99757. New local 110 and shared creator-job contracts extend the existing
+workspace/staff/contributor identities. They are not another CRM, Auth system,
+public site or replacement contributor portal. No HTTP route or UI consumes
+this foundation yet, and no cloud migration was applied.
+
+- An active owner/admin can offer an approved creator a scoped job with explicit
+  title, brief, rights terms, exact positive minor-unit fee/currency and UTC
+  deadline. These terms cannot be edited after creation. Individual commercial
+  or legal terms are not invented, published, signed or activated by this code.
+- The creator can accept the exact terms revision or decline; after acceptance,
+  submit public HTTPS references. The company can request changes or approve the
+  current submission. New submissions keep previous versions. Cancellation is
+  limited to unaccepted offers; post-accept disputes/termination need a separate
+  agreed workflow. Result approval does not book a payment, debt or payout.
+- Four private RLS tables store jobs, submissions, immutable command intents
+  and events. Service has no direct table access; three narrow service-only RPCs
+  perform commands, paginated reads and outcome inspection. Internal helpers
+  are not callable by browsers or service. Existing 105 profile writers are
+  pinned; current profile/staff authorization is locked before job mutation.
+- Revision conflicts cannot overwrite another action. Same-key retries compare
+  the full original intent, reauthorize and return the original applied revision
+  with the current job; a lost acknowledgement cannot duplicate work. A receipt
+  read waits for the same request fence. Revoked users cannot replay/read it.
+- DTOs omit workspace/Auth/reviewer identifiers and raw request intents; strict
+  parsing rejects incomplete/contradictory state, unsafe links, extra fields,
+  invalid times and inexact money. Links are references only: no URL fetching,
+  file import, Content Studio access or paid generation was added.
+
+110 raw SHA-256: `87097453d461654253841ea057c7e0e6c3523e1a109a0f72d5ae3b75e0eb2615`.
+
+Evidence: contract tests 8/8; outward-effect source review 46/46; root typecheck;
+fixed no-network 931/931 with the same 41 readers/key set/network and IPC guards.
+The exact raw 009-110, 102-file native chain passes 353/353, including previous
+workflows and final bodies/RLS/ACL/defaults/all-table-empty checks. The final
+focused native command passes 29/29, adding a final independent partner-versus-
+creator approval probe after that cumulative run; SQL source is identical.
+Eight actual lock waits cover approval and Auth rebinding, staff revocation and
+workspace change, duplicate create, pending outcome read, accept/cancel and
+changes/approve. All use owned fictional PostgreSQL records, not real Auth,
+Supabase, API identity or an email/Storage/media/merchant service. Required
+handles terminated and owned clusters/data were removed; protected 059/065
+and the old user demos remain unchanged. No API/Vite build or browser acceptance
+is newly claimed: application imports and screens did not change.
+
+Next: verified catch-all routes and approved-creator directory; company and author
+controls in the current cabinets, exact terms confirmation, current company
+display context and submission history, unknown-outcome recovery, real session
+and mobile/desktop tests. Then attest the chosen isolated Preview/schema/ACL.
+Public legal terms, retention/tombstones, asset verification/private delivery,
+accepted-job disputes and recruitment approval remain separate gates. The
+intake-only creator card is deliberately not labelled as a working job cabinet.
+
 1. Isolate and attest a new Preview's build/runtime test database before applying
    105 there. Inherited/shared Production settings remain forbidden. Then test
    real sign-up email redirects, application/review and two-user session changes.

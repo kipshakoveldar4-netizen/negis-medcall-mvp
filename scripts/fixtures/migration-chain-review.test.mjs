@@ -8,9 +8,9 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-109, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 101);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 101 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-110, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 102);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 102 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
@@ -45,6 +45,15 @@ test('109 is a read-only single partner RPC with pinned writer locking protocol 
   for(const fn of chain.find(item=>item.file.startsWith('052_')).evidence.functions.filter(fn=>['public.bind_growth_referral','public.confirm_growth_subscription_payment','public.confirm_growth_partner_payout'].includes(fn.name)))
     assert.ok(entry.source.includes(digest(fn.body.replaceAll('\r\n','\n'))));
   assert.doesNotMatch(entry.evidence.functions[0].body,/\b(?:insert|update\s+public|delete|truncate)\b/i);
+});
+
+test('110 has four private creator workflow relations, closed helpers and only three RPC entries; no payment or provider writes',()=>{
+  const entry=chain.find(item=>item.file.startsWith('110_'));
+  assert.deepEqual(entry.evidence.tables,['public.growth_creator_jobs','public.growth_creator_submissions','public.growth_creator_commands','public.growth_creator_events']);
+  assert.deepEqual(entry.evidence.rls,entry.evidence.tables);assert.equal(entry.evidence.functions.length,8);
+  assert.deepEqual(entry.evidence.dynamicSqlLines,[]);assert.deepEqual(entry.evidence.storageCatalogueLines,[]);assert.deepEqual(entry.evidence.extensions,[]);
+  for(const fn of chain.find(item=>item.file.startsWith('105_')).evidence.functions)assert.ok(entry.source.includes(digest(fn.body.replaceAll('\r\n','\n'))));
+  assert.doesNotMatch(entry.source,/on\s+delete\s+cascade|grant\s+(?:select|insert|update|delete)|(?:insert\s+into|update|delete\s+from)\s+public\.(?:growth_partner|platform_subscription|staff_users|workspaces|growth_contributor_profiles)/i);
 });
 
 for (const kind of ['missing', 'unknown', 'duplicate', 'reordered', 'renamed']) test(`preflight rejects ${kind} chain membership before any native startup`, () => {
