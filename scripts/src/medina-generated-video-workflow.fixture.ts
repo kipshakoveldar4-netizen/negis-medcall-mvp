@@ -183,12 +183,14 @@ async function fixture(t: TestContext, options: Row = {}) {
         providerCreates++; events.push("provider:create");
         if (options.revokeAfterProviderCreate) member.status = "inactive";
         if (options.providerUnknown) throw new Error(providerKey);
+        if (options.providerResponse) return options.providerResponse({ phase: "create", url, init });
         return new Response(JSON.stringify(options.providerFailure ? { error: { message: providerKey } }
           : { id: "synthetic_provider_job_090", status: "queued", progress: 0 }), { status: options.providerFailure ?? 200 });
       }
       if (url.includes("/content?")) { providerDownloads++; return new Response(new Uint8Array(RAW), { headers: { "content-type": "video/mp4" } }); }
       providerReads++;
       const requestedJob = decodeURIComponent(new URL(url).pathname.split("/").at(-1)!);
+      if (options.providerResponse) return options.providerResponse({ phase: "poll", url, init, requestedJob });
       return new Response(JSON.stringify({ id: requestedJob, status: options.providerStatus ?? "completed", progress: 100 }));
     }
     assert.ok(url.startsWith(`${origin}/storage/v1/object/`), `Unapproved network destination ${url}`);

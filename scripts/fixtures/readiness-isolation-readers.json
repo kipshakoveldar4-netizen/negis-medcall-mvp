@@ -1,6 +1,6 @@
 {
   "lib/ai/text-provider.ts": "6e1b786df2cb17923fd962993075eb5c646014f731a56c2b5552ebfbdb2e73d8",
-  "lib/content-studio/generation.ts": "a10c64fb327444f70ab975b147da0c1e29e03e5b5d2937103dd469268331ac9e",
+  "lib/content-studio/generation.ts": "3adcc6f50faf9fe4796468d31837cbfb847fda073a7b984c216b9338520ab5fb",
   "artifacts/negis/src/lib/supabase.ts": "1a86adc7db0d40cbdc1a2a942982bc3c6e4693a5d742445b7dc64e5cec913bf5",
   "artifacts/negis/src/lib/profileSession.ts": "2a5386f918c8324fec1bcbbbf463ce5d17382cd3bc8c0be5fb2196c46190b18f",
   "artifacts/negis/src/lib/api.ts": "702752144828583a4d237866be879aae07f2477dd63153cf83c5b5a6ad70359f",

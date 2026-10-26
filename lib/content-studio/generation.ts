@@ -351,11 +351,82 @@ function readVideoJob(body: Record<string, unknown>): VideoJob {
   };
 }
 
+/** One deadline covers headers and the bounded JSON stream, including ignored aborts. */
+async function readVideoProviderJson(input: {
+  fetchImpl: GenerationFetch;
+  url: string;
+  method: "POST" | "GET";
+  headers: Record<string, string>;
+  body?: string;
+  timeoutMs?: number;
+}): Promise<Record<string, unknown>> {
+  const timeout = input.timeoutMs ?? 15_000;
+  const unavailable = (status = 502) => new GenerationProviderError(status, "Не удалось подтвердить ответ сервиса генерации видео.");
+  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 15_000) throw unavailable();
+  const controller = new AbortController();
+  let response: GenerationFetchResponse | undefined;
+  let reader: ReturnType<NonNullable<GenerationFetchResponse["body"]>["getReader"]> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let confirmedFailureStatus: number | undefined;
+  const cancelBody = (body: GenerationFetchResponse["body"]) => {
+    try { void body?.cancel?.().catch(() => {}); } catch { /* Cleanup cannot extend the request deadline. */ }
+  };
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => { controller.abort(); reject(unavailable()); }, timeout);
+  });
+  try {
+    const pending = Promise.resolve().then(() => input.fetchImpl(input.url, {
+      method: input.method, headers: input.headers, ...(input.body === undefined ? {} : { body: input.body }),
+      signal: controller.signal, redirect: "error", credentials: "omit", cache: "no-store",
+    }));
+    void pending.then(late => {
+      if (controller.signal.aborted) { try { cancelBody(late?.body); } catch { /* A late response is not a new receipt. */ } }
+    }, () => {});
+    response = await Promise.race([pending, deadline]);
+    if (response.redirected || (response.url && response.url !== input.url)) throw unavailable();
+    if (!response.ok) {
+      // Only received HTTP evidence can mean rejection; transport errors/timeouts remain unknown.
+      if (Number.isInteger(response.status) && response.status >= 400 && response.status <= 599) confirmedFailureStatus = response.status;
+      throw unavailable();
+    }
+    if (!Number.isInteger(response.status) || response.status < 200 || response.status > 299 || !response.body) throw unavailable();
+    // Fetch decodes compressed JSON; its Content-Length still describes encoded bytes.
+    const encoding = response.headers?.get("content-encoding")?.trim().toLowerCase();
+    const length = encoding && encoding !== "identity" ? null : response.headers?.get("content-length") ?? null;
+    const declared = length === null ? null : /^\d+$/.test(length) ? Number(length) : Number.NaN;
+    if (declared !== null && (!Number.isSafeInteger(declared) || declared < 1 || declared > 65_536)) throw unavailable();
+    reader = response.body.getReader();
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    for (;;) {
+      const part = await Promise.race([reader.read(), deadline]);
+      if (part.done) break;
+      if (!ArrayBuffer.isView(part.value) || part.value.BYTES_PER_ELEMENT !== 1 || part.value.byteLength === 0) throw unavailable();
+      bytes += part.value.byteLength;
+      if (bytes > 65_536 || chunks.length >= 2048 || (declared !== null && bytes > declared)) throw unavailable();
+      chunks.push(Buffer.from(part.value));
+    }
+    if (!bytes || (declared !== null && bytes !== declared) || controller.signal.aborted) throw unavailable();
+    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, bytes)));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw unavailable();
+    return parsed as Record<string, unknown>;
+  } catch {
+    // A lost POST acknowledgement can still represent a paid job. Never turn it into a known rejection.
+    throw unavailable(confirmedFailureStatus);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    controller.abort();
+    if (reader) { try { void reader.cancel().catch(() => {}); } catch { /* Never await stalled cleanup. */ } }
+    else cancelBody(response?.body);
+  }
+}
+
 export async function createVideoJob(input: {
   fetchImpl: GenerationFetch;
   config: GenerationConfig;
   prompt: string;
   size: string;
+  timeoutMs?: number;
 }): Promise<VideoJob> {
   const payload: Record<string, unknown> = {
     model: input.config.videoModel,
@@ -364,19 +435,17 @@ export async function createVideoJob(input: {
   };
   if (input.config.videoSeconds) payload.seconds = input.config.videoSeconds;
 
-  const response = await input.fetchImpl("https://api.openai.com/v1/videos", {
+  const body = await readVideoProviderJson({
+    fetchImpl: input.fetchImpl,
+    url: "https://api.openai.com/v1/videos",
     method: "POST",
     headers: {
       Authorization: `Bearer ${input.config.apiKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
+    timeoutMs: input.timeoutMs,
   });
-
-  const body = await readJson(response);
-  if (!response.ok) {
-    throw new GenerationProviderError(response.status, providerErrorMessage(body, response.status));
-  }
 
   const job = readVideoJob(body);
   if (!job.id) {
@@ -389,16 +458,15 @@ export async function fetchVideoJob(input: {
   fetchImpl: GenerationFetch;
   config: GenerationConfig;
   jobId: string;
+  timeoutMs?: number;
 }): Promise<VideoJob> {
-  const response = await input.fetchImpl(`https://api.openai.com/v1/videos/${encodeURIComponent(input.jobId)}`, {
+  const body = await readVideoProviderJson({
+    fetchImpl: input.fetchImpl,
+    url: `https://api.openai.com/v1/videos/${encodeURIComponent(input.jobId)}`,
     method: "GET",
     headers: { Authorization: `Bearer ${input.config.apiKey}` },
+    timeoutMs: input.timeoutMs,
   });
-
-  const body = await readJson(response);
-  if (!response.ok) {
-    throw new GenerationProviderError(response.status, providerErrorMessage(body, response.status));
-  }
 
   const job = readVideoJob(body);
   return { ...job, id: job.id || input.jobId };

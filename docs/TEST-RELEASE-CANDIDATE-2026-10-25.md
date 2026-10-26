@@ -213,6 +213,13 @@ closes C56's targeted video status/result capture gap at 390/1440 and fixes its
 mobile action obstruction. Eight inspected PNGs, 11/11 owned-browser cases;
 not whole-route/upload/physical-device or cloud Storage/provider acceptance.
 
+Later G5-C58 local acceptance: [video-provider deadline/recovery](VIDEO-PROVIDER-DEADLINE-2026-10-26.md).
+Provider POST/GET metadata now shares one 15-second headers/body bound and a
+64-KiB stream limit. Unknown dispatch retains quota/nonce/browser key; free poll
+recovery keeps the original handle. The combined 1325-case set is local only,
+not an end-to-end API budget or lost-provider-ID reconciliation. The G5 family
+gate above remains, and this accumulated branch is not an approved release.
+
 Later local G1-C6/G7-C36 acceptance: [operator command / raw-chain receipt](OPERATOR-COMMAND-LEASE-2026-10-26.md).
 Exact raw 009-105, 97 files, native 203/203; 105 composes with final default ACLs
 and all effective browser/row-security checks. Four departed-author accept/decline

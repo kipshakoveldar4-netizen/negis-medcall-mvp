@@ -198,7 +198,8 @@ function stubFetch(
     };
     calls.push(call);
     const result = answer(call);
-    const stream = new Response(new Uint8Array(result.bytes ?? []), { headers: { "content-length": String(result.bytes?.length ?? 0) } });
+    const streamBytes = result.bytes ?? Buffer.from(result.text ?? "");
+    const stream = new Response(new Uint8Array(streamBytes), { headers: { "content-length": String(streamBytes.length) } });
     const response: GenerationFetchResponse = {
       ok: result.ok,
       status: result.status,
@@ -974,7 +975,7 @@ test("GEN43 checking a file-less completed job reuses its handle without another
         assert.equal(job.status, "completed");
         assert.equal(job.handle, original.handle);
         assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.GenVideo)), localNativeVideoFile());
-        assert.deepEqual(fixture.toasts, [{ kind: "success", message: "Ролик готов" }]);
+        assert.deepEqual(fixture.toasts, [], "The inline completed job must not obscure mobile file actions with a duplicate toast");
         assert.deepEqual(fixture.dispatches.map(({ url, method }) => ({ url, method })), Array.from({ length: 2 }, () => ({
           url: `/api/content-studio/video-generation?handle=${encodeURIComponent(original.handle)}&workspaceId=33333333-3333-4333-8333-333333333333`, method: "GET",
         })));
@@ -2960,7 +2961,7 @@ test("GEN56 actual poll allows same-actor refresh and completes one original-han
     assert.equal(fixture.dispatches[0].headers.get("Authorization"), "Bearer fixture-token-a-refreshed");
     assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), { ...LOCAL_POLL_JOB, status: "completed", progress: 100, phase: "validation", validationJobId: localNativeVideoReceipt().validationJobId });
     assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.GenVideo)), LOCAL_POLL_FILE);
-    assert.equal(fixture.toasts.length, 1);
+    assert.equal(fixture.toasts.length, 0, "Completion is announced by the live job card, not an overlapping toast");
     assert.equal(fixture.timers.size, 0);
   } finally { token.resolve(); await flushLocalVideoWork(); if (typeof cleanup === "function") cleanup(); fixture.lifetime!.unmount(); }
 });
@@ -3103,7 +3104,7 @@ for (const mode of ["throw", "error"] as const) {
           `/api/content-studio/video-generation?handle=${encodeURIComponent(LOCAL_POLL_JOB.handle)}&workspaceId=33333333-3333-4333-8333-333333333333`));
         assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), { ...LOCAL_POLL_JOB, status: "completed", progress: 100, phase: "validation", validationJobId: localNativeVideoReceipt().validationJobId });
         assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.GenVideo)), LOCAL_POLL_FILE);
-        assert.deepEqual(fixture.toasts, [{ kind: "success", message: "Ролик готов" }]);
+        assert.deepEqual(fixture.toasts, [], "The confirmed file and completed state remain without an overlapping toast");
         assert.equal(fixture.timers.size, 0);
         assert.equal(fixture.timerCalls(), 2, "the completed job must end the existing retry chain");
       } finally {

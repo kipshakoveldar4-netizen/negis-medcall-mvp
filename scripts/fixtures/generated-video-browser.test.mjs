@@ -330,6 +330,19 @@ test("actual accepted uncertain POST preserves its handle and paid idempotency k
   assert.equal(fixture.state().job.handle, ids.handle); assert.equal(fixture.state().job.status, "failed");
   assert.ok(fixture.storage.get("paid-video")); assert.equal(fixture.drafts.at(-1).value.handle, ids.handle);
 });
+test("actual unknown dispatch without a provider handle retains the paid key for an exact retry", async () => {
+  const fixture = generationRuntime(async () => ({ ok: false, status: 409, payload: { success: false, accepted: true,
+    code: "generated_video_dispatch_unconfirmed" } }));
+  await fixture.generate();
+  assert.equal(fixture.state().job, null); assert.equal(fixture.state().video, null);
+  const stored = fixture.storage.get("paid-video"); assert.ok(stored);
+  const key = fixture.events[0].init.headers["X-Idempotency-Key"];
+  assert.equal(JSON.parse(stored).requestKey, key);
+  await fixture.generate();
+  assert.equal(fixture.events.length, 2); assert.equal(fixture.events[1].init.headers["X-Idempotency-Key"], key);
+  assert.equal(fixture.storage.get("paid-video"), stored); assert.equal(fixture.state().video, null);
+});
+
 test("actual generation double click does not create two paid requests", async () => {
   const gate = deferred(), fixture = generationRuntime(() => gate.promise);
   const first = fixture.generate(); await flush(); await fixture.generate();
