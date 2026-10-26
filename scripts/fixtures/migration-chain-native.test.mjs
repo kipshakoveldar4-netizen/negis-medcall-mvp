@@ -14,6 +14,7 @@ import { proveDeletionOperationConcurrency } from './site-deletion-operations-na
 import { reproduceNamesakeCapacityRefusal, exerciseCapacityIdentity, exerciseCapacityMigrationRefusals } from './appointment-capacity-identity-cases.mjs';
 import { exerciseMortgageReportClock, exerciseReportClockRefusals } from './mortgage-report-clock-cases.mjs';
 import { exerciseAnalyticsTimezone, exerciseAnalyticsTimezoneRefusals } from './analytics-timezone-cases.mjs';
+import { exerciseContributorCumulative, exerciseDepartedOperatorAuthor } from './contributor-cumulative-cases.mjs';
 
 // Native application-chain acceptance, NOT an authority to release migrations.
 // 001-008 require an undocumented legacy baseline; data/*.sql is deliberately
@@ -217,6 +218,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       await exerciseAnalyticsTimezoneRefusals(db,entry.source,t);
       await exerciseAnalyticsTimezone(db,t);
     }
+    if(entry.file==='105_contributor_applications.sql') await exerciseContributorCumulative(db,entry.source,t);
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
       await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{
@@ -235,6 +237,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
   }
 
   await proveDeletionOperationConcurrency(fixture,db,t);
+  await exerciseDepartedOperatorAuthor(db,t);
   const tables = await allPublicTables(db);
   await t.test('every source-created table is real; no unknown application baseline was added', async () => {
     const expected = [...new Set(chain.flatMap(entry => entry.evidence.tables))].sort();
@@ -312,7 +315,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
         has_any_column_privilege('service_role',$1,'SELECT,INSERT,UPDATE,REFERENCES') as col`, [`public.${table}`]);
       assert.deepEqual(result, { tab: false, col: false }, `${table}: no direct service access may be restored`);
     }
-    for (const [table, select] of [['crm_site_consent_receipts', true], ['growth_operator_requests', true]]) {
+    for (const [table, select] of [['crm_site_consent_receipts', true], ['growth_operator_requests', true], ['growth_contributor_profiles', true]]) {
       const result = await one(db, `select has_table_privilege('service_role',$1,'SELECT') as read,
         has_table_privilege('service_role',$1,'INSERT,UPDATE,DELETE,TRUNCATE') as write,
         has_any_column_privilege('service_role',$1,'INSERT,UPDATE') as column_write`, [`public.${table}`]);
@@ -328,7 +331,8 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     for (const name of ['create_clinic_operator_request', 'transition_clinic_operator_request', 'transition_growth_operator_request',
       'admit_content_telegram_delivery', 'advance_content_telegram_delivery', 'accept_crm_site_inquiry_with_consent',
       'read_lead_team_analytics', 'read_generated_video_workflow', 'read_platform_subscription_operation',
-      'prepare_site_deletion_operation', 'read_site_deletion_operations', 'execute_site_deletion_operation', 'close_site_deletion_operation']) {
+      'prepare_site_deletion_operation', 'read_site_deletion_operations', 'execute_site_deletion_operation', 'close_site_deletion_operation',
+      'apply_growth_contributor', 'review_growth_contributor']) {
       const functions = (await db.query(`select p.oid::regprocedure::text as signature,has_function_privilege('service_role',p.oid,'EXECUTE') as allowed
         from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname=$1`, [name])).rows;
       assert.equal(functions.length, 1, name); assert.equal(functions[0].allowed, true, name);

@@ -208,6 +208,14 @@ or global endpoint ownership. Exact limits are recorded in DELIVERY-CYCLES.
 
 ## Pending Schema and Dependencies
 
+Later local G1-C6/G7-C36 acceptance: [operator command / raw-chain receipt](OPERATOR-COMMAND-LEASE-2026-10-26.md).
+Exact raw 009-105, 97 files, native 203/203; 105 composes with final default ACLs
+and all effective browser/row-security checks. Four departed-author accept/decline
+cases are now proven on that chain. Pending operator commands retain their
+scope lease across refresh; 323 hook/transport and 25 actual React/Chromium cases
+pass locally. This is not durable unknown-outcome recovery or new Preview proof.
+All original family requirements above remain; do not sum overlapping counts.
+
 This is a dependency inventory, **not an apply script**. Existing site-test
 receipts are scoped: DELIVERY records selected applications of 072/073/074,
 075, 076/077, 078, 021+079, 080 and 051+081 in their respective R2/O2/G7/G5

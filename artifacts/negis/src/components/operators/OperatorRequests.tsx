@@ -34,9 +34,11 @@ export function OperatorRequests({
   const [openCatalog, setOpenCatalog] = useState<string | null>(null);
   const [openArrivals, setOpenArrivals] = useState<string | null>(null);
   const mounted = useRef(false);
+  const pending = useRef<object | null>(null);
   const scope = useRef({ path, actorId, expired: false });
   if (scope.current.path !== path || scope.current.actorId !== actorId) {
     scope.current = { path, actorId, expired: false };
+    pending.current = null;
   }
   const renderedScope = scope.current;
   // A mutation belongs to its visible list snapshot, including refreshes/pages.
@@ -47,7 +49,7 @@ export function OperatorRequests({
     currentView.current.offset !== list.offset;
   if (scopeChanged || currentView.current.data !== list.data) {
     currentView.current = { path, actorId, offset: list.offset, data: list.data };
-    if (busy) setBusy(false);
+    if (busy && !pending.current) setBusy(false);
     if (scopeChanged) {
       setError("");
       setOpenRequest(null);
@@ -115,15 +117,24 @@ export function OperatorRequests({
   }, [isActorCurrent, list.refresh, onAccessDenied]);
   async function change(id: string, action: string) {
     const isCurrent = () => isScopeCurrent() && currentView.current === renderedView;
-    if (!actorId || !isCurrent()) return;
+    if (pending.current || !actorId || !isCurrent()) return;
+    // Own the command before a native dialog or React's disabled render. A
+    // refresh may retire its view, but cannot admit a second unresolved action.
+    const attempt = {};
+    pending.current = attempt;
     if (
       action === "end" &&
       !window.confirm(
         "Завершить сотрудничество с этой клиникой или оператором?",
       )
-    )
+    ) {
+      if (pending.current === attempt) pending.current = null;
       return;
-    if (!isCurrent()) return;
+    }
+    if (!isCurrent() || pending.current !== attempt) {
+      if (pending.current === attempt) pending.current = null;
+      return;
+    }
     const isSameScope = isScopeCurrent;
     setBusy(true);
     setError("");
@@ -171,7 +182,10 @@ export function OperatorRequests({
         err instanceof Error ? err.message : "Не удалось изменить предложение",
       );
     } finally {
-      if (isCurrent()) setBusy(false);
+      if (pending.current === attempt) {
+        pending.current = null;
+        if (isSameScope()) setBusy(false);
+      }
     }
   }
   return (

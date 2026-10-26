@@ -699,12 +699,21 @@ for (const target of ["request", "call", "stage", "booking", "clinic-assignment"
       assert.equal(ui.mutation.dispatchGuard?.(), false, "The live predicate must close without passive cleanup");
       assert.equal(ui.mutation.settled, true, "The queued transport must reject cancellation, not leave the action hanging");
       assert.equal(ui.render.content(), before);
-      const releasesLiveLease = change === "refresh" && (target === "stage" || target === "clinic-assignment");
+      const releasesLiveLease = change === "refresh" && (target === "request" || target === "stage" || target === "clinic-assignment");
       assert.equal(ui.render.writes(), writes + Number(releasesLiveLease),
-        "A refreshed live lead scope may only release its settled lease; other obsolete callbacks make no writes");
+        "A refreshed live scope may only release its settled lease; other obsolete callbacks make no writes");
       assert.equal(ui.requests.length, count);
       assert.equal(ui.denied(), 0, "Cancellation is not a same-scope authorization denial");
-      if (releasesLiveLease) {
+      if (releasesLiveLease && target === "request") {
+        await ui.render.flush();
+        ui.take("OperatorRequests").succeed(list([{ id: REQUEST_A, status: "accepted",
+          displayName: "Synthetic refreshed agreement", clinicBrief: "Synthetic terms",
+          pricePerArrivalMinor: "0", currency: "KZT", leadScope: "assigned" }]));
+        await ui.render.flush();
+        const control = ui.find(node => node.type === "button" && typeof node.props.disabled === "boolean", ui.find(node => node.type === "article"));
+        assert.equal(control.props.disabled, false, "The canceled original request lease must release the still-live scope");
+        assert.equal(ui.requests.filter(request => request.method === "PATCH").length, 1);
+      } else if (releasesLiveLease) {
         await ui.render.flush();
         ui.take("LeadList").succeed(list([{ id: LEAD, name: "Synthetic refreshed patient", status: "new", assigned: false }]));
         await ui.render.flush();
@@ -1092,22 +1101,21 @@ for (const status of [401, 403] as const) {
     assert.equal(ui.render.instances("OperatorRequests")[0], owner);
     assert.ok(ui.render.content().includes("Synthetic refreshed live agreement"));
     assert.equal(obsolete.dispatchGuard?.(), false);
-    const current = await ui.start();
-    current.release();
     const count = ui.requests.length;
+    assert.equal(ui.busyControl().props.disabled, true, "Refresh must retain the original unresolved command lease");
+    (ui.control().props.onClick as () => void)();
+    await ui.render.beforeEffects();
+    assert.equal(ui.requests.length, count, "Even a directly retained callback cannot bypass the pending command");
     obsolete.fail(status);
     await ui.render.beforeEffects();
     assert.equal(ui.requests.length, count, "Observe denial before its passive revalidation");
     assert.equal(ui.render.content().includes("Synthetic refreshed live agreement"), false);
     assert.equal(text(ui.find((node) => node.props.role === "alert").props.children), `Synthetic CRM error ${status}`);
-    assert.equal(current.settled, false, "A newer pending mutation must not hide still-live access revocation");
+    assert.equal(ui.requests.filter(request => request.method === "PATCH").length, 1,
+      "Access revocation must invalidate the refreshed view without admitting a second command");
     await ui.render.flush();
     assert.equal(ui.requests.length, count + 1);
     assert.equal(ui.take("OperatorRequests").settled, false);
-    const before = clinicSnapshot(ui);
-    current.fail(409);
-    await ui.render.flush();
-    assertClinicQuiet(ui, before);
   });
 }
 

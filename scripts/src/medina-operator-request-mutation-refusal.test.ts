@@ -37,10 +37,11 @@ export const f={items:[item('${R}'),item('${S}')],calls:[],gets:0,globalDenials:
  refresh(){document.querySelector('[aria-label="Обновить предложения"]').click();},
  next(){[...document.querySelectorAll('button')].find(n=>n.textContent.trim()==='Далее').click();},
  article(id){return[...document.querySelectorAll('article')].find(n=>n.querySelector('h3')?.textContent==='Synthetic '+id);},
- click(id,kind){const article=this.article(id);if(!article)throw Error('Missing article '+id);
+ button(id,kind){const article=this.article(id);if(!article)throw Error('Missing article '+id);
   const labels={leads:['Открыть заявки','Назначить заявки'],catalog:['Услуги и цены'],arrivals:['Приходы и звонки','Подтвердить приходы'],end:['Завершить сотрудничество'],accept:['Принять условия'],withdraw:['Отозвать'],decline:['Отклонить']};
   const button=[...article.querySelectorAll('button')].find(n=>labels[kind].includes(n.textContent.trim()));if(!button)throw Error('Missing '+kind+' button');
-  flushSync(()=>button.click());},
+  return button;},
+ click(id,kind){flushSync(()=>this.button(id,kind).click());},
  async open(id){for(const kind of ['leads','catalog','arrivals']){if(!document.querySelector('[data-pane="'+kind+'"][data-request="'+id+'"]'))this.click(id,kind);await this.tick();}},
  reply(index,status,body,holdBody=false){const entry=this.calls[index];const stream=new ReadableStream({start(controller){entry.finish=()=>{controller.enqueue(new TextEncoder().encode(JSON.stringify(body)));controller.close();};}});
   const response=new Response(stream,{status,headers:{'content-type':'application/json'}});const json=response.json.bind(response);
@@ -167,6 +168,36 @@ test("request-scoped 404/409 refusal in actual React and operator transport", { 
     await reset(); await run(`f.items=f.items.map(i=>({...i,status:'requested'}));${clinic ? `f.patch({workspaceId:'${W}'});` : ""}f.refresh();await f.tick();f.click('${R}','${clinic ? 'withdraw' : 'accept'}');`);
     await wait("f.calls.length===1"); const before = await snap(); await run("f.reply(0,200,{success:true});await f.tick();");
     const state = await snap(); assert.equal(state.gets, before.gets + 1); assert.equal(state.globalDenials, 0); assert.equal(state.calls[0].body.action, clinic ? "withdraw" : "accept");
+  });
+  for (const clinic of [false, true]) for (const status of ['requested', 'accepted']) {
+    for (const response of [200, 503]) await t.test(`pending ${clinic ? 'clinic' : 'operator'} ${status}: fresh list retains one command until ${response} settles`, async () => {
+      await reset();
+      const action = status === 'accepted' ? 'end' : clinic ? 'withdraw' : 'accept';
+      await run(`f.items=f.items.map(i=>({...i,status:'${status}'}));${clinic ? `f.patch({workspaceId:'${W}'});` : ''}f.refresh();await f.tick();f.click('${R}','${action}');`);
+      await wait('f.calls.length===1');
+      await run('f.refresh();await f.tick();');
+      await wait(`!!f.article('${R}')`);
+      assert.equal(await run(`return f.button('${R}','${action}').disabled;`), true,
+        'The actual disabled DOM state must survive a fresh list while HTTP reply is pending');
+      await run(`f.click('${R}','${action}');f.click('${S}','${action}');await f.tick();`);
+      assert.equal((await snap()).calls.length, 1);
+      const before = await snap();
+      await run(`f.reply(0,${response},{success:${response === 200},error:'Obsolete reply'});await f.tick();`);
+      await wait(`f.button('${R}','${action}').disabled===false`);
+      const after = await snap();
+      assert.equal(after.gets, before.gets, 'Retired view cannot refetch or replace the newer snapshot');
+      assert.deepEqual(after.alerts, before.alerts);
+      assert.equal(after.calls.length, 1); assert.equal(after.globalDenials, 0);
+    });
+  }
+  await t.test('operator decline is protected by the same command lease', async () => {
+    await reset(); await run(`f.items=f.items.map(i=>({...i,status:'requested'}));f.refresh();await f.tick();f.click('${R}','decline');`);
+    await wait('f.calls.length===1'); await run('f.refresh();await f.tick();');
+    assert.equal(await run(`return f.button('${R}','decline').disabled;`), true);
+    await run(`f.click('${R}','decline');await f.tick();`);
+    assert.equal((await snap()).calls.length, 1);
+    await run('f.reply(0,200,{success:true});await f.tick();');
+    await wait(`f.button('${R}','decline').disabled===false`);
   });
   assert.deepEqual(browser.exceptions, []);
 });

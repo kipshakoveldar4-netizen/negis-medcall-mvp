@@ -163,6 +163,28 @@ async function fixture(t: TestContext, options: { clinic?: boolean; status?: "re
 }
 
 for (const clinic of [false, true]) {
+  for (const status of ["requested", "accepted"] as const) {
+    test(`request ${clinic ? "clinic" : "operator"} ${status}: repeated retained action dispatches only once`, async t => {
+      const ui = await fixture(t, { clinic, status });
+      const captured = ui.action().props.onClick as () => void;
+      captured(); captured(); await ui.driver.flush();
+      assert.equal(ui.requests.filter(item => item.method === "PATCH").length, 1,
+        "An unresolved action must own the command before React commits disabled=true");
+      ui.take("PATCH").respond(200, { success: true }); await ui.driver.flush();
+    });
+    test(`request ${clinic ? "clinic" : "operator"} ${status}: refresh cannot unlock an unresolved action`, async t => {
+      const ui = await fixture(t, { clinic, status });
+      const old = await ui.start(); await ui.reload("refreshed-while-pending");
+      assert.equal(ui.snapshot().busy, true, "A new list snapshot cannot release the old in-flight command");
+      const count = ui.requests.length;
+      (ui.action().props.onClick as () => void)(); await ui.driver.flush();
+      assert.equal(ui.requests.length, count);
+      old.respond(200, { success: true }); await ui.driver.flush();
+      assert.equal(ui.snapshot().busy, false, "The original settled command releases only its still-live scope");
+      assert.equal(ui.requests.length, count, "Obsolete success must not replace/refetch the newer list");
+      (await ui.start()).respond(200, { success: true }); await ui.driver.flush();
+    });
+  }
   test(`request ${clinic ? "clinic withdrawal" : "operator acceptance"} positive action uses actual transport and original actor`, async (t) => {
     const ui = await fixture(t, { clinic, status: "requested" });
     const pending = await ui.start();
