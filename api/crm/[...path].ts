@@ -180,16 +180,38 @@ function methodNotAllowed(res: VercelResponse) {
   });
 }
 
+// Media uses the separately bounded multipart/signed-upload path, not JSON.
+const MAX_CRM_BODY_BYTES = 1024 * 1024;
+
+class CrmBodyTooLargeError extends Error {}
+
+function checkBodyLengthHeader(req: VercelRequest) {
+  const length = req.headers["content-length"];
+  if (length === undefined) return;
+  if (typeof length !== "string" || !/^\d+$/.test(length)) throw new SyntaxError("Invalid content length");
+  const digits = length.replace(/^0+/, "") || "0";
+  const limit = String(MAX_CRM_BODY_BYTES);
+  if (digits.length > limit.length || (digits.length === limit.length && digits > limit)) throw new CrmBodyTooLargeError();
+}
+
 async function readRawBody(req: VercelRequest): Promise<Buffer> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req as AsyncIterable<Buffer | string>) {
+  let bytes = 0;
+  // Returning the default IncomingMessage iterator destroys its socket, losing
+  // the 413 response. Stop reading without destroying it before responding.
+  const source = typeof req.iterator === "function"
+    ? req.iterator({ destroyOnReturn: false })
+    : req as AsyncIterable<Buffer | string>;
+  for await (const chunk of source) {
+    bytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk);
+    if (bytes > MAX_CRM_BODY_BYTES) throw new CrmBodyTooLargeError();
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
-  return Buffer.concat(chunks);
+  return Buffer.concat(chunks, bytes);
 }
 
 async function ensureParsedBody(req: VercelRequest) {
-  if (req.body !== undefined || req.method === "GET" || req.method === "HEAD") return;
+  if (req.method === "GET" || req.method === "HEAD") return;
 
   const rawContentType = Array.isArray(req.headers["content-type"])
     ? req.headers["content-type"][0]
@@ -197,7 +219,24 @@ async function ensureParsedBody(req: VercelRequest) {
   const contentType = (rawContentType || "").toLowerCase();
   if (contentType.includes("multipart/form-data")) return;
 
-  const rawBody = await readRawBody(req);
+  checkBodyLengthHeader(req);
+  // Some adapters preparse requests despite bodyParser:false. They must not
+  // bypass the budget; keep an existing exact rawBody intact for HMAC checks.
+  const existingRaw = (req as VercelRequest & { rawBody?: Buffer | string | Uint8Array }).rawBody;
+  const existingBytes = typeof existingRaw === "string" ? Buffer.byteLength(existingRaw)
+    : ArrayBuffer.isView(existingRaw) ? existingRaw.byteLength : 0;
+  if (existingBytes > MAX_CRM_BODY_BYTES) throw new CrmBodyTooLargeError();
+  if (req.body !== undefined) {
+    const serialized = Buffer.isBuffer(req.body) || typeof req.body === "string" ? req.body : JSON.stringify(req.body);
+    if (serialized === undefined) throw new SyntaxError("Invalid request body");
+    if (Buffer.byteLength(serialized) > MAX_CRM_BODY_BYTES) throw new CrmBodyTooLargeError();
+    return;
+  }
+
+  const rawBody = Buffer.isBuffer(existingRaw) ? existingRaw
+    : typeof existingRaw === "string" ? Buffer.from(existingRaw)
+    : ArrayBuffer.isView(existingRaw) ? Buffer.from(existingRaw.buffer, existingRaw.byteOffset, existingRaw.byteLength)
+    : await readRawBody(req);
   // Preserve the exact bytes so signed worker requests can recompute SHA256(body).
   (req as VercelRequest & { rawBody?: Buffer }).rawBody = rawBody;
   if (rawBody.length === 0) return;
@@ -214,6 +253,22 @@ async function ensureParsedBody(req: VercelRequest) {
       body[key] = value;
     });
     req.body = body;
+  }
+}
+
+async function parseRequestBody(req: VercelRequest, res: VercelResponse): Promise<boolean> {
+  try {
+    await ensureParsedBody(req);
+    return true;
+  } catch (error) {
+    const tooLarge = error instanceof CrmBodyTooLargeError;
+    res.setHeader("Cache-Control", "no-store");
+    sendJson(res, tooLarge ? 413 : 400, {
+      success: false,
+      error: tooLarge ? "Request body too large" : "Invalid request body",
+      code: tooLarge ? "request_body_too_large" : "invalid_request_body",
+    });
+    return false;
   }
 }
 
@@ -454,15 +509,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (!route.authorization.methods.includes(method)) {
         return methodNotAllowed(res);
       }
-      try {
-        await ensureParsedBody(req);
-      } catch {
-        return sendJson(res, 400, {
-          success: false,
-          error: "Invalid request body",
-          code: "invalid_request_body",
-        });
-      }
+      if (!await parseRequestBody(req, res)) return;
       return await dispatch(route.key, route.resource, segments, req, res);
     } catch (error) {
       if (error instanceof PlatformAuthError || error instanceof WorkspaceAdminAuthError) {
@@ -477,27 +524,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    // This route reads a bounded JSON body only after verified workspace auth.
-    // Workspace selection uses the query, never an untrusted deletion payload.
-    if (route.key !== "site-inquiry-deletion" && route.key !== "site-inquiry-deletion-operations") await ensureParsedBody(req);
-  } catch {
-    return sendJson(res, 400, {
-      success: false,
-      error: "Invalid request body",
-      code: "invalid_request_body",
-    });
-  }
-
-  try {
     if (route.authorization.kind === "internal_hmac") {
       // The handler performs its own HMAC verification; a browser JWT can never
-      // satisfy it, and this branch never builds a workspace context.
+      // satisfy it. Read bounded exact bytes, not a reserialized signature body.
+      if (!await parseRequestBody(req, res)) return;
       return await dispatch(route.key, route.resource, segments, req, res);
     }
 
     if (route.authorization.kind === "bootstrap") {
       // Identity only: the user may not have selected a workspace yet.
       await requireAuthenticatedUser(req);
+      if (!await parseRequestBody(req, res)) return;
       return await dispatch(route.key, route.resource, segments, req, res);
     }
 
@@ -518,7 +555,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return sendJson(res, 403, { success: false, error: "Недостаточно прав", code: "insufficient_permission" });
     }
     requirePurposeRoute(context.purpose, context.role, route.key, method);
-    if (context.purpose === 'mortgage_leads') requireMortgagePayload(route.key, method, req.body);
 
     if (META_ACCOUNT_BOUND_ROUTES.has(route.key)) {
       requireMetaProvisionedWorkspace(context.workspaceId);
@@ -526,10 +562,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (TIKTOK_ACCOUNT_BOUND_ROUTES.has(route.key)) {
       requireTikTokProvisionedWorkspace(context.workspaceId);
     }
-    if (route.key === "meta-accounts" && method !== "GET") {
-      requireMetaProvisionedAdAccount(readMetaAccountId(req.body));
-    }
-
     if (isDisabledMethod) {
       // Registered but intentionally refused, and only revealed to a caller who
       // was already authorized for it. Direct staff creation stays closed: it
@@ -543,6 +575,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         code: "staff_invitation_required",
         details: ["Use POST /api/crm/staff-invitations"],
       });
+    }
+
+    // Authority, purpose and disabled capabilities never depend on the body.
+    // Deletion retains its own stricter parser after verified context attachment.
+    if (route.key !== "site-inquiry-deletion" && route.key !== "site-inquiry-deletion-operations"
+      && !await parseRequestBody(req, res)) return;
+    if (context.purpose === 'mortgage_leads') requireMortgagePayload(route.key, method, req.body);
+    if (route.key === "meta-accounts" && method !== "GET") {
+      requireMetaProvisionedAdAccount(readMetaAccountId(req.body));
     }
 
     // From here on the verified workspace is the only tenant authority; the
