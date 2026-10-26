@@ -1676,7 +1676,7 @@ for (const role of ["owner", "admin"] as const) {
   });
 }
 
-const prohibitedTabs = ["overview", "operators", "doctors", "roles", "clinic", "integrations",
+const prohibitedTabs = ["overview", "operators", "creators", "doctors", "roles", "clinic", "integrations",
   "ai", "meta", "release", "diagnostics"];
 const mortgageUi = {
   team: "\u041a\u043e\u043c\u0430\u043d\u0434\u0430",
@@ -1686,7 +1686,7 @@ const mortgageUi = {
 };
 function assertMortgageTree(tree: any) {
   const all = nodes(tree);
-  for (const name of ["PlanCalculator", "VerticalSwitch", "ClinicOperators", "DoctorSchedule", "WhatsAppChannels",
+  for (const name of ["PlanCalculator", "VerticalSwitch", "ClinicOperators", "CreatorJobs", "DoctorSchedule", "WhatsAppChannels",
     "TikTokSetupCheck", "TikTokConnection", "TikTokVideoUpload", "MetricCard", "ReleaseBanner"]) {
     assert.ok(all.every((node) => (typeof node.type === "function" ? node.type.name : node.type) !== name),
       `${name} must never be mounted for mortgage`);
@@ -1898,6 +1898,20 @@ test("same-account/workspace purpose round trips remount and never restore old c
       assert.deepEqual(fixture.storageWrites, []);
     } finally { fixture.renderer.dispose(); }
   }
+});
+
+test("creator jobs receive the existing verified company session and cannot revive after raw SDK A-B-A", async () => {
+  const fixture = await ready();
+  try {
+    fixture.snapshot().setActiveTab("creators"); await fixture.renderer.flush();
+    const props = nodes(fixture.renderer.tree()).find(node => node.type === "CreatorJobs")?.props;
+    assert.ok(props, "Traverse actual AdminCenter forwarding JSX");
+    assert.equal(props.actorId, fixture.access().actorId); assert.equal(props.workspaceId, fixture.access().workspaceId);
+    assert.equal(props.isSessionCurrent(), true);
+    fixture.emit("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"); assert.equal(props.isSessionCurrent(), false);
+    fixture.emit(props.actorId); assert.equal(props.isSessionCurrent(), false, "Original session stays retired after returning to A");
+    assert.deepEqual(fixture.storageWrites, []);
+  } finally { fixture.renderer.dispose(); }
 });
 
 test("clinic and salon keep overview, diagnostics, billing, vertical switch and specialist query tabs", async () => {

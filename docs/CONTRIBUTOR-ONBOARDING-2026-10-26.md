@@ -219,6 +219,49 @@ Cross-device metadata loss, retention and support remain explicit gates.
 Screens, real sessions, mobile/desktop acceptance and an attested isolated
 Preview are still unaccepted. No working client, cloud setting or expense changed.
 
+### Creator Screens: Local Follow-Up
+
+Base 10cc427. The ordinary AdminCenter now has a creator tab; the existing
+ContributorPortal mounts own assignments only for approved creators. Mortgage
+navigation/policy is unchanged, with explicit negative coverage for the new tab.
+Company selection, original explicit terms/fee/deadline/rights, author acceptance,
+submission links, revision feedback, immutable version pages and explicit final
+acceptance are wired to the scoped APIs. Unaccepted offers can be cancelled or
+declined; acceptance is not a payment or a Content Studio entitlement.
+
+Each mutation first retains only actor/workspace/request/action/target metadata
+in sessionStorage. The raw body exists only in memory; retry uses the identical
+original key and body. On remount, only read/close are available. Unknown cannot
+unlock a new command; a typed committed/stopped result clears only its matching
+descriptor. Corrupt/unavailable storage blocks admission. No raw brief, amount,
+rights terms, deliverable URLs or credentials are persisted in browser storage.
+This is not cross-device or cross-tab global admission or a retention policy.
+
+Reads/actions bind expected actor and current scope. Denial clears private forms
+without an automatic retry loop. Unmount, StrictMode, A-B-A and cancelled reads
+retire old handlers. Terms consent pins termsRevision, approval confirmation pins
+revision; retained handlers cannot act after unchecking consent, closing a form
+or cancelling confirmation. Deadline input and display explicitly use the device
+zone, persisted as UTC. Exact decimal input supports KZT/USD/EUR without Number
+rounding; other currencies in existing data are explicitly shown in minor units.
+
+Evidence: 11/11 real React/StrictMode installed-browser tests with fake Auth/API,
+375/1440 controls/overflow and inspected screenshots, full happy path, exact
+large fee, 22 versions (20/2), lost acknowledgement/idempotent retry, remount
+read, explicit unknown close, delayed A-B-A and 403. This is not real identity,
+native HTTP/PG or cloud acceptance. Contract/API/journal 47/47; parent/role
+regression 104/104 plus focused creator forwarding 1/1; prior contributor and
+Control/partner browser 13/13. Root types/API module modes/Vite/cold-start 341
+and unchanged fixed 931 isolation checks pass. SQL and previous native evidence
+are unchanged, not re-labelled as a UI or integrated database result.
+
+A local fictional demo is at http://127.0.0.1:5266/company?demo=1. Its explicit
+role switch keeps the UI double in one document; reloading resets that model's
+jobs, not a real database. No working account, provider or private client file
+is used. Actual HTTP/native integration, exact isolated Preview/schema/ACL and
+real sessions, recruitment/legal/retention gates remain open. No Production,
+Baspana, salon, WhatsApp, cloud setting, paid generation or expense changed.
+
 1. Isolate and attest a new Preview's build/runtime test database before applying
    105 there. Inherited/shared Production settings remain forbidden. Then test
    real sign-up email redirects, application/review and two-user session changes.
@@ -230,7 +273,9 @@ Preview are still unaccepted. No working client, cloud setting or expense change
    payout receipt. Do not advertise a dead referral URL or registration as income.
 4. Creator operations remain separate: scoped briefs, application/selection,
    deliverables, review/revisions, content rights and explicit fees. An approved
-   creator application currently grants neither jobs nor paid Content Studio.
+   creator application in the current cloud release grants neither the new job
+   cabinet nor paid Content Studio; the local candidate still needs isolated
+   integrated and cloud acceptance.
 5. Recruitment rollout needs its own release approval. No Production, Baspana,
    working salon, WhatsApp/Wazzup, cloud schema, real applicant, ad or expense
    changed. Operators' existing safeguards were not relaxed to accelerate intake.

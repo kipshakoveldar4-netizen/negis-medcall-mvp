@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { PlanCalculator } from "@/components/admin/PlanCalculator";
 import { ClinicOperators } from "@/components/admin/ClinicOperators";
+import { CreatorJobs } from "@/components/contributors/CreatorJobs";
 import { VerticalSwitch } from "@/components/admin/VerticalSwitch";
 import { TikTokSetupCheck } from "@/components/admin/TikTokSetupCheck";
 import { TikTokConnection } from "@/components/admin/TikTokConnection";
@@ -102,6 +103,7 @@ type BatchStaffResult = {
 type AdminTab =
   | "overview"
   | "operators"
+  | "creators"
   | "staff"
   | "doctors"
   | "roles"
@@ -475,6 +477,7 @@ const tabs: Array<{ id: AdminTab; label: string; icon: LucideIcon }> = [
   { id: "overview", label: "Обзор", icon: Gauge },
   { id: "staff", label: "Сотрудники", icon: Users },
   { id: "operators", label: "Операторы", icon: Users },
+  { id: "creators", label: "Авторы контента", icon: Sparkles },
   { id: "doctors", label: "Врачи", icon: Stethoscope },
   { id: "roles", label: "Роли и доступы", icon: ShieldCheck },
   { id: "clinic", label: "Клиника", icon: Building2 },
@@ -4527,6 +4530,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
           {activeTab === "staff" && renderStaff()}
           {activeTab === "operators" && <ClinicOperators key={workspaceId} workspaceId={workspaceId}
             actorId={access.actorId} isSessionCurrent={access.isCurrent} />}
+          {activeTab === "creators" && <CreatorJobs workspaceId={workspaceId} actorId={access.actorId} isSessionCurrent={access.isCurrent} />}
           {activeTab === "doctors" && <DoctorSchedule />}
           {activeTab === "roles" && renderRoles()}
           {activeTab === "clinic" && renderClinic()}

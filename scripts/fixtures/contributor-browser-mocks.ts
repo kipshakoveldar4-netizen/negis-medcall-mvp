@@ -15,6 +15,7 @@ function switchActor(next: string | null) {
   for (const listener of controlListeners) listener(session());
 }
 export const hasSupabaseFrontendEnv = true;
+export class OperatorApiError extends Error { constructor(message: string, readonly status: number) { super(message); } }
 export const controlConfig = { ready: true };
 export function subscribeControlActor(fn: (session: any) => void) { controlListeners.add(fn); return () => controlListeners.delete(fn); }
 export const supabase = { auth: {
