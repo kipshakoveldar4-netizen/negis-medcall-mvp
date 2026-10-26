@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { randomUUID } from "node:crypto";
+import { VideoRequestDeadlineError, VideoRequestLifetime } from "../../lib/content-studio/video-request-lifetime";
 import {
   demoAvatarPrompt,
   demoContentPackage,
@@ -1119,11 +1120,18 @@ function generatedVideoApiState(value: unknown, generationKey: string): Generate
     result, ...(state.failureCode === "generated_video_provider_failed" ? { failureCode: "generated_video_provider_failed" as const } : {}) };
 }
 
-async function requireCurrentVideoActor(req: VercelRequest, expected: WorkspaceAccessContext): Promise<void> {
-  const actor = await requireWorkspaceAccess(req, expected.workspaceId, { permission: "manage_ai_content" });
+async function requireCurrentVideoActor(req: VercelRequest, expected: WorkspaceAccessContext, lifetime: VideoRequestLifetime): Promise<void> {
+  const actor = await lifetime.run(() => requireWorkspaceAccess(req, expected.workspaceId, { permission: "manage_ai_content" }));
   if (actor.workspaceId !== expected.workspaceId || actor.staffUserId !== expected.staffUserId || actor.userId !== expected.userId) {
     throw new WorkspaceAdminAuthError(403, "Access denied", "workspace_access_denied");
   }
+}
+
+function videoRequestFetch(lifetime: VideoRequestLifetime): GenerationFetch {
+  return (url, init) => {
+    lifetime.assertActive();
+    return fetch(url, init) as unknown as ReturnType<GenerationFetch>;
+  };
 }
 
 function sendVideoRequestConflict(res: VercelResponse) {
@@ -1210,7 +1218,7 @@ function sendVideoWorkflowState(res: VercelResponse, context: WorkspaceAccessCon
     ...(state.validationJobId ? { validationJobId: state.validationJobId } : {}) } });
 }
 
-async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
+async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext, lifetime: VideoRequestLifetime) {
   const payload = readBody(req);
   const secret = jobHandleSecret();
   const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
@@ -1237,9 +1245,9 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
   let nativeConfig: ReturnType<typeof generatedVideoWorkflowConfig>;
   let state: GeneratedVideoApiState;
   try {
-    nativeConfig = generatedVideoWorkflowConfig();
+    nativeConfig = { ...generatedVideoWorkflowConfig(), requestLifetime: lifetime };
     const existing = await readGeneratedVideoWorkflow(nativeConfig, context, generationKey);
-    await requireCurrentVideoActor(req, context);
+    await requireCurrentVideoActor(req, context, lifetime);
     if (existing) {
       state = generatedVideoApiState(existing, generationKey);
       if (state.requestDigest !== requestDigest) return sendVideoRequestConflict(res);
@@ -1250,9 +1258,9 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
     if (refusal) return sendRefusal(res, refusal);
     // Native capacity and a private bucket are confirmed before spending quota or calling the provider.
     await requireGeneratedVideoWorkflowReady(nativeConfig, context);
-    await requireCurrentVideoActor(req, context);
+    await requireCurrentVideoActor(req, context, lifetime);
     state = generatedVideoApiState(await admitGeneratedVideoWorkflow(nativeConfig, context, { generationKey, requestDigest }), generationKey);
-    await requireCurrentVideoActor(req, context);
+    await requireCurrentVideoActor(req, context, lifetime);
     if (state.requestDigest !== requestDigest) return sendVideoRequestConflict(res);
     if (state.providerJobId) return sendAcceptedVideo(res, context, state, secret, { size, seconds, format });
     if (state.status !== "reserved") return sendVideoDispatchUnconfirmed(res);
@@ -1265,6 +1273,7 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
       staffUserId: context.staffUserId,
       requestKey,
       operation: "generated_video",
+      requestLifetime: lifetime,
       kind: "video_seconds",
       units: seconds,
       provider: "openai",
@@ -1283,7 +1292,7 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
     // A concurrent accepted request may have linked its job while quota was being checked.
     try {
       const current = await readGeneratedVideoWorkflow(nativeConfig, context, generationKey);
-      await requireCurrentVideoActor(req, context);
+      await requireCurrentVideoActor(req, context, lifetime);
       if (current) {
         const replay = generatedVideoApiState(current, generationKey);
         if (replay.requestDigest !== requestDigest) return sendVideoRequestConflict(res);
@@ -1297,15 +1306,15 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
 
   const dispatchId = randomUUID();
   try {
-    await requireCurrentVideoActor(req, context);
+    await requireCurrentVideoActor(req, context, lifetime);
     const dispatched = await beginGeneratedVideoDispatch(nativeConfig, context, generationKey, dispatchId);
     state = generatedVideoApiState(dispatched, generationKey);
     if (state.providerJobId) {
-      await requireCurrentVideoActor(req, context);
+      await requireCurrentVideoActor(req, context, lifetime);
       return sendAcceptedVideo(res, context, state, secret, { size, seconds, format, warning: usage.warning });
     }
     if (videoRecord(dispatched).dispatchAccepted !== true) return sendVideoDispatchUnconfirmed(res);
-    await requireCurrentVideoActor(req, context);
+    await requireCurrentVideoActor(req, context, lifetime);
   } catch (error) {
     // An uncertain begin may have committed: never release its quota or dispatch again.
     return sendVideoWorkflowFailure(res, error);
@@ -1314,10 +1323,12 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
   let job: Awaited<ReturnType<typeof createVideoJob>>;
   try {
     job = await createVideoJob({
-      fetchImpl: fetch as unknown as GenerationFetch,
+      fetchImpl: videoRequestFetch(lifetime),
       config,
       prompt,
       size,
+      signal: lifetime.signal,
+      timeoutMs: lifetime.remainingMs(15_000),
     });
   } catch (error) {
     const accounting = providerFailureAccounting(error);
@@ -1325,15 +1336,15 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
       try { await cancelGeneratedVideoWorkflow(nativeConfig, context, generationKey, dispatchId, true); }
       catch (cancelError) { return sendVideoWorkflowFailure(res, cancelError, undefined, true); }
     }
-    await completeContentGeneration({
+    await lifetime.run(() => completeContentGeneration({
       workspaceId: context.workspaceId,
       reservation: usage,
       status: accounting.status,
       errorCode: accounting.errorCode,
       provider: "openai",
       model: config.videoModel,
-    });
-    try { await requireCurrentVideoActor(req, context); }
+    }));
+    try { await requireCurrentVideoActor(req, context, lifetime); }
     catch (accessError) { return sendVideoWorkflowFailure(res, accessError); }
     if (accounting.status === "unknown") return sendVideoDispatchUnconfirmed(res);
     return sendProviderFailure(res, error, "Сервис генерации отклонил запуск видео");
@@ -1343,14 +1354,14 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
   try {
     state = generatedVideoApiState(await linkGeneratedVideoProvider(nativeConfig, context, generationKey, dispatchId, job.id), generationKey);
     if (state.providerJobId !== job.id) throw new Error("generated_video_provider_link_unconfirmed");
-    await completeContentGeneration({ workspaceId: context.workspaceId, reservation: usage, status: "succeeded", provider: "openai", model: config.videoModel });
-    await requireCurrentVideoActor(req, context);
+    await lifetime.run(() => completeContentGeneration({ workspaceId: context.workspaceId, reservation: usage, status: "succeeded", provider: "openai", model: config.videoModel }));
+    await requireCurrentVideoActor(req, context, lifetime);
     return sendAcceptedVideo(res, context, state, secret, { size, seconds, format, warning: usage.warning, model: config.videoModel,
       progress: job.progress, status: job.status === "completed" ? "in_progress" : job.status });
   } catch (error) { return sendVideoWorkflowFailure(res, error, undefined, true); }
 }
 
-async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
+async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext, lifetime: VideoRequestLifetime) {
   const secret = jobHandleSecret();
   if (!secret) return sendVideoWorkflowFailure(res);
   const handleParam = Array.isArray(req.query.handle) ? req.query.handle[0] : req.query.handle;
@@ -1365,21 +1376,21 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
   const generationKey = handle.generationKey;
   const signedHandle = String(handleParam);
   try {
-    const nativeConfig = generatedVideoWorkflowConfig();
+    const nativeConfig = { ...generatedVideoWorkflowConfig(), requestLifetime: lifetime };
     let existing = await readGeneratedVideoWorkflow(nativeConfig, context, generationKey);
-    await requireCurrentVideoActor(req, context);
+    await requireCurrentVideoActor(req, context, lifetime);
     if (!existing && handle.legacy) {
       // A valid old handle can recover its existing render, never start a new paid job.
       await requireGeneratedVideoWorkflowReady(nativeConfig, context);
-      await requireCurrentVideoActor(req, context);
+      await requireCurrentVideoActor(req, context, lifetime);
       existing = await admitGeneratedVideoWorkflow(nativeConfig, context, { generationKey, requestDigest: null, providerJobId: handle.providerJobId });
-      await requireCurrentVideoActor(req, context);
+      await requireCurrentVideoActor(req, context, lifetime);
     }
     if (!existing) return sendJson(res, 404, { success: false, code: "generated_video_not_found", error: "Задача генерации не найдена" });
     let state = generatedVideoApiState(existing, generationKey);
     if (state.providerJobId !== handle.providerJobId) return sendVideoRequestConflict(res);
     state = generatedVideoApiState(await resumeGeneratedVideoWorkflow(nativeConfig, context, generationKey), generationKey);
-    await requireCurrentVideoActor(req, context);
+    await requireCurrentVideoActor(req, context, lifetime);
     if (state.providerJobId !== handle.providerJobId) return sendVideoRequestConflict(res);
     if (!state.needInput) return sendVideoWorkflowState(res, context, state, signedHandle);
 
@@ -1387,14 +1398,15 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
     const config = readGenerationConfig();
     const refusal = videoGenerationRefusal(config);
     if (refusal) return sendVideoWorkflowFailure(res, undefined, signedHandle, true);
-    await requireCurrentVideoActor(req, context);
-    const job = await fetchVideoJob({ fetchImpl: fetch as unknown as GenerationFetch, config, jobId: handle.providerJobId });
-    await requireCurrentVideoActor(req, context);
+    await requireCurrentVideoActor(req, context, lifetime);
+    const job = await fetchVideoJob({ fetchImpl: videoRequestFetch(lifetime), config, jobId: handle.providerJobId,
+      signal: lifetime.signal, timeoutMs: lifetime.remainingMs(15_000) });
+    await requireCurrentVideoActor(req, context, lifetime);
     if (job.id !== handle.providerJobId) return sendVideoRequestConflict(res);
     if (job.status === "failed") {
       state = generatedVideoApiState(await ackGeneratedVideoProviderFailure(nativeConfig, context, generationKey,
         { id: job.id, status: "failed" }), generationKey);
-      await requireCurrentVideoActor(req, context);
+      await requireCurrentVideoActor(req, context, lifetime);
       if (state.providerJobId !== handle.providerJobId) return sendVideoRequestConflict(res);
       return sendVideoWorkflowState(res, context, state, signedHandle);
     }
@@ -1407,11 +1419,12 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
       });
     }
     await requireGeneratedVideoWorkflowReady(nativeConfig, context);
-    await requireCurrentVideoActor(req, context);
-    const buffer = await downloadVideoContent({ fetchImpl: fetch as unknown as GenerationFetch, config, jobId: handle.providerJobId });
-    await requireCurrentVideoActor(req, context);
+    await requireCurrentVideoActor(req, context, lifetime);
+    const buffer = await downloadVideoContent({ fetchImpl: videoRequestFetch(lifetime), config, jobId: handle.providerJobId,
+      signal: lifetime.signal, timeoutMs: lifetime.remainingMs(15_000) });
+    await requireCurrentVideoActor(req, context, lifetime);
     state = generatedVideoApiState(await receiveGeneratedVideoInput(nativeConfig, context, generationKey, buffer), generationKey);
-    await requireCurrentVideoActor(req, context);
+    await requireCurrentVideoActor(req, context, lifetime);
     if (state.providerJobId !== handle.providerJobId) return sendVideoRequestConflict(res);
     return sendVideoWorkflowState(res, context, state, signedHandle);
   } catch (error) {
@@ -1424,6 +1437,50 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
         data: { handle: signedHandle, status: "in_progress", phase: "validation" } });
     }
     return sendVideoWorkflowFailure(res, error, signedHandle, true);
+  }
+}
+
+function guardVideoResponse(res: VercelResponse, lifetime: VideoRequestLifetime): VercelResponse {
+  // Late authorization must not write a second response after this request retired.
+  const guarded = new Proxy(res, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        lifetime.assertActive();
+        const result = Reflect.apply(value, target, args);
+        return result === target ? guarded : result;
+      };
+    },
+    set(target, property, value) { lifetime.assertActive(); return Reflect.set(target, property, value, target); },
+  });
+  return guarded;
+}
+
+async function handleBoundedVideoRequest(req: VercelRequest, res: VercelResponse,
+  authorization: PrivateRouteAuthorization, resource: "generate-video" | "video-generation") {
+  const lifetime = new VideoRequestLifetime();
+  const guarded = guardVideoResponse(res, lifetime);
+  const retire = () => lifetime.close();
+  req.once?.("aborted", retire);
+  res.once?.("close", retire);
+  try {
+    if (req.aborted || res.destroyed || res.writableEnded) return;
+    const context = await lifetime.run(() => authorizePrivateRoute(req, guarded, authorization));
+    if (!context) return;
+    return await lifetime.run(() => resource === "generate-video"
+      ? handleGenerateVideo(req, guarded, context, lifetime) : handleVideoGeneration(req, guarded, context, lifetime));
+  } catch (error) {
+    if (!(error instanceof VideoRequestDeadlineError)) throw error;
+    if (req.aborted || res.destroyed || res.headersSent || res.writableEnded) return;
+    // No identity/handle is disclosed after an unconfirmed authorization wait.
+    return sendJson(res, 503, { success: false, code: "generated_video_request_deadline",
+      error: "Время проверки истекло, результат запроса не подтверждён",
+      hint: "Повторите проверку того же запроса без изменения описания. Не запускайте новый платный рендер." });
+  } finally {
+    req.removeListener?.("aborted", retire);
+    res.removeListener?.("close", retire);
+    lifetime.close();
   }
 }
 
@@ -1440,6 +1497,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     : undefined;
   if (!authorization) return sendNotFound(res);
 
+  if (resource === "generate-video" || resource === "video-generation") {
+    return handleBoundedVideoRequest(req, res, authorization, resource);
+  }
+
   // Nothing below this line runs for an unauthenticated caller: no OpenAI
   // request, no Telegram request, no Supabase client.
   const context = await authorizePrivateRoute(req, res, authorization);
@@ -1453,8 +1514,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (resource === "generate-tapnow-prompt") return handleGenerateTapNowPrompt(req, res, context);
   if (resource === "send-telegram") return handleSendTelegram(req, res, context);
   if (resource === "generate-photo") return handleGeneratePhoto(req, res, context);
-  if (resource === "generate-video") return handleGenerateVideo(req, res, context);
-  if (resource === "video-generation") return handleVideoGeneration(req, res, context);
 
   return sendNotFound(res);
 }

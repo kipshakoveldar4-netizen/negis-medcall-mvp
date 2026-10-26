@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { planOf, type PlanKey } from "../billing/plans";
 import { getSupabaseServerClient } from "../supabase/server";
+import type { VideoRequestLifetime } from "./video-request-lifetime";
 
 export type ContentGenerationKind = "text_request" | "image" | "video_seconds";
 export type ContentGenerationOperation =
@@ -292,6 +293,7 @@ export async function reserveContentGeneration(input: {
   units: number;
   provider?: string;
   model?: string;
+  requestLifetime?: VideoRequestLifetime;
 }): Promise<ContentUsageReservation> {
   const supabase = getSupabaseServerClient();
   if (!supabase) {
@@ -310,13 +312,14 @@ export async function reserveContentGeneration(input: {
     };
   }
 
-  const planResult = await activePlan(supabase, input.workspaceId);
+  const readPlan = () => activePlan(supabase, input.workspaceId);
+  const planResult = await (input.requestLifetime ? input.requestLifetime.run(readPlan) : readPlan());
   if (planResult.error) {
     throw new Error("Не удалось безопасно проверить тариф перед генерацией.");
   }
 
   const limit = quotaForPlan(planResult.plan, input.kind);
-  const { data, error } = await supabase.rpc("reserve_content_generation_usage", {
+  const reserve = () => supabase.rpc("reserve_content_generation_usage", {
     p_workspace_id: input.workspaceId,
     p_staff_user_id: input.staffUserId,
     p_request_key: input.requestKey,
@@ -327,6 +330,7 @@ export async function reserveContentGeneration(input: {
     p_provider: input.provider || null,
     p_model: input.model || null,
   });
+  const { data, error } = await (input.requestLifetime ? input.requestLifetime.run(reserve) : reserve());
 
   if (error && isMissingUsageFoundation(error)) {
     // Text helpers have no artificial quota yet and keep their compatibility

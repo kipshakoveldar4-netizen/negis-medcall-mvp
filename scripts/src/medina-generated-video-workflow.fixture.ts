@@ -6,6 +6,7 @@ import path from "node:path";
 import type { TestContext } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Script } from "node:vm";
+import { EventEmitter } from "node:events";
 
 // Production controller, provider parser and workflow run unchanged. Only
 // HTTP, authorization, accounting and the Supabase SDK are explicit doubles.
@@ -44,6 +45,7 @@ async function fixture(t: TestContext, options: Row = {}) {
   const rpcCounts = new Map<string, number>();
   const member: Row = { id: S, workspace_id: W, auth_user_id: U, status: "active", role: "owner" };
   let providerCreates = 0, providerReads = 0, providerDownloads = 0;
+  let actorChecks = 0;
   let currentActor = { ...actor };
   const envelope = (operation: Row | undefined) => operation ? structuredClone({ operation,
     job: jobs.get(operation.job_id) ?? null, asset: assets.get(operation.asset_id) ?? null }) : null;
@@ -150,6 +152,7 @@ async function fixture(t: TestContext, options: Row = {}) {
     storage: {
       async getBucket(bucket: string) {
         calls.push({ kind: "bucket", bucket });
+        if (options.beforeBucket) await options.beforeBucket(bucket);
         if (options.bucketError) return { data: null, error: { message: secret } };
         return { data: { id: bucket, public: bucket === outputBucket || options.publicRaw === true,
           file_size_limit: 100 * 1024 * 1024, allowed_mime_types: bucket === rawBucket ? ["video/mp4"] : ["video/mp4", "image/jpeg"],
@@ -160,6 +163,7 @@ async function fixture(t: TestContext, options: Row = {}) {
           calls.push({ kind: "upload", bucket, storagePath, config });
           assert.equal(bucket, rawBucket, "Producer must never upload unvalidated video to the public bucket");
           assert.equal(config.upsert, false); assert.equal(config.contentType, "video/mp4");
+          if (options.beforePrivateUpload) await options.beforePrivateUpload(storagePath);
           if (privateFiles.has(storagePath)) return { data: null, error: { message: "Already exists" } };
           if (!options.noPrivateCommit) privateFiles.set(storagePath, Buffer.from(buffer));
           if (options.revokeAfterPrivateUpload) member.status = "inactive";
@@ -187,7 +191,9 @@ async function fixture(t: TestContext, options: Row = {}) {
         return new Response(JSON.stringify(options.providerFailure ? { error: { message: providerKey } }
           : { id: "synthetic_provider_job_090", status: "queued", progress: 0 }), { status: options.providerFailure ?? 200 });
       }
-      if (url.includes("/content?")) { providerDownloads++; return new Response(new Uint8Array(RAW), { headers: { "content-type": "video/mp4" } }); }
+      if (url.includes("/content?")) { providerDownloads++;
+        if (options.downloadResponse) return options.downloadResponse({ url, init });
+        return new Response(new Uint8Array(RAW), { headers: { "content-type": "video/mp4" } }); }
       providerReads++;
       const requestedJob = decodeURIComponent(new URL(url).pathname.split("/").at(-1)!);
       if (options.providerResponse) return options.providerResponse({ phase: "poll", url, init, requestedJob });
@@ -229,6 +235,8 @@ async function fixture(t: TestContext, options: Row = {}) {
       if (specifier === "../../lib/auth/server") return {
         WorkspaceAdminAuthError: FixtureAuthError,
         requireWorkspaceAccess: async () => {
+          actorChecks++;
+          if (options.beforeActorCheck) await options.beforeActorCheck(actorChecks);
           if (member.status !== "active" || !["owner", "admin", "marketer"].includes(member.role)) {
             throw new FixtureAuthError(403, "Access denied", "workspace_access_denied");
           }
@@ -238,7 +246,8 @@ async function fixture(t: TestContext, options: Row = {}) {
       if (specifier === "../../lib/auth/route-guard") return {
         normalizeRouteSegment: (value: unknown) => Array.isArray(value) ? value.join("/") : String(value ?? ""),
         sendNotFound: (_req: unknown, res: Row) => res.status(404).json({ success: false }),
-        authorizePrivateRoute: async (_req: unknown, res: Row) => {
+        authorizePrivateRoute: async (req: unknown, res: Row) => {
+          if (options.beforeAuthorize) await options.beforeAuthorize(req, res);
           if (member.status !== "active" || member.auth_user_id !== currentActor.userId || !["owner", "admin", "marketer"].includes(member.role)) {
             res.status(403).json({ success: false }); return null;
           }
@@ -248,21 +257,25 @@ async function fixture(t: TestContext, options: Row = {}) {
       if (specifier === "../../lib/content-studio/usage") return {
         billableVideoSeconds: () => 4,
         async reserveContentGeneration(value: Row) { usageCalls.push(value); events.push("usage:reserve");
+          if (options.beforeQuota) await options.beforeQuota(value);
           if (options.revokeAfterQuota) member.status = "inactive";
           const duplicate = usageKeys.has(value.requestKey); usageKeys.add(value.requestKey);
           return { allowed: !options.quotaDenied && !duplicate, tracked: true, duplicate, usageId: randomUUID(), kind: "video_seconds",
             used: 0, limit: 40, remaining: 40, periodStart: null, reason: options.quotaDenied ? "quota_exceeded" : null, warning: "" }; },
-        async completeContentGeneration(value: Row) { completions.push(value); },
+        async completeContentGeneration(value: Row) { completions.push(value); if (options.beforeCompletion) await options.beforeCompletion(value); },
         getContentUsageSummary: async () => { throw new Error("Unused usage endpoint"); },
       };
       return requireRoute(specifier);
     },
   });
   async function request(resource: "generate-video" | "video-generation", extra: Row = {}) {
-    const req = { method: resource === "generate-video" ? "POST" : "GET", query: { path: resource, ...extra.query },
-      headers: { "x-idempotency-key": extra.requestKey ?? requestKey }, body: { prompt: "Synthetic video fixture", format: "reels", ...extra.body } };
-    const res: Row = { code: 0, body: null, headers: {}, setHeader(key: string, value: unknown) { this.headers[key] = value; return this; },
-      status(value: number) { this.code = value; return this; }, json(body: unknown) { this.body = body; return this; }, end() { return this; } };
+    const req = Object.assign(new EventEmitter(), { method: resource === "generate-video" ? "POST" : "GET", query: { path: resource, ...extra.query },
+      headers: { "x-idempotency-key": extra.requestKey ?? requestKey }, body: { prompt: "Synthetic video fixture", format: "reels", ...extra.body } });
+    const res: Row = Object.assign(new EventEmitter(), { code: 0, body: null, headers: {}, setHeader(this: Row, key: string, value: unknown) { this.headers[key] = value; return this; },
+      status(this: Row, value: number) { this.code = value; return this; },
+      json(this: Row, body: unknown) { this.body = body; this.writes = (this.writes ?? 0) + 1; this.headersSent = true; this.writableEnded = true;
+        if (options.onResponse) options.onResponse(this); return this; }, end(this: Row) { this.writableEnded = true; return this; } });
+    if (options.onRequest) options.onRequest(req, res);
     await exports.default(req, res);
     const serialized = JSON.stringify(res.body);
     assert.equal(serialized.includes(secret), false, "Service credentials cannot appear in responses");

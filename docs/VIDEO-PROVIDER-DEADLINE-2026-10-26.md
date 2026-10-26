@@ -85,6 +85,10 @@ servers and browser sessions were not used or changed.
 
 ## Not Closed By This Cycle
 
+Later local G5-C59 [request-budget acceptance](VIDEO-REQUEST-BUDGET-2026-10-26.md)
+supersedes the selected two-route application-wait gap below. Unknown provider-ID
+reconciliation, real service/host acceptance and all unrelated gates remain.
+
 This is a provider-metadata stage bound, NOT an end-to-end API request budget.
 Authorization, RPC/accounting, SDK bucket/upload and finalization waits still
 need their own bounded/coordinated recovery acceptance. The existing 15-second

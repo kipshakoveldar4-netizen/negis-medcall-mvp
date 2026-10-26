@@ -359,10 +359,11 @@ async function readVideoProviderJson(input: {
   headers: Record<string, string>;
   body?: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<Record<string, unknown>> {
   const timeout = input.timeoutMs ?? 15_000;
   const unavailable = (status = 502) => new GenerationProviderError(status, "Не удалось подтвердить ответ сервиса генерации видео.");
-  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 15_000) throw unavailable();
+  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 15_000 || input.signal?.aborted) throw unavailable();
   const controller = new AbortController();
   let response: GenerationFetchResponse | undefined;
   let reader: ReturnType<NonNullable<GenerationFetchResponse["body"]>["getReader"]> | undefined;
@@ -371,14 +372,18 @@ async function readVideoProviderJson(input: {
   const cancelBody = (body: GenerationFetchResponse["body"]) => {
     try { void body?.cancel?.().catch(() => {}); } catch { /* Cleanup cannot extend the request deadline. */ }
   };
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => { controller.abort(); reject(unavailable()); }, timeout);
-  });
+  let rejectDeadline!: (error: Error) => void;
+  const abort = () => { controller.abort(); rejectDeadline(unavailable()); };
+  const deadline = new Promise<never>((_resolve, reject) => { rejectDeadline = reject; timer = setTimeout(abort, timeout); });
+  input.signal?.addEventListener("abort", abort, { once: true });
   try {
-    const pending = Promise.resolve().then(() => input.fetchImpl(input.url, {
-      method: input.method, headers: input.headers, ...(input.body === undefined ? {} : { body: input.body }),
-      signal: controller.signal, redirect: "error", credentials: "omit", cache: "no-store",
-    }));
+    const pending = Promise.resolve().then(() => {
+      if (controller.signal.aborted) throw unavailable();
+      return input.fetchImpl(input.url, {
+        method: input.method, headers: input.headers, ...(input.body === undefined ? {} : { body: input.body }),
+        signal: controller.signal, redirect: "error", credentials: "omit", cache: "no-store",
+      });
+    });
     void pending.then(late => {
       if (controller.signal.aborted) { try { cancelBody(late?.body); } catch { /* A late response is not a new receipt. */ } }
     }, () => {});
@@ -415,6 +420,7 @@ async function readVideoProviderJson(input: {
     throw unavailable(confirmedFailureStatus);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    input.signal?.removeEventListener("abort", abort);
     controller.abort();
     if (reader) { try { void reader.cancel().catch(() => {}); } catch { /* Never await stalled cleanup. */ } }
     else cancelBody(response?.body);
@@ -427,6 +433,7 @@ export async function createVideoJob(input: {
   prompt: string;
   size: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<VideoJob> {
   const payload: Record<string, unknown> = {
     model: input.config.videoModel,
@@ -445,6 +452,7 @@ export async function createVideoJob(input: {
     },
     body: JSON.stringify(payload),
     timeoutMs: input.timeoutMs,
+    signal: input.signal,
   });
 
   const job = readVideoJob(body);
@@ -459,6 +467,7 @@ export async function fetchVideoJob(input: {
   config: GenerationConfig;
   jobId: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<VideoJob> {
   const body = await readVideoProviderJson({
     fetchImpl: input.fetchImpl,
@@ -466,6 +475,7 @@ export async function fetchVideoJob(input: {
     method: "GET",
     headers: { Authorization: `Bearer ${input.config.apiKey}` },
     timeoutMs: input.timeoutMs,
+    signal: input.signal,
   });
 
   const job = readVideoJob(body);
@@ -540,10 +550,11 @@ export async function downloadVideoContent(input: {
   config: GenerationConfig;
   jobId: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<Buffer> {
   const timeout = input.timeoutMs ?? 15_000;
   const unavailable = () => new GenerationProviderError(502, "Не удалось подтвердить загрузку файла ролика.");
-  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 15_000) throw unavailable();
+  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 15_000 || input.signal?.aborted) throw unavailable();
   const url = `https://api.openai.com/v1/videos/${encodeURIComponent(input.jobId)}/content?variant=video`;
   const controller = new AbortController();
   let response: GenerationFetchResponse | undefined;
@@ -552,14 +563,18 @@ export async function downloadVideoContent(input: {
   const cancelBody = (body: GenerationFetchResponse["body"]) => {
     try { void body?.cancel?.().catch(() => {}); } catch { /* Cleanup must not extend the download deadline. */ }
   };
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => { controller.abort(); reject(unavailable()); }, timeout);
-  });
+  let rejectDeadline!: (error: Error) => void;
+  const abort = () => { controller.abort(); rejectDeadline(unavailable()); };
+  const deadline = new Promise<never>((_resolve, reject) => { rejectDeadline = reject; timer = setTimeout(abort, timeout); });
+  input.signal?.addEventListener("abort", abort, { once: true });
   try {
-    const pending = Promise.resolve().then(() => input.fetchImpl(url, {
-      method: "GET", headers: { Authorization: `Bearer ${input.config.apiKey}` }, signal: controller.signal,
-      redirect: "error", credentials: "omit", cache: "no-store",
-    }));
+    const pending = Promise.resolve().then(() => {
+      if (controller.signal.aborted) throw unavailable();
+      return input.fetchImpl(url, {
+        method: "GET", headers: { Authorization: `Bearer ${input.config.apiKey}` }, signal: controller.signal,
+        redirect: "error", credentials: "omit", cache: "no-store",
+      });
+    });
     void pending.then(late => {
       if (controller.signal.aborted) { try { cancelBody(late?.body); } catch { /* A malformed late receipt is already rejected. */ } }
     }, () => {});
@@ -597,6 +612,7 @@ export async function downloadVideoContent(input: {
     throw unavailable();
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    input.signal?.removeEventListener("abort", abort);
     controller.abort();
     if (reader) { try { void reader.cancel().catch(() => {}); } catch { /* Never await stalled cancellation. */ } }
     else cancelBody(response?.body);

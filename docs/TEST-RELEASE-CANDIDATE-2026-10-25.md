@@ -220,6 +220,14 @@ recovery keeps the original handle. The combined 1325-case set is local only,
 not an end-to-end API budget or lost-provider-ID reconciliation. The G5 family
 gate above remains, and this accumulated branch is not an approved release.
 
+Later G5-C59 local acceptance: [one video request lifetime](VIDEO-REQUEST-BUDGET-2026-10-26.md).
+The two video routes now have one 50-second application wait budget through
+auth/quota/SDK/provider/proof/response, plus client-disconnect retirement and
+same-key/free-poll recovery of selected late commits. Final expanded set:
+1358/1358, full build/169 cold starts. This supersedes only the selected local
+two-route wait gap, not real host/Storage/worker acceptance, lost provider-ID or
+unknown quota reconciliation, other request families, or the G5 family gate.
+
 Later local G1-C6/G7-C36 acceptance: [operator command / raw-chain receipt](OPERATOR-COMMAND-LEASE-2026-10-26.md).
 Exact raw 009-105, 97 files, native 203/203; 105 composes with final default ACLs
 and all effective browser/row-security checks. Four departed-author accept/decline

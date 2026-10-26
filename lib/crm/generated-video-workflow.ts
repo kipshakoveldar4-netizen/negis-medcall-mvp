@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { hasPermission } from "../auth/permissions";
 import { getSupabaseServerClient } from "../supabase/server";
 import { generatedVideoIdentity } from "./generated-video-identity";
+import type { VideoRequestLifetime } from "../content-studio/video-request-lifetime";
 
 type Row = Record<string, unknown>;
 export type GeneratedVideoActor = { workspaceId: string; staffUserId: string; userId: string };
@@ -10,6 +11,7 @@ export type GeneratedVideoWorkflowActor = GeneratedVideoActor;
 export type GeneratedVideoWorkflowConfig = {
   supabase: SupabaseClient; origin: string; serviceRoleKey: string;
   enabled: boolean; rawBucket: string; outputBucket: string;
+  requestLifetime?: VideoRequestLifetime;
 };
 export type GeneratedVideoAsset = {
   id: string; workspaceId: string; fileName: string; fileType: "video"; mimeType: "video/mp4";
@@ -106,7 +108,8 @@ function identity(actor: GeneratedVideoActor, key: string) {
   catch { throw invalid(); }
 }
 
-async function bounded<T>(operation: () => PromiseLike<T>): Promise<T> {
+async function bounded<T>(config: GeneratedVideoWorkflowConfig, operation: () => PromiseLike<T>): Promise<T> {
+  if (config.requestLifetime) return config.requestLifetime.run(operation, 20_000);
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([Promise.resolve().then(operation), new Promise<never>((_resolve, reject) => {
@@ -130,7 +133,7 @@ async function rpc(config: GeneratedVideoWorkflowConfig, name: string, args: Row
   // dispatch nonce or generation key would be a new paid action, not a retry.
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const { data, error } = await bounded(() => config.supabase.rpc(name, args));
+      const { data, error } = await bounded(config, () => config.supabase.rpc(name, args));
       if (error) throw knownError(error) || unavailable();
       return data;
     } catch (error) { if (error instanceof GeneratedVideoWorkflowError && error.status !== 503) throw error; }
@@ -142,7 +145,7 @@ async function liveActor(config: GeneratedVideoWorkflowConfig, actor: GeneratedV
   actorArgs(actor);
   let row: Row;
   try {
-    const { data, error } = await bounded(() => config.supabase.from("staff_users").select("id,workspace_id,auth_user_id,role,status")
+    const { data, error } = await bounded(config, () => config.supabase.from("staff_users").select("id,workspace_id,auth_user_id,role,status")
       .eq("id", actor.staffUserId).eq("workspace_id", actor.workspaceId).eq("auth_user_id", actor.userId).maybeSingle());
     if (error) throw unavailable();
     row = object(data);
@@ -155,7 +158,7 @@ async function liveActor(config: GeneratedVideoWorkflowConfig, actor: GeneratedV
 
 async function privateBucket(config: GeneratedVideoWorkflowConfig): Promise<void> {
   try {
-    const { data, error } = await bounded(() => config.supabase.storage.getBucket(config.rawBucket));
+    const { data, error } = await bounded(config, () => config.supabase.storage.getBucket(config.rawBucket));
     const row = object(data);
     if (error || row.id !== config.rawBucket || (row.name !== undefined && row.name !== config.rawBucket) || row.public !== false
       || !size(row.file_size_limit, 500 * 1024 * 1024) || row.file_size_limit < MAX_INPUT_BYTES
@@ -169,7 +172,7 @@ async function privateBucket(config: GeneratedVideoWorkflowConfig): Promise<void
 
 async function publicBucket(config: GeneratedVideoWorkflowConfig): Promise<void> {
   try {
-    const { data, error } = await bounded(() => config.supabase.storage.getBucket(config.outputBucket));
+    const { data, error } = await bounded(config, () => config.supabase.storage.getBucket(config.outputBucket));
     const row = object(data);
     if (error || row.id !== config.outputBucket || row.public !== true || !size(row.file_size_limit) || row.file_size_limit < MAX_INPUT_BYTES
       || !Array.isArray(row.allowed_mime_types) || !row.allowed_mime_types.includes("video/mp4")
@@ -338,7 +341,11 @@ async function proveBytes(config: GeneratedVideoWorkflowConfig, input: {
     || (input.private ? input.bucket !== config.rawBucket : input.bucket !== config.outputBucket)
     || !/^[a-z0-9/._-]+$/.test(input.path) || input.path.split("/").some(part => !part || part === "." || part === "..")) throw unavailable();
   const url = `${config.origin}/storage/v1/object/${input.private ? "" : "public/"}${input.bucket}/${input.path}`;
+  config.requestLifetime?.assertActive();
   const controller = new AbortController();
+  const abort = () => controller.abort();
+  config.requestLifetime?.signal.addEventListener("abort", abort, { once: true });
+  const wait = <T>(operation: () => PromiseLike<T>) => config.requestLifetime ? config.requestLifetime.run(operation) : operation();
   let timer: ReturnType<typeof setTimeout> | undefined, reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => { controller.abort(); reject(unavailable()); }, 10_000);
@@ -349,7 +356,7 @@ async function proveBytes(config: GeneratedVideoWorkflowConfig, input: {
     void pending.then(response => {
       if (controller.signal.aborted) { try { void response.body?.cancel().catch(() => {}); } catch { /* Late body cleanup is best effort. */ } }
     }, () => {});
-    const response = await Promise.race([pending, deadline]);
+    const response = await wait(() => Promise.race([pending, deadline]));
     reader = response.body?.getReader();
     if (response.redirected || (response.url && response.url !== url)) throw unavailable();
     // Only a definite HTTP 404 is absence. Unknown SDK/network/body failures
@@ -361,7 +368,7 @@ async function proveBytes(config: GeneratedVideoWorkflowConfig, input: {
     const digest = createHash("sha256");
     let bytes = 0;
     for (;;) {
-      const part = await Promise.race([reader.read(), deadline]);
+      const part = await wait(() => Promise.race([reader!.read(), deadline]));
       if (part.done) break;
       if (!part.value.byteLength) throw unavailable();
       bytes += part.value.byteLength;
@@ -373,6 +380,7 @@ async function proveBytes(config: GeneratedVideoWorkflowConfig, input: {
   } catch { throw unavailable(); }
   finally {
     if (timer) clearTimeout(timer);
+    config.requestLifetime?.signal.removeEventListener("abort", abort);
     controller.abort();
     if (reader) { try { void reader.cancel().catch(() => {}); } catch { /* Never await a stalled cleanup. */ } }
   }
@@ -486,7 +494,7 @@ export async function receiveGeneratedVideoInput(config: GeneratedVideoWorkflowC
   if (!present) {
     await liveActor(config, actor);
     try {
-      const reply = await bounded(() => config.supabase.storage.from(config.rawBucket).upload(String(bound.operation.raw_path), bytes,
+      const reply = await bounded(config, () => config.supabase.storage.from(config.rawBucket).upload(String(bound.operation.raw_path), bytes,
         { contentType: "video/mp4", upsert: false }));
       if (reply.error || reply.data?.path !== bound.operation.raw_path) throw unavailable();
     } catch { /* The exact immutable private GET, not the upload ACK, decides whether queueing is safe. */ }
