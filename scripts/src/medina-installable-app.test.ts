@@ -102,11 +102,10 @@ test("IA5 обновление вообще возможно: отпечаток
   // приложение продолжает открывать старую сборку.
   assert.ok(sw.includes("__BUILD_ID__"), "в исходнике стоит место под отпечаток");
   assert.ok(/stampServiceWorker/.test(config), "плагин сборки его проставляет");
-  assert.ok(/replace\("__BUILD_ID__", buildId\)/.test(config), "именно заменой");
-  assert.ok(
-    /createHash\("sha256"\)\.update\(assets/.test(config),
-    "отпечаток от имён собранных файлов, а не от времени: сборка без изменений не должна давать лишнего обновления",
-  );
+  const stamp = await readFile(path.join(negis, "pwa-build.mjs"), "utf8");
+  assert.ok(config.includes("buildServiceWorker(source, files)"), "build uses the tested public-file stamping contract");
+  assert.ok(stamp.includes("source.replace('__BUILD_ID__', buildId)"), "the build marker is replaced");
+  assert.ok(stamp.includes("createHash('sha256')") && stamp.includes("digest.update(name)"), "fingerprint includes named public file bytes, not a clock");
 });
 
 test("IA6 новая версия не применяется молча", async () => {

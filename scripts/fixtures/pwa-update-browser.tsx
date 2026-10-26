@@ -18,6 +18,7 @@ function Fixture() {
   return <>
     <aside className="flex flex-wrap items-center gap-3 border-b bg-amber-50 p-3 text-xs" aria-label="ТЕСТ: управление PWA">
       <strong>ТЕСТ: отдельный локальный service worker, без рабочих данных</strong>
+      {import.meta.env.VITE_PWA_FIXTURE_LABEL && <output data-testid="pwa-built-label">{import.meta.env.VITE_PWA_FIXTURE_LABEL}</output>}
       <button type="button" className="neu-btn" onClick={async () => {
         // crm-browser-mocks denies fetch; this sole fixture control uses a
         // same-origin XHR to the closed in-memory version endpoint instead.

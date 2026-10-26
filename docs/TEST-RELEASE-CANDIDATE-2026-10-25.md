@@ -138,6 +138,16 @@ retained handles and per-shell lookup pass 16 local VM controls and the actual
 fully activated worker sequence. First upgrade from an unfenced deployed worker,
 installed/offline/physical-device coverage and current Preview remain pending.
 
+**G7-C34 local delta, base ea889ac:** [built shell/offline receipt](PWA-BUILT-OFFLINE-2026-10-26.md)
+fixes actual Vite dash-hash recognition and missing first-install graph caching.
+Public-file byte stamping and worker precache are a coordinated change. First
+offline reload, fonts, private-API exclusion and rejected incomplete install pass
+on an owned built fixture; actual root output has 69 attested public paths.
+The frozen old prompt still loses another tab's unsaved form on first upgrade:
+this is a recorded release constraint, not fixed by a green characterization.
+Save/close legacy tabs and obtain first-rollout approval before any real release.
+Installed/real Router/real auth/offline CRUD/current Preview remain unaccepted.
+
 The latest recorded content/security Preview is **6c11l89kr / f18f411**,
 deployment `dpl_8CXaiuXmMfBY1EfrjqtMT2GNVjWv`: READY, target=null, aliases=[],
 846/846 sources matched. G5-C45 records site-test in loaded JS, absence of the

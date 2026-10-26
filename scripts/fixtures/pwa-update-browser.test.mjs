@@ -95,10 +95,13 @@ test('real two-version PWA update, navigation geometry and cancelled reload reco
   const version = () => evaluate(`return await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Worker build reply timeout')),3000);
     const receive=event=>{if(event.data?.type==='build-id'){clearTimeout(timer);navigator.serviceWorker.removeEventListener('message',receive);resolve(event.data.buildId)}};
     navigator.serviceWorker.addEventListener('message',receive);navigator.serviceWorker.controller.postMessage('build-id');});`);
+  const artifacts = path.join(root, 'node_modules/.cache/pwa-update-20261026');
+  await mkdir(artifacts, { recursive: true });
+  const screenshotFolder = await mkdtemp(path.join(artifacts, 'run-'));
+  t.diagnostic('Screenshots: ' + path.relative(root, screenshotFolder));
   const screenshot = async name => {
     const { data } = await cdp.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
-    const folder = path.join(root, 'node_modules/.cache/pwa-update-20261026'); await mkdir(folder, { recursive: true });
-    await writeFile(path.join(folder, name + '.png'), Buffer.from(data, 'base64'));
+    await writeFile(path.join(screenshotFolder, name + '.png'), Buffer.from(data, 'base64'));
   };
   await cdp.call('Page.navigate', { url: server.origin + '/appointments?fixturePurpose=mortgage_leads&fixtureRole=admin' });
   await wait('return navigator.serviceWorker?.controller?.state===\'activated\' && !![...document.querySelectorAll("button")].find(n=>n.textContent===\'Новая встреча\'&&!n.disabled)', 'Initial app and fully activated controller must load');

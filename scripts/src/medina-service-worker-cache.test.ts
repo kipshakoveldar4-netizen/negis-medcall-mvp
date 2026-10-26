@@ -142,6 +142,30 @@ test('storage failure during activation still claims clients and online requests
   assert.equal(await (await response).text(), 'online with unavailable ownership marker');
 });
 
+test('a failed precache rejects installation without changing the current owner', async () => {
+  const caches = storage(), old = worker(caches, 'old'), candidate = worker(caches, 'candidate');
+  await old.lifecycle('install'); await old.lifecycle('activate');
+  const open = caches.open.bind(caches);
+  caches.open = async name => {
+    const cache = await open(name);
+    if (name === 'medina-shell-candidate') cache.addAll = async () => { throw Error('Synthetic missing built file'); };
+    return cache;
+  };
+  await assert.rejects(candidate.lifecycle('install'), /missing built file/);
+  assert.equal(candidate.claimed(), 0);
+  const marker = await caches.match('https://pwa.example.test/__medina_active_shell', { cacheName: 'medina-active-shell' });
+  assert.equal(await marker!.text(), 'old'); assert.ok(caches.caches.has('medina-shell-old'));
+});
+
+for (const filename of ['index-Abcd123_.js', 'index-Abcd123_.css', 'index.Abcd123_.js']) {
+  test(`actual Vite/dot hash spelling is cached: ${filename}`, async () => {
+    const caches = storage(), app = worker(caches, 'current'); await app.lifecycle('install'); await app.lifecycle('activate');
+    const url = 'https://pwa.example.test/assets/' + filename, response = app.request(url, 'cors'); assert.ok(response);
+    app.network.resolve(new Response('public built bytes')); assert.equal(await (await response).text(), 'public built bytes');
+    assert.ok(caches.caches.get('medina-shell-current')!.rows.has(url));
+  });
+}
+
 test('API, auth, no-sw, external, non-GET and ordinary non-shell requests never open a cache', async () => {
   const caches = storage(), app = worker(caches, 'current');
   for (const [url, mode, method] of [

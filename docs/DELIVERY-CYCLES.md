@@ -5609,6 +5609,42 @@ loopback-стенд использует настоящий worker со смен
 Installed/offline/iOS/physical-device, текущий изолированный Preview и прочие
 G1–G8 остаются. Production, Baspana, салоны, WhatsApp, базы и расходы не менялись.
 
+### Цикл G7-C34: собранная оболочка без сети и первый legacy upgrade — локально, 26 октября
+
+База `ea889ac`; [приёмка, ограничения и снимки](PWA-BUILT-OFFLINE-2026-10-26.md).
+Воспроизведены нераспознанные dash-hashed JS/CSS Vite и отсутствие начального
+precache графа. Baseline **1 pass / 4 fail**, включая parent; API exclusion уже
+работал. Первый offline reload не запускал JS/CSS даже после online reload.
+
+- Общий для настоящей сборки и теста public-file stamper подставляет точный
+  список HTML/manifest/assets/Inter/PNG, отпечаток от их байтов и worker source.
+  Непубличные/remote/API/env/traversal inputs запрещены. Worker принимает dash
+  и dot hashes, precache-ит граф при install и не активирует неполную оболочку.
+- Первый повторный запуск собранного стенда проходит offline без warm online
+  reload и с отключённым HTTP cache/недоступным сервером. Шрифт доступен;
+  вымышленный API ответ онлайн не кэшируется и офлайн недоступен. Это оболочка,
+  а не offline CRM/customer-data. Реальные backend/auth не исполняются.
+- Frozen f18f411 worker/prompt обновился локально ровно один раз по явному
+  клику. Но другая уже открытая legacy-вкладка потеряла тестовую форму из-за
+  своего старого unconditional reload. Этот зелёный characterization test
+  фиксирует **незакрытое условие выпуска**, не безопасную миграцию без потерь.
+  Для первого выпуска нужны сохранение работы/закрытие старых вкладок и отдельное
+  одобрение владельца. Рабочие вкладки/данные сейчас не открывались.
+- Недоступный JS кандидата даёт redundant install и сохраняет текущий worker.
+  Итоговый joined run **20/20** = built browser 8 (включая parent и известный
+  плохой legacy case) + dev browser 11 + post-build attestation 1, не browser.
+  No-network **814/814**, прежние 41 reader/IPC guards; full build/оба API modes/
+  types/cold start **143**/Vite прошли. Actual output **7f5bfc998664**, 69 public
+  paths: bytes совпали, настоящий application JS не запускался в браузере.
+- Offline PNG 756×488 — default encoded frame, не mobile/desktop acceptance.
+  Новые шесть dev viewports сохраняют C32/C33 pixels. Исторические base PNG
+  восстановлены только после проверки точного совпадения hashes; новые снимки
+  идут в уникальные run folders. Owned test browsers/profiles/servers убраны.
+
+Ни installed PWA/start route, ни реальные данные/авторизация без сети, iOS,
+все роли/формы и текущий изолированный Preview этим не приняты. Production,
+Baspana, салоны, WhatsApp, базы, реклама и расходы не менялись. Это не 100%.
+
 ### Цикл G2-C13: статус «Отложенные» — готов только локально, 22 октября
 
 - Код/тесты/документация в **9c42ef82f335fc621b8d985325d14d7c889d28f3**.

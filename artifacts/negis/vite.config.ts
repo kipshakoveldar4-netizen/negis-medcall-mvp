@@ -5,7 +5,7 @@ import path from "path";
 import { pathToFileURL } from "node:url";
 // Статически, а не через await import: загрузчик конфига Vite перехватывает
 // динамические импорты внутри плагина и падает на них.
-import { createHash } from "node:crypto";
+import { buildServiceWorker } from "./pwa-build.mjs";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -209,9 +209,9 @@ function targetingApiDevMiddleware(): Plugin {
  * установленное приложение продолжает открывать старую сборку — то есть
  * «обновляется само» перестаёт быть правдой.
  *
- * Отпечаток берётся от ИМЁН собранных файлов, а не от времени: имена содержат
- * хэш содержимого, поэтому сборка без изменений даёт тот же отпечаток и лишнего
- * обновления не будет.
+ * Отпечаток включает публичные файлы оболочки и worker, а не время. Точный
+ * список файлов также подставляется в precache: первый запуск без сети не
+ * должен зависеть от того, успел ли worker перехватить загрузку JS/CSS.
  */
 function stampServiceWorker(): Plugin {
   return {
@@ -231,9 +231,14 @@ function stampServiceWorker(): Plugin {
         return;
       }
 
-      const assets = await readdir(path.join(outDir, "assets")).catch(() => [] as string[]);
-      const buildId = createHash("sha256").update(assets.sort().join("|")).digest("hex").slice(0, 12);
-      await writeFile(swPath, source.replace("__BUILD_ID__", buildId), "utf8");
+      const assets = await readdir(path.join(outDir, "assets"));
+      const names = ["index.html", "manifest.webmanifest", ...assets.map(name => `assets/${name}`),
+        "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png",
+        "fonts/inter/inter-latin.woff2", "fonts/inter/inter-cyrillic.woff2", "fonts/inter/inter-cyrillic-ext.woff2"];
+      const files = new Map<string, Uint8Array>();
+      for (const name of names) files.set(name, await readFile(path.join(outDir, name)));
+      const stamped = buildServiceWorker(source, files);
+      await writeFile(swPath, stamped.script, "utf8");
     },
   };
 }

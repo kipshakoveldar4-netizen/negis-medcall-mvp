@@ -21,6 +21,7 @@
 // сразу и не спрашивать сеть.
 
 const BUILD_ID = "__BUILD_ID__";
+const SHELL_ASSETS = /* __SHELL_ASSETS__ */ ["/manifest.webmanifest"];
 const SHELL_CACHE = `medina-shell-${BUILD_ID}`;
 const ACTIVE_CACHE = "medina-active-shell";
 const ACTIVE_KEY = new URL("/__medina_active_shell", self.location.origin).href;
@@ -50,7 +51,8 @@ function isNeverCached(url) {
 
 /** Файл сборки с хэшем в имени: содержимое неизменяемо. */
 function isImmutableAsset(url) {
-  return /\/assets\/.+\.[0-9a-zA-Z_-]{8,}\.(js|css|woff2?|png|jpg|svg)$/.test(url.pathname);
+  return /^\/assets\/[\w.-]+[.-][\w-]{8,}\.(js|css|woff2?|png|jpg|svg)$/.test(url.pathname)
+    || SHELL_ASSETS.includes(url.pathname + url.search);
 }
 
 self.addEventListener("install", (event) => {
@@ -59,8 +61,7 @@ self.addEventListener("install", (event) => {
   event.waitUntil(
     caches
       .open(SHELL_CACHE)
-      .then((cache) => cache.addAll(["/", "/manifest.webmanifest"]))
-      .catch(() => undefined),
+      .then((cache) => cache.addAll(["/", ...SHELL_ASSETS])),
   );
 });
 
