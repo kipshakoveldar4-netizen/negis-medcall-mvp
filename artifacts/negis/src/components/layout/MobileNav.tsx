@@ -310,6 +310,8 @@ export function MobileNav() {
               className="mobile-nav-drawer-item mt-2 w-full"
               onClick={() => {
                 if (!isCurrent()) return;
+                // The profile must capture the retained More button, not this removed menu item.
+                restoreDrawerFocus.current = true;
                 drawerOpen.current = false;
                 setOpen(false);
                 setShowProfile(true);

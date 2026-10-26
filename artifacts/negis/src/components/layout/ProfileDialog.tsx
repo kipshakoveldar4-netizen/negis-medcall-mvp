@@ -242,6 +242,13 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
     const trigger = doc.activeElement instanceof view.HTMLElement ? doc.activeElement : null;
     const generation = ++focusScope.current.generation;
     let active = true;
+    const scroll = { x: view.scrollX, y: view.scrollY };
+    const styles: Array<{ element: HTMLElement; property: string; value: string; priority: string; owned: string }> = [];
+    const lockStyle = (element: HTMLElement, property: string, value: string) => {
+      styles.push({ element, property, value: element.style.getPropertyValue(property),
+        priority: element.style.getPropertyPriority(property), owned: value });
+      element.style.setProperty(property, value, 'important');
+    };
     // Screen changes revoke opener restoration, not containment of a profile
     // that still belongs to the current personal account/session.
     const live = () => active && panel.isConnected && isCurrent();
@@ -251,7 +258,7 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
     const controls = () => Array.from(panel.querySelectorAll<HTMLElement>(
       'button, input:not([type="hidden"]), select, textarea, a[href], [tabindex], [contenteditable="true"]',
     )).filter(element => element.tabIndex >= 0 && available(element));
-    const focusInside = () => (controls()[0] ?? panel).focus({ preventScroll: true });
+    const focusInside = () => (controls()[0] ?? panel).focus();
     const ensureFocus = () => {
       if (live() && (!panel.contains(doc.activeElement)
         || (doc.activeElement instanceof view.HTMLElement && !available(doc.activeElement)))) focusInside();
@@ -266,18 +273,33 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
       const outside = !items.includes(doc.activeElement as HTMLElement);
       if (!first || !last) { event.preventDefault(); panel.focus({ preventScroll: true }); return; }
       if (event.shiftKey ? doc.activeElement === first || outside : doc.activeElement === last || outside) {
-        event.preventDefault(); (event.shiftKey ? last : first).focus({ preventScroll: true });
+        event.preventDefault(); (event.shiftKey ? last : first).focus();
       }
     };
     doc.addEventListener('focusin', ensureFocus, true);
     doc.addEventListener('keydown', containKeys, true);
     maintainFocus.current = ensureFocus;
+    // Keep backdrop gestures off the page, including mobile overscroll. The
+    // dialog retains its own scroll; cleanup restores only still-owned styles.
+    lockStyle(doc.documentElement, 'overflow', 'hidden');
+    lockStyle(doc.documentElement, 'overscroll-behavior', 'none');
+    lockStyle(doc.body, 'overflow', 'hidden');
+    lockStyle(doc.body, 'position', 'fixed');
+    lockStyle(doc.body, 'top', `${-scroll.y}px`);
+    lockStyle(doc.body, 'left', `${-scroll.x}px`);
+    lockStyle(doc.body, 'width', '100%');
     focusInside();
     return () => {
       active = false;
       doc.removeEventListener('focusin', ensureFocus, true);
       doc.removeEventListener('keydown', containKeys, true);
       if (maintainFocus.current === ensureFocus) maintainFocus.current = null;
+      for (const { element, property, value, priority, owned } of styles) {
+        if (element.style.getPropertyValue(property) !== owned || element.style.getPropertyPriority(property) !== 'important') continue;
+        if (value) element.style.setProperty(property, value, priority); else element.style.removeProperty(property);
+      }
+      // Access/context loss releases the lock without scrolling a replacement screen.
+      if (focusScope.current.valid && !lifetime.current.closed) view.scrollTo(scroll.x, scroll.y);
       // Normal close/success invalidates without `closed`; auth invalidation
       // sets `closed`. A raw unmount must not restore an old screen's opener.
       if (!lifetime.current.invalidated || lifetime.current.closed) return;

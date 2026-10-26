@@ -45,6 +45,8 @@ export const fixture={
 export function useAuth(){return{...useSyncExternalStore(fn=>{listeners.add(fn);return()=>listeners.delete(fn);},()=>current),
  applyConfirmedProfile(confirmed,guard){if(guard()&&confirmed.id===current.user?.id)fixture.patch({user:{...current.user,user_metadata:confirmed.user_metadata}});}};}
 export const supabase={auth:{onAuthStateChange(fn){sdk.add(fn);return{data:{subscription:{unsubscribe(){sdk.delete(fn);}}}};}}};
+export const hasSupabaseFrontendEnv=true;
+export function useLocation(){return['/leads',()=>{throw Error('Navigation is outside the profile handoff test');}];}
 export function verifyCurrentPassword(){fixture.stage='verification';return verification.promise;}
 export const toast={success:value=>fixture.messages.push('success:'+value),error:value=>fixture.messages.push('error:'+value)};
 export function PushSettings(){useAuth();return fixture.pushVisible?<button id="synthetic-push">Synthetic push control</button>:null;}
@@ -62,11 +64,12 @@ async function bundle() {
   const entry = `
 import React,{useState} from 'react';import {createRoot} from 'react-dom/client';import {flushSync} from 'react-dom';
 import {ProfileDialog} from ${JSON.stringify(path.join(frontend, 'src/components/layout/ProfileDialog.tsx').replaceAll('\\', '/'))};
+import {MobileNav} from ${JSON.stringify(path.join(frontend, 'src/components/layout/MobileNav.tsx').replaceAll('\\', '/'))};
 import {fixture} from 'profile-modal-fake';
-function App(){const [open,setOpen]=useState(false),[opener,setOpener]=useState(true);fixture.hide=()=>flushSync(()=>setOpen(false));fixture.removeOpener=()=>flushSync(()=>setOpener(false));
- return <>{opener&&<button id="opener" onClick={()=>setOpen(true)}>Synthetic opener</button>}<button id="outside">Outside</button>
+function App({navigation=false}){const [open,setOpen]=useState(false),[opener,setOpener]=useState(true);fixture.hide=()=>flushSync(()=>setOpen(false));fixture.removeOpener=()=>flushSync(()=>setOpener(false));
+ return <>{navigation?<MobileNav/>:opener&&<button id="opener" onClick={()=>setOpen(true)}>Synthetic opener</button>}<button id="outside">Outside</button>
  {open&&<ProfileDialog onClose={()=>{fixture.remember();fixture.closes++;setOpen(false);}}/>}<button id="after">After</button></>;}
-let app;fixture.mount=()=>{fixture.reset();app=createRoot(document.getElementById('root'));flushSync(()=>app.render(<App/>));};
+let app;fixture.mount=(navigation=false)=>{fixture.reset();app=createRoot(document.getElementById('root'));flushSync(()=>app.render(<App navigation={navigation}/>));};
 fixture.unmount=()=>{fixture.remember();flushSync(()=>app.unmount());};
 document.addEventListener('keydown',event=>{if(event.key==='Escape')fixture.outerEscapes++;});
 fixture.mount();window.__profileModal=fixture;`;
@@ -74,7 +77,7 @@ fixture.mount();window.__profileModal=fixture;`;
     bundle: true, write: false, platform: 'browser', format: 'iife', jsx: 'automatic',
     define: { 'process.env.NODE_ENV': '"production"', 'import.meta.env': JSON.stringify({ VITE_SUPABASE_URL: 'https://profile.example.test', VITE_SUPABASE_ANON_KEY: 'synthetic-public-key' }) },
     plugins: [{ name: 'isolated-profile-modal', setup(build: any) {
-      build.onResolve({ filter: /^(profile-modal-fake|@\/contexts\/AuthContext|@\/lib\/supabase|sonner|\.\/PushSettings)$/ }, () => ({ path: 'mocks', namespace: 'fixture' }));
+      build.onResolve({ filter: /^(profile-modal-fake|@\/contexts\/AuthContext|@\/lib\/supabase|sonner|wouter|\.\/PushSettings)$/ }, () => ({ path: 'mocks', namespace: 'fixture' }));
       build.onLoad({ filter: /.*/, namespace: 'fixture' }, () => ({ contents: mocks, loader: 'tsx', resolveDir: frontend }));
       build.onResolve({ filter: /^@\// }, (args: { path: string }) => ({ path: path.join(frontend, 'src', args.path.slice(2) + '.ts') }));
     } }],
@@ -113,7 +116,7 @@ test('owned React ProfileDialog keyboard/focus modality at 390px and 1440px', { 
   const script = await bundle();
   // Owned geometry only, not an application build or visual redesign.
   const stylesheet = await readFile(path.join(frontend, 'src/index.css'), 'utf8');
-  const controls = ['neu-input', 'neu-btn', 'neu-btn-primary', 'neu-icon-btn'].map(name => {
+  const controls = ['neu-input', 'neu-btn', 'neu-btn-primary', 'neu-icon-btn', 'mobile-nav-backdrop', 'mobile-nav-sheet'].map(name => {
     const rule = stylesheet.match(new RegExp(`\\.${name}\\s*\\{[^}]+\\}`)); assert.ok(rule); return rule[0];
   }).join('\n');
   const server = createServer((req, res) => {
@@ -128,6 +131,7 @@ test('owned React ProfileDialog keyboard/focus modality at 390px and 1440px', { 
       .fixed{position:fixed}.inset-0{inset:0}.flex{display:flex}.items-center{align-items:center}.justify-center{justify-content:center}
       .justify-between{justify-content:space-between}.p-4{padding:16px}.p-7{padding:28px}.w-full{width:100%}
       [role=dialog]{max-width:360px;max-height:90dvh;overflow-y:auto;background:white}.space-y-3>*+*,.space-y-4>*+*{margin-top:12px}
+      .mobile-bottom-nav{position:fixed;bottom:0;display:flex;width:100%;background:white}@media(min-width:1024px){.lg\\:hidden{display:none}}
       ${controls}</style></head><body><div id="root"></div><button id="replacement">Replacement screen</button><script src="/bundle.js"></script></body></html>`);
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
@@ -174,7 +178,7 @@ test('owned React ProfileDialog keyboard/focus modality at 390px and 1440px', { 
     await evaluate(`const f=window.__profileModal;f.unmount();f.mount();f.patch(${JSON.stringify(patch)});`);
     await open();
   };
-  const open = () => evaluate("const node=document.getElementById('opener');node.focus();node.click();");
+  const open = () => evaluate("const node=document.getElementById('opener');node.focus({preventScroll:true});node.click();");
   const key = async (key: string, shift = false) => {
     const value = key === 'Tab' ? 9 : 27;
     await cdp!.call('Input.dispatchKeyEvent', { type: 'keyDown', key, code: key, windowsVirtualKeyCode: value, modifiers: shift ? 8 : 0 });
@@ -190,6 +194,85 @@ test('owned React ProfileDialog keyboard/focus modality at 390px and 1440px', { 
 
   for (const width of [390, 1440]) {
     await cdp.call('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: width === 390 });
+    if (width === 390) for (const method of ['Escape', 'cancel'] as const) {
+      await t.test(`real MobileNav -> ProfileDialog ${method} returns focus to the retained More button`, async () => {
+        await evaluate("const f=window.__profileModal;f.unmount();f.mount(true);const more=document.querySelector('[aria-label=\"Ещё разделы\"]');more.focus();more.click()");
+        try {
+          await evaluate("[...document.querySelectorAll('.mobile-nav-sheet button')].find(n=>n.textContent.includes('Профиль и пароль')).click()");
+          assert.equal(await inside(), true);
+          assert.equal(await evaluate("return document.body.style.position"), 'fixed', 'The profile must own the scroll lock after the drawer releases its lock');
+          if (method === 'Escape') await key('Escape');
+          else await evaluate("[...document.querySelectorAll('[role=dialog] button')].find(n=>n.textContent==='Отмена').click()");
+          await settle();
+          assert.deepEqual(await evaluate("return {profile:!!document.querySelector('[aria-label=\"Профиль сотрудника\"]'),drawer:!!document.getElementById('mobile-nav-drawer'),focused:document.activeElement.getAttribute('aria-label'),position:document.body.style.position,inert:document.getElementById('root').inert}"),
+            { profile: false, drawer: false, focused: 'Ещё разделы', position: '', inert: false });
+        } finally { await evaluate('window.__profileModal.unmount();window.__profileModal.mount()'); }
+      });
+    }
+    await t.test(`${width}px short viewport keeps the keyboard-wrapped button inside the dialog's visible scroll area`, async () => {
+      await cdp!.call('Emulation.setDeviceMetricsOverride', { width, height: 480, deviceScaleFactor: 1, mobile: width === 390 });
+      try {
+        await fresh();
+        assert.ok(await evaluate("const panel=document.querySelector('[role=dialog]');return panel.scrollHeight>panel.clientHeight"), 'Positive control requires a genuinely overflowing dialog');
+        await key('Tab', true); await settle();
+        const result = await evaluate("const p=document.querySelector('[role=dialog]'),r=p.getBoundingClientRect(),b=document.activeElement.getBoundingClientRect();return{label:document.activeElement.textContent,visible:b.top>=r.top&&b.bottom<=r.bottom,scroll:p.scrollTop}");
+        assert.equal(result.label, 'Сохранить'); assert.equal(result.visible, true); assert.ok(result.scroll > 0);
+        await key('Tab'); await settle();
+        assert.ok(await evaluate("const p=document.querySelector('[role=dialog]'),r=p.getBoundingClientRect(),b=document.activeElement.getBoundingClientRect();return document.activeElement.getAttribute('aria-label')==='Закрыть профиль'&&b.top>=r.top&&b.bottom<=r.bottom"));
+      } finally {
+        await evaluate('window.__profileModal.hide()');
+        await cdp!.call('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: width === 390 });
+      }
+    });
+    await t.test(`${width}px native backdrop wheel cannot move the page; close restores its original scroll`, async () => {
+      await evaluate("const f=window.__profileModal;f.unmount();f.mount();document.body.style.minHeight='3000px';window.scrollTo(0,240)");
+      const paint = () => evaluate('await new Promise(requestAnimationFrame);await new Promise(requestAnimationFrame);');
+      const wheel = async () => {
+        await cdp!.call('Input.dispatchMouseEvent', { type: 'mouseWheel', x: 2, y: 400, deltaX: 0, deltaY: 500 });
+        await paint();
+      };
+      try {
+        await paint(); assert.equal(await evaluate('return window.scrollY'), 240);
+        await open(); await paint();
+        const before = await evaluate('return {x:window.scrollX,y:window.scrollY}');
+        await wheel();
+        assert.deepEqual(await evaluate('return {x:window.scrollX,y:window.scrollY}'), before, 'Native wheel must not move the background');
+        assert.deepEqual(await evaluate("return {body:document.body.style.position,top:document.body.style.top,overflow:document.documentElement.style.overflow}"),
+          { body: 'fixed', top: '-240px', overflow: 'hidden' });
+        await key('Escape'); await closed(true); await paint();
+        assert.equal(await evaluate('return window.scrollY'), 240);
+        await wheel(); assert.ok(await evaluate('return window.scrollY>240'), 'Closing must restore usable page scrolling, not swallow the wheel');
+      } finally {
+        await evaluate("window.__profileModal.hide();document.body.style.removeProperty('min-height');window.scrollTo(0,0)");
+      }
+    });
+    await t.test(`${width}px scroll cleanup preserves incoming inline styles and later owners' changes`, async () => {
+      await evaluate("const f=window.__profileModal;f.unmount();f.mount();document.documentElement.style.setProperty('overflow','scroll','important');document.body.style.setProperty('position','relative');document.body.style.setProperty('width','97%','important')");
+      try {
+        await open();
+        assert.equal(await evaluate('return document.body.style.position'), 'fixed');
+        await evaluate("document.body.style.setProperty('width','98%','important')");
+        await key('Escape'); await settle();
+        assert.deepEqual(await evaluate("return {overflow:document.documentElement.style.overflow,priority:document.documentElement.style.getPropertyPriority('overflow'),position:document.body.style.position,width:document.body.style.width,widthPriority:document.body.style.getPropertyPriority('width')}"),
+          { overflow: 'scroll', priority: 'important', position: 'relative', width: '98%', widthPriority: 'important' });
+      } finally {
+        await evaluate("window.__profileModal.hide();document.documentElement.style.removeProperty('overflow');document.body.style.removeProperty('position');document.body.style.removeProperty('width')");
+      }
+    });
+    for (const change of ['account', 'workspace'] as const) await t.test(`${width}px ${change} change releases the lock without restoring an old screen's scroll`, async () => {
+      await evaluate("const f=window.__profileModal;f.unmount();f.mount();document.body.style.minHeight='3000px';window.scrollTo(0,240)");
+      await open();
+      await evaluate("window.__priorScrollTo=window.scrollTo;window.__scrollRestores=[];window.scrollTo=function(...args){window.__scrollRestores.push(args);return window.__priorScrollTo.apply(window,args)}");
+      try {
+        if (change === 'account') await evaluate("window.__profileModal.actor('B')");
+        else { await evaluate("window.__profileModal.patch({clinicId:'replacement-workspace'})"); await key('Escape'); }
+        await settle();
+        assert.deepEqual(await evaluate("return {profile:!!document.querySelector('[role=dialog]'),position:document.body.style.position,restores:window.__scrollRestores}"),
+          { profile: false, position: '', restores: [] });
+      } finally {
+        await evaluate("window.scrollTo=window.__priorScrollTo;delete window.__priorScrollTo;window.__profileModal.hide();document.body.style.removeProperty('min-height');window.scrollTo(0,0)");
+      }
+    });
     await t.test(`${width}px focus entry, native Tab/Shift-Tab wrap and programmatic containment`, async () => {
       await fresh();
       assert.equal(await inside(), true, 'Opening the modal must move focus off the opener');

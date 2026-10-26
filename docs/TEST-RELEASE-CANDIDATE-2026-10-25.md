@@ -117,6 +117,13 @@ The final raw 009-104 chain and actual frontend zone-switch controls pass
 locally. 103/104 + API/UI are a coordinated dependency, not an independent
 frontend release. No current Preview or page-wide common snapshot is claimed.
 
+**G7-C31 local delta, base fe87b23:** [profile/menu acceptance](MOBILE-PROFILE-2026-10-26.md)
+adds current full-application synthetic captures at measured mobile, short-screen
+and desktop sizes, and fixes background scrolling, lost More focus and clipped
+keyboard-wrapped controls. The real profile now participates in the nav handoff
+regression. This is not current Preview, whole-platform visual, PWA or physical
+device acceptance; other G4 residuals remain open.
+
 The latest recorded content/security Preview is **6c11l89kr / f18f411**,
 deployment `dpl_8CXaiuXmMfBY1EfrjqtMT2GNVjWv`: READY, target=null, aliases=[],
 846/846 sources matched. G5-C45 records site-test in loaded JS, absence of the
