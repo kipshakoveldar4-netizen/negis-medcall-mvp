@@ -2,11 +2,15 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { Send, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
 import { operatorApi, useOperatorList } from "@/lib/operatorApi";
 import { OperatorRequests } from "@/components/operators/OperatorRequests";
+import { OperatorCommandRecovery } from "@/components/operators/OperatorCommandRecovery";
+import { useOperatorCommand } from "@/lib/useOperatorCommand";
+import type { OperatorCommandAttempt } from "@/lib/operatorCommandAttempt";
 import {
   arrivalPriceToMinor,
   operatorLeadScopeLabels,
   type OperatorLeadScope,
   type OperatorProfile,
+  type OperatorCommandResult,
 } from "../../../../../lib/crm/operator-contracts";
 
 export function ClinicOperators({ workspaceId, actorId, isSessionCurrent }: {
@@ -24,9 +28,11 @@ export function ClinicOperators({ workspaceId, actorId, isSessionCurrent }: {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [revision, setRevision] = useState(0);
+  const command = useOperatorCommand(actorId, workspaceId, "proposal", isSessionCurrent);
   const mounted = useRef(false);
   // Editing or reloading the view must not unlock an unresolved submission.
   const pending = useRef<object | null>(null);
+  const sentDraft = useRef<{ attempt: OperatorCommandAttempt; selectedId: string; brief: string; price: string; leadScope: OperatorLeadScope } | null>(null);
   const currentView = useRef({ workspaceId, actorId, data: list.data, offset: list.offset,
     selected, brief, price, leadScope });
   const scopeChanged = currentView.current.workspaceId !== workspaceId || currentView.current.actorId !== actorId;
@@ -36,6 +42,7 @@ export function ClinicOperators({ workspaceId, actorId, isSessionCurrent }: {
     currentView.current = { workspaceId, actorId, data: list.data, offset: list.offset, selected, brief, price, leadScope };
     if (scopeChanged) {
       pending.current = null;
+      sentDraft.current = null;
       if (busy) setBusy(false);
       setSelected(null);
       setBrief("");
@@ -49,43 +56,57 @@ export function ClinicOperators({ workspaceId, actorId, isSessionCurrent }: {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
+  function resolved(attempt: OperatorCommandAttempt, result: Exclude<OperatorCommandResult, { state: "unconfirmed" }>) {
+    if (!command.isCurrent()) return;
+    pending.current = null; setBusy(false);
+    if (result.state === "committed") {
+      const draft = sentDraft.current;
+      if (draft?.attempt === attempt && selected?.id === draft.selectedId && brief === draft.brief && price === draft.price && leadScope === draft.leadScope) {
+        setSelected(null); setBrief(""); setPrice("");
+      }
+      setRevision(value => value + 1);
+      setMessage("Результат отправки предложения подтверждён.");
+    } else setMessage("Повтор отправки закрыт.");
+    sentDraft.current = null;
+  }
   async function send(event: React.FormEvent) {
     event.preventDefault();
     const isCurrent = () => mounted.current && isSessionCurrent() && currentView.current === renderedView;
     const isSameScope = () => mounted.current && isSessionCurrent()
       && currentView.current.workspaceId === workspaceId && currentView.current.actorId === actorId;
-    if (pending.current || !actorId || !isCurrent()) return;
+    if (pending.current || command.blocked || !actorId || !isCurrent()) return;
     const amount = arrivalPriceToMinor(price);
     if (!selected || amount === null) {
       setMessage("Укажите цену в тенге, не более двух знаков после запятой.");
       return;
     }
-    const attempt = {};
+    const attempt = command.claim("propose", selected.id);
+    if (!attempt) return;
+    sentDraft.current = { attempt, selectedId: selected.id, brief, price, leadScope };
     pending.current = attempt;
+    const ownsCommand = () => isCurrent() && command.isCurrent(attempt);
     setBusy(true);
     setMessage("");
     try {
-      await operatorApi(
+      const result = await operatorApi<unknown>(
         `clinic-operator-requests?workspaceId=${encodeURIComponent(workspaceId)}`,
         {
           operatorId: selected.id,
           clinicBrief: brief,
           pricePerArrivalMinor: amount,
           leadScope,
+          commandId: attempt.commandId,
         },
         "POST",
         undefined,
         actorId,
-        isCurrent,
+        ownsCommand,
       );
-      if (!isCurrent()) return;
-      setSelected(null);
-      setBrief("");
-      setPrice("");
-      setRevision((value) => value + 1);
-      setMessage("Предложение отправлено оператору.");
+      if (!ownsCommand()) return;
+      const confirmed = command.complete(attempt, result);
+      if (confirmed) resolved(attempt, confirmed);
     } catch (err) {
-      if (!isCurrent()) return;
+      if (!ownsCommand()) return;
       setMessage(
         err instanceof Error ? err.message : "Не удалось отправить предложение",
       );
@@ -109,6 +130,7 @@ export function ClinicOperators({ workspaceId, actorId, isSessionCurrent }: {
           предложения. Реклама автоматически не запускается.
         </p>
       </header>
+      <OperatorCommandRecovery key={`${actorId}:${workspaceId}:${command.attempt?.commandId ?? "idle"}`} command={command} onResolved={resolved} />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="font-semibold">
           Одобрены платформой и принимают запросы
@@ -144,7 +166,7 @@ export function ClinicOperators({ workspaceId, actorId, isSessionCurrent }: {
             <button
               type="button"
               className="neu-btn"
-              disabled={busy}
+              disabled={busy || command.blocked}
               onClick={() => {
                 setSelected(item);
                 setLeadScope("assigned");
@@ -224,14 +246,14 @@ export function ClinicOperators({ workspaceId, actorId, isSessionCurrent }: {
             />
           </label>
           <div className="flex flex-wrap gap-2">
-            <button type="submit" className="neu-btn-primary" disabled={busy}>
+            <button type="submit" className="neu-btn-primary" disabled={busy || command.blocked}>
               <Send size={16} />
               {busy ? "Отправляем…" : "Отправить предложение"}
             </button>
             <button
               type="button"
               className="neu-btn"
-              disabled={busy}
+              disabled={busy || command.blocked}
               onClick={() => setSelected(null)}
             >
               Отмена

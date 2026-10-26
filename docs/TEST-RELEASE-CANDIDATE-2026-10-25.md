@@ -1,5 +1,15 @@
 # Test Release Candidate: 25 October 2026
 
+**27 October local delta, G1-C10/G7-C39, base 093eba7:**
+[cooperation command workflow](OPERATOR-COMMAND-WORKFLOW-2026-10-27.md) integrates
+current forms/handlers with V2 recovery and forward 108. Both command execution
+and explicit closure serialize on the same key; old unbound and V1 writers are
+closed without fallback. This changes coordinated API/UI/SQL dependencies, not
+just a frontend. Local receipts do not attest a new Preview or authorize cloud
+schema/grant changes. Legacy in-flight drain, target isolation/schema/ACL and
+identifier retention/admission remain rollout gates. Both blogger roles are
+still intake-only, not commercial activation. The broad G1-G8 objective remains.
+
 ## Decision and Evidence Boundary
 
 **Local release inventory, not deployment approval.** Base before G7-C24: branch

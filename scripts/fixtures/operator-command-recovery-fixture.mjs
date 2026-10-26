@@ -36,6 +36,7 @@ async function clean(db,x,commands=true){
 }
 const legacyPropose=(db,x)=>row(db,'select public.create_clinic_operator_request($1,$2,$3,$4,$5,0,\'assigned\') id',
   [x.w,x.staff,x.auth,x.operator,'Owned technical terms, no payment']);
+export { seed as seedOperatorCommandFixture, clean as cleanupOperatorCommandFixture };
 
 export async function reproduceUnboundOperatorProposal(db,t){
   await t.test('old proposal after committed lost ACK and ended cooperation creates an unintended replacement',async()=>{

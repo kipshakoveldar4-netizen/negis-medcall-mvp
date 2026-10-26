@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -53,7 +54,8 @@ const { jsx, elements, text, hookDriver } = new Function("assert", compile(helpe
 const sources: Record<string, string> = {};
 for (const [name, filename] of Object.entries({ component: componentFile, api: "artifacts/negis/src/lib/operatorApi.ts",
   crm: "artifacts/negis/src/lib/api.ts", auth: "artifacts/negis/src/lib/serverAuth.ts",
-  signout: "artifacts/negis/src/lib/authSignOut.ts", contracts: "lib/crm/operator-contracts.ts" })) {
+  signout: "artifacts/negis/src/lib/authSignOut.ts", contracts: "lib/crm/operator-contracts.ts",
+  commandHook: "artifacts/negis/src/lib/useOperatorCommand.ts", commandAttempts: "artifacts/negis/src/lib/operatorCommandAttempt.ts" })) {
   sources[name] = compile(name === "component" && baseline
     ? execFileSync("git", ["show", `${baseline}:${filename}`], { cwd: root, encoding: "utf8" })
     : await readFile(path.join(root, filename), "utf8"), filename);
@@ -63,6 +65,7 @@ const B = "22222222-2222-4222-8222-222222222222";
 const REQUEST = "33333333-3333-4333-8333-333333333333";
 const WORKSPACE = "44444444-4444-4444-8444-444444444444";
 const boundaries = { OperatorLeads: Symbol("OperatorLeads"), OperatorServiceCatalog: Symbol("OperatorServiceCatalog"), OperatorArrivals: Symbol("OperatorArrivals") };
+const RecoveryBoundary = Symbol("OperatorCommandRecovery");
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((yes) => { resolve = yes; });
@@ -85,15 +88,24 @@ async function fixture(t: TestContext, options: { clinic?: boolean; status?: "re
     if (modules.has(name)) return modules.get(name)!;
     const exports = {};
     modules.set(name, exports);
-    new Script(sources[name]!, { filename: name }).runInNewContext({ exports, Error, AbortController, DOMException, Headers,
-      window: { confirm: () => true, sessionStorage: { getItem: (key: string) => storage.get(key) ?? null },
+    new Script(sources[name]!, { filename: name }).runInNewContext({ exports, Error, AbortController, DOMException, Headers, crypto: { randomUUID },
+      window: { confirm: () => true, sessionStorage: { getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) },
         localStorage: { getItem: (key: string) => storage.get(key) ?? null } },
       fetch(url: string, init: RequestInit) {
         assert.equal(init.cache, "no-store");
         const response = deferred<unknown>();
         const pending: Pending = { url, method: init.method ?? "GET", body: init.body ? JSON.parse(String(init.body)) : undefined,
           headers: new Headers(init.headers), jsonReads: 0, claimed: false,
-          respond(status, body) { response.resolve({ ok: status >= 200 && status < 300, status,
+          respond(status, body) {
+            const payload = body as {success?:boolean;data?:unknown};
+            if (status === 200 && payload?.success === true && !Object.hasOwn(payload,"data") && pending.method === "PATCH") {
+              const input = pending.body as Record<string,string>, action=input.commandAction??input.action;
+              body={success:true,data:input.action==="abandon"?{state:"abandoned",commandId:input.commandId,action,targetId:input.targetId,closedAt:"2030-01-07T05:00:00Z"}
+                :{state:"committed",commandId:input.commandId,action,targetId:input.id,requestId:input.id,
+                  statusAtCommit:action==="accept"?"accepted":action==="end"?"ended":"declined",committedAt:"2030-01-07T05:00:00Z"}};
+            }
+            response.resolve({ ok: status >= 200 && status < 300, status,
             async json() { pending.jsonReads++; return await body; } }); },
         };
         requests.push(pending);
@@ -111,6 +123,9 @@ async function fixture(t: TestContext, options: { clinic?: boolean; status?: "re
         if (id === "@/lib/serverAuth") return load("auth");
         if (id === "@/lib/api") return load("crm");
         if (id === "@/lib/operatorApi") return load("api");
+        if (id === "@/lib/useOperatorCommand") return load("commandHook");
+        if (id === "./operatorCommandAttempt") return load("commandAttempts");
+        if (id === "./OperatorCommandRecovery") return {OperatorCommandRecovery:RecoveryBoundary};
         if (id.startsWith("./Operator")) { const key = id.slice(2) as keyof typeof boundaries; return { [key]: boundaries[key] }; }
         return unused(id);
       },
@@ -148,7 +163,21 @@ async function fixture(t: TestContext, options: { clinic?: boolean; status?: "re
   await driver.flush();
   take("GET").respond(200, list()); await driver.flush();
   await open();
+  async function closeOriginalCommand() {
+    // This renderer treats descendants as boundaries. Simulate an explicit
+    // recovery control through the real transport/controller, never KV deletion.
+    const boundary=driver.nodes().find(node=>node.type===RecoveryBoundary);assert.ok(boundary);
+    const command=boundary.props.command as {attempt:{commandId:string;action:string;targetId:string;actorId:string};path:string;
+      isCurrent(attempt?:unknown):boolean;complete(attempt:unknown,value:unknown):unknown};
+    const attempt=command.attempt;assert.ok(attempt);
+    const api=load("api") as {operatorApi(path:string,body:unknown,method:string,signal:undefined,actor:string,guard:()=>boolean):Promise<unknown>};
+    const result=api.operatorApi(command.path,{action:"abandon",commandId:attempt.commandId,commandAction:attempt.action,targetId:attempt.targetId},"PATCH",undefined,attempt.actorId,()=>command.isCurrent(attempt));
+    await driver.flush();take("PATCH").respond(200,{success:true});const value=await result;
+    const confirmed=command.complete(attempt,value);assert.ok(confirmed);
+    (boundary.props.onResolved as (attempt:unknown,value:unknown)=>void)(attempt,confirmed);await driver.flush();
+  }
   return { driver, requests, take, list, action, refresh, open, denied: () => denied, authReads: () => authReads,
+    closeOriginalCommand,
     async start() { (action().props.onClick as () => void)(); await driver.flush(); return take("PATCH"); },
     silentActor(value: string | null) { if (actor !== value) epoch++; actor = value; },
     async renderActor(value: string) { actor = value; props = { ...props, actorId: value }; driver.invalidate(); await driver.flush(); },
@@ -180,15 +209,17 @@ for (const clinic of [false, true]) {
       (ui.action().props.onClick as () => void)(); await ui.driver.flush();
       assert.equal(ui.requests.length, count);
       old.respond(200, { success: true }); await ui.driver.flush();
-      assert.equal(ui.snapshot().busy, false, "The original settled command releases only its still-live scope");
+      assert.equal(ui.snapshot().busy, true, "A retired response cannot drop the unresolved original key");
       assert.equal(ui.requests.length, count, "Obsolete success must not replace/refetch the newer list");
+      await ui.closeOriginalCommand();assert.equal(ui.snapshot().busy,false);
       (await ui.start()).respond(200, { success: true }); await ui.driver.flush();
     });
   }
   test(`request ${clinic ? "clinic withdrawal" : "operator acceptance"} positive action uses actual transport and original actor`, async (t) => {
     const ui = await fixture(t, { clinic, status: "requested" });
     const pending = await ui.start();
-    assert.deepEqual(pending.body, { id: REQUEST, action: clinic ? "withdraw" : "accept" });
+    assert.deepEqual(pending.body, { id: REQUEST, action: clinic ? "withdraw" : "accept", commandId:(pending.body as Record<string,unknown>).commandId });
+    assert.match(String((pending.body as Record<string,unknown>).commandId),/^[0-9a-f-]{36}$/i);
     assert.equal(pending.headers.get("Authorization"), `Bearer synthetic-${A}`);
     pending.respond(200, { success: true }); await ui.driver.flush();
     assert.equal(ui.requests.filter((item) => item.method === "GET").length, 2);
@@ -254,6 +285,7 @@ test("request old A denial cannot revoke a replacement A view after rendered A-B
   const old = await ui.start();
   await ui.renderActor(B); await ui.reload("B");
   await ui.renderActor(A); await ui.reload("replacement-A");
+  await ui.closeOriginalCommand();
   const current = await ui.start();
   const before = ui.snapshot(), writes = ui.driver.setterCalls(), count = ui.requests.length;
   old.respond(401, deferred<unknown>().promise); await ui.driver.flush();
@@ -288,9 +320,10 @@ test("request current 409 clears its private panes and requires a fresh list bef
   assert.equal(ui.driver.nodes().filter((node) => Object.values(boundaries).includes(node.type as symbol)).length, 0);
   assert.equal(ui.requests.length, 3); assert.equal(ui.denied(), 0, "a request conflict is not a global account revocation");
   ui.take("GET").respond(200, ui.list("fresh-authorized")); await ui.driver.flush(); await ui.open();
-  assert.equal(ui.snapshot().nested, 3); assert.equal(ui.snapshot().busy, false);
+  assert.equal(ui.snapshot().nested, 3); assert.equal(ui.snapshot().busy, true);
+  await ui.closeOriginalCommand();assert.equal(ui.snapshot().busy,false);
   (await ui.start()).respond(200, { success: true }); await ui.driver.flush();
-  assert.equal(ui.requests.length, 5);
+  assert.equal(ui.requests.length, 6);
 });
 test("request unmounted deferred completion cannot write state or refresh", async (t) => {
   const ui = await fixture(t); const pending = await ui.start();

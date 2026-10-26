@@ -43,16 +43,23 @@ export const f={items:[item('${R}'),item('${S}')],calls:[],gets:0,globalDenials:
   return button;},
  click(id,kind){flushSync(()=>this.button(id,kind).click());},
  async open(id){for(const kind of ['leads','catalog','arrivals']){if(!document.querySelector('[data-pane="'+kind+'"][data-request="'+id+'"]'))this.click(id,kind);await this.tick();}},
- reply(index,status,body,holdBody=false){const entry=this.calls[index];const stream=new ReadableStream({start(controller){entry.finish=()=>{controller.enqueue(new TextEncoder().encode(JSON.stringify(body)));controller.close();};}});
+ reply(index,status,body,holdBody=false){const entry=this.calls[index];
+  if(status===200&&body.success===true&&!Object.hasOwn(body,'data')&&entry.body.commandId){const b=entry.body,a=b.commandAction||b.action;
+   body={success:true,data:b.action==='abandon'?{state:'abandoned',commandId:b.commandId,action:a,targetId:b.targetId,closedAt:'2030-01-07T05:00:00Z'}
+    :{state:'committed',commandId:b.commandId,action:a,targetId:b.id,requestId:b.id,statusAtCommit:a==='accept'?'accepted':a==='end'?'ended':'declined',committedAt:'2030-01-07T05:00:00Z'}};}
+  const stream=new ReadableStream({start(controller){entry.finish=()=>{controller.enqueue(new TextEncoder().encode(JSON.stringify(body)));controller.close();};}});
   const response=new Response(stream,{status,headers:{'content-type':'application/json'}});const json=response.json.bind(response);
   response.json=()=>{entry.reads++;return json();};entry.response.resolve(response);if(!holdBody)entry.finish();},
+ async closePending(){const button=[...document.querySelectorAll('button')].find(n=>n.textContent.trim()==='Закрыть отправку');if(!button||button.disabled)throw Error('Missing active command closure');
+  button.click();await this.tick();const index=this.calls.length-1;if(this.calls[index].body.action!=='abandon')throw Error('Expected explicit closure');this.reply(index,200,{success:true});await this.tick();},
  seed(){const attempt=newOperatorBookingAttempt('${A}','${R}',{leadId:'${LEAD}',doctorId:'00000000-0000-4000-8000-000000003108',serviceIds:['00000000-0000-4000-8000-000000003109'],startsLocal:'2026-10-25T09:00',timeZone:'UTC'});attempt.uncertain=true;
   if(!persistOperatorBookingAttempt(sessionStorage,attempt))throw Error('Cannot persist synthetic booking');return attempt.requestKey;},
  snapshot(){return{panes:[...document.querySelectorAll('[data-pane]')].map(n=>n.dataset.pane+':'+n.dataset.request),
   alerts:[...document.querySelectorAll('[role="alert"]')].map(n=>n.textContent),articles:document.querySelectorAll('article').length,
   busy:[...document.querySelectorAll('article')].map(n=>({id:n.querySelector('h3').textContent,disabled:[...n.querySelectorAll('button')].find(b=>b.textContent.trim()==='Завершить сотрудничество')?.disabled})),
   globalDenials:this.globalDenials,gets:this.gets,calls:this.calls.map(c=>({method:c.method,url:c.url,body:c.body,reads:c.reads})),
-  unmounts:[...this.unmounts],booked:this.booked,receipts:Object.keys(sessionStorage).map(k=>[k,sessionStorage.getItem(k)])};}};
+  unmounts:[...this.unmounts],booked:this.booked,receipts:Object.keys(sessionStorage).filter(k=>k.startsWith('medina_operator_booking_attempt')).map(k=>[k,sessionStorage.getItem(k)]),
+  commands:Object.keys(sessionStorage).filter(k=>k.startsWith('medina_operator_command_v1')).map(k=>[k,sessionStorage.getItem(k)])};}};
 export const supabase={auth:{getSession:()=>f.session()}};
 export const isSignOutPending=()=>false,getSignOutRevision=()=>0;
 const closed=()=>{};const booked=()=>f.booked++;
@@ -138,11 +145,12 @@ test("request-scoped 404/409 refusal in actual React and operator transport", { 
         await reset(); await run(`await f.open('${R}');f.click('${R}','end');`);
         if (change === "actor B") await run(`f.raw('${B}');f.patch({actorId:'${B}'});`);
         if (change === "workspace B") await run(`f.patch({workspaceId:'${W}'});await f.tick();f.patch({workspaceId:'${V}'});`);
-        if (change === "rendered ABA") await run(`f.raw('${B}');f.patch({actorId:'${B}'});await f.tick();f.raw('${A}');f.patch({actorId:'${A}'});`);
-        await run(`f.refresh();await f.tick();f.click('${S}','leads');f.click('${S}','arrivals');f.click('${S}','end');`); await wait("f.calls.length===2");
+        if (change === "rendered ABA") await run(`f.raw('${B}');f.patch({actorId:'${B}'});await f.tick();f.raw('${A}');f.patch({actorId:'${A}'});await f.tick();await f.closePending();`);
+        const currentIndex=(await snap()).calls.length;
+        await run(`f.refresh();await f.tick();f.click('${S}','leads');f.click('${S}','arrivals');f.click('${S}','end');`); await wait(`f.calls.length===${currentIndex+1}`);
         const before = await snap(); await run(`f.reply(0,${status},{success:false,error:'OBSOLETE_ERROR'});await f.tick();`);
         const after = await snap(); assert.deepEqual(after.panes, before.panes); assert.deepEqual(after.busy, before.busy); assert.equal(after.gets, before.gets); assert.deepEqual(after.alerts, before.alerts); assert.equal(after.globalDenials, 0);
-        await run("f.reply(1,200,{success:true});await f.tick();"); assert.equal((await snap()).gets, before.gets + 1);
+        await run(`f.reply(${currentIndex},200,{success:true});await f.tick();`); assert.equal((await snap()).gets, before.gets + 1);
       });
     }
   }
@@ -183,11 +191,13 @@ test("request-scoped 404/409 refusal in actual React and operator transport", { 
       assert.equal((await snap()).calls.length, 1);
       const before = await snap();
       await run(`f.reply(0,${response},{success:${response === 200},error:'Obsolete reply'});await f.tick();`);
-      await wait(`f.button('${R}','${action}').disabled===false`);
+      await wait('f.calls[0].reads===1');
+      assert.equal(await run(`return f.button('${R}','${action}').disabled;`),true,'Retired replies must retain the unresolved key');
       const after = await snap();
       assert.equal(after.gets, before.gets, 'Retired view cannot refetch or replace the newer snapshot');
       assert.deepEqual(after.alerts, before.alerts);
       assert.equal(after.calls.length, 1); assert.equal(after.globalDenials, 0);
+      await run('await f.closePending();');await wait(`f.button('${R}','${action}').disabled===false`);
     });
   }
   await t.test('operator decline is protected by the same command lease', async () => {
@@ -197,6 +207,8 @@ test("request-scoped 404/409 refusal in actual React and operator transport", { 
     await run(`f.click('${R}','decline');await f.tick();`);
     assert.equal((await snap()).calls.length, 1);
     await run('f.reply(0,200,{success:true});await f.tick();');
+    await wait('f.calls[0].reads===1');assert.equal(await run(`return f.button('${R}','decline').disabled;`),true);
+    await run('await f.closePending();');
     await wait(`f.button('${R}','decline').disabled===false`);
   });
   assert.deepEqual(browser.exceptions, []);

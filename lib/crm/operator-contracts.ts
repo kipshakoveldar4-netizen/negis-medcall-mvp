@@ -47,6 +47,13 @@ export type OperatorBooking = {
 export const operatorBookingStatusLabels = {
   scheduled: "Запланировано", confirmed: "Подтверждено", arrived: "Пациент пришёл", no_show: "Не пришёл", cancelled: "Отменено",
 } as const;
+export type OperatorCommandAction = "propose" | "accept" | "decline" | "withdraw" | "end";
+export type OperatorCommandResult =
+  | { state: "unconfirmed"; commandId: string }
+  | { state: "abandoned"; commandId: string; action: OperatorCommandAction; targetId: string; closedAt: string }
+  | { state: "committed"; commandId: string; action: OperatorCommandAction; targetId: string; requestId: string;
+      statusAtCommit: "requested" | "accepted" | "declined" | "ended"; committedAt: string };
+const operatorCommandStatuses = { propose: "requested", accept: "accepted", decline: "declined", withdraw: "declined", end: "ended" } as const;
 const BOOKING_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const bookingRow = (value: unknown): Record<string, unknown> | null => value && typeof value === "object" && !Array.isArray(value)
   ? value as Record<string, unknown> : null;
@@ -64,6 +71,26 @@ function bookingInstant(value: unknown): value is string {
   const actual = [calendar.getUTCFullYear(), calendar.getUTCMonth() + 1, calendar.getUTCDate(),
     calendar.getUTCHours(), calendar.getUTCMinutes(), calendar.getUTCSeconds()];
   return actual.every((part, index) => part === Number(parts[index + 1]));
+}
+export function parseOperatorCommandResult(value: unknown, commandId: string,
+  expected?: { action: OperatorCommandAction; targetId: string }): OperatorCommandResult | null {
+  const row = bookingRow(value);
+  if (!row || !BOOKING_UUID.test(commandId) || typeof row.commandId !== "string"
+    || row.commandId.toLowerCase() !== commandId.toLowerCase()) return null;
+  if (row.state === "unconfirmed") return ["action", "targetId", "requestId", "statusAtCommit", "committedAt", "closedAt"].some(name => Object.hasOwn(row, name))
+    ? null : { state: row.state, commandId: commandId.toLowerCase() };
+  if (typeof row.action !== "string" || !Object.hasOwn(operatorCommandStatuses, row.action)
+    || typeof row.targetId !== "string" || !BOOKING_UUID.test(row.targetId)
+    || (expected && (row.action !== expected.action || row.targetId.toLowerCase() !== expected.targetId.toLowerCase()))) return null;
+  const action = row.action as OperatorCommandAction;
+  const base = { commandId: commandId.toLowerCase(), action, targetId: row.targetId.toLowerCase() };
+  if (row.state === "abandoned" && bookingInstant(row.closedAt)
+    && !["requestId", "statusAtCommit", "committedAt"].some(name => Object.hasOwn(row, name))) return { ...base, state: row.state, closedAt: row.closedAt };
+  if (row.state !== "committed" || typeof row.requestId !== "string" || !BOOKING_UUID.test(row.requestId)
+    || Object.hasOwn(row, "closedAt")
+    || (action !== "propose" && row.requestId.toLowerCase() !== base.targetId)
+    || row.statusAtCommit !== operatorCommandStatuses[action] || !bookingInstant(row.committedAt)) return null;
+  return { ...base, state: row.state, requestId: row.requestId.toLowerCase(), statusAtCommit: operatorCommandStatuses[action], committedAt: row.committedAt };
 }
 export function parseOperatorBookingContext(value: unknown): { timeZone: string | null } | null {
   const row = bookingRow(value);

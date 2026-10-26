@@ -1,5 +1,10 @@
 # Durable Operator Cooperation Command Foundation
 
+Later local follow-up: [G1-C10/G7-C39](OPERATOR-COMMAND-WORKFLOW-2026-10-27.md)
+adds coordinated V2 API/UI, explicit closure and local 108. The original scope
+and historical acceptance below remain the receipt for 107 alone, not current
+cloud behavior or an independent rollout instruction.
+
 G1-C9/G7-C38, base f3a89f4, 26 October 2026. Local SQL foundation, not a
 production fix or completed UI workflow. The previous goal turn made verified
 progress on booking result validation. This increment advances the original

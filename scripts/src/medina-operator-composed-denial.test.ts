@@ -28,12 +28,22 @@ const files = {
   api: "artifacts/negis/src/lib/operatorApi.ts",
   attempts: "artifacts/negis/src/lib/operatorBookingAttempt.ts",
   contracts: "lib/crm/operator-contracts.ts",
+  commandHook: "artifacts/negis/src/lib/useOperatorCommand.ts",
+  commandAttempts: "artifacts/negis/src/lib/operatorCommandAttempt.ts",
+  commandRecovery: "artifacts/negis/src/components/operators/OperatorCommandRecovery.tsx",
 };
 const compiled = (async () => {
   const result: Record<string, string> = {};
   for (const [name, filename] of Object.entries(files)) {
-    const source = sourceRef === undefined ? await readFile(path.join(root, filename), "utf8")
-      : execFileSync("git", ["show", `${sourceRef}:${filename}`], { cwd: root, encoding: "utf8" });
+    let source: string;
+    try { source = sourceRef === undefined ? await readFile(path.join(root, filename), "utf8")
+      : execFileSync("git", ["show", `${sourceRef}:${filename}`], { cwd: root, encoding: "utf8" }); }
+    catch (error) {
+      if (!sourceRef || !["commandHook", "commandAttempts", "commandRecovery"].includes(name)) throw error;
+      // Older components never import these added modules. Refuse if they do;
+      // do not replace historical application code with worktree behavior.
+      source = "throw new Error('Added module is absent from reviewed baseline');";
+    }
     const output = ts.transpileModule(source, {
       fileName: filename,
       reportDiagnostics: true,
@@ -361,6 +371,8 @@ async function runtime(t: TestContext, queueMutations = false, confirm = () => t
         "@/components/operators/OperatorRequests": "requests",
         "./OperatorLeads": "leads", "./OperatorBookingForm": "booking", "./OperatorServiceCatalog": "catalog",
         "./OperatorArrivals": "arrivals", "@/lib/operatorApi": "api", "@/lib/operatorBookingAttempt": "attempts",
+        "@/lib/useOperatorCommand": "commandHook", "./operatorCommandAttempt": "commandAttempts",
+        "./OperatorCommandRecovery": "commandRecovery", "@/components/operators/OperatorCommandRecovery": "commandRecovery",
       };
       if (componentModules[name]) return load(componentModules[name]);
       if (name === "@/lib/api") return {
@@ -390,7 +402,15 @@ async function runtime(t: TestContext, queueMutations = false, confirm = () => t
               request.dispatched = true;
               dispatched.push(request);
             },
-            succeed(data) { reply({ success: true, ...(data === undefined ? {} : { data }) }, 200); },
+            succeed(data) {
+              if (data === undefined && request.method !== "GET" && /(?:operator-inbox|clinic-operator-requests)(?:\?|$)/.test(url)) {
+                const body = request.body!, action = String(body.commandAction ?? body.action ?? "propose"), targetId = body.targetId ?? body.id ?? body.operatorId;
+                data = body.action === "abandon" ? { state: "abandoned", commandId: body.commandId, action, targetId, closedAt: "2030-01-07T05:00:00Z" }
+                  : { state: "committed", commandId: body.commandId, action, targetId, requestId: action === "propose" ? REQUEST_A : targetId,
+                    statusAtCommit: ({propose:"requested",accept:"accepted",decline:"declined",withdraw:"declined",end:"ended"} as Record<string,string>)[action], committedAt: "2030-01-07T05:00:00Z" };
+              }
+              reply({ success: true, ...(data === undefined ? {} : { data }) }, 200);
+            },
             fail(status) { reply({ success: false, error: `Synthetic failure ${status}` }, status); },
             authFail(status) { settle(); reject(new SyntheticCrmApiError(status)); },
             reject() { settle(); reject(new Error("Synthetic network failure")); },
@@ -571,6 +591,67 @@ const savedBooking = (request: Pending) => ({
   startsAt: "2026-10-18T04:00:00Z", timeZone: "Asia/Almaty", doctorName: "Synthetic doctor",
   service: "Synthetic catalog service", priceMinor: "100",
 });
+function savedCommand(request: Pending) {
+  const body = request.body!, action = String(body.action ?? "propose"), targetId = body.id ?? body.operatorId;
+  return { state: "committed", commandId: body.commandId, action, targetId, requestId: action === "propose" ? REQUEST_A : targetId,
+    statusAtCommit: ({propose:"requested",accept:"accepted",decline:"declined",withdraw:"declined",end:"ended"} as Record<string,string>)[action], committedAt: "2030-01-07T05:00:00Z" };
+}
+for (const kind of ["proposal", "transition"] as const) {
+  async function pendingCommand(t: TestContext) {
+    if (kind === "proposal") { const ui = await clinicMutation(t, "send"); return { ...ui, mutation: await ui.start() }; }
+    return queuedAction(t, "request");
+  }
+  test(`${kind} unresolved command keeps its key after an empty read and permits a new intent only after explicit closure`, async t => {
+    const ui = await pendingCommand(t); ui.mutation.release(); ui.mutation.reject(); await ui.render.flush();
+    const saved = [...ui.storage.entries()], attempt = JSON.parse(saved[0][1]);
+    ui.invoke(ui.button("Проверить результат")); await ui.render.flush(); const read = ui.take("event", "GET");
+    assert.ok(read.url.includes(`commandId=${attempt.commandId}`));
+    read.succeed({ state: "unconfirmed", commandId: attempt.commandId }); await ui.render.flush();
+    assert.deepEqual([...ui.storage.entries()], saved); assert.ok(ui.render.content().includes("Исходный ключ сохранён"));
+    ui.invoke(ui.button("Закрыть отправку")); await ui.render.flush(); const close = ui.take("event", "PATCH");
+    assert.deepEqual(close.body, { action: "abandon", commandId: attempt.commandId, commandAction: attempt.action, targetId: attempt.targetId });
+    close.release(); close.succeed(); await ui.render.flush(); assert.equal(ui.storage.size, 0);
+    assert.equal(ui.requests.filter(item => item.method !== "GET" && item.body?.action !== "abandon").length, 1,
+      "Neither reading nor fencing may automatically resend the original business action");
+    assert.ok(ui.render.content().includes("Повтор отправки закрыт"));
+  });
+  for (const patch of [{ commandId: REQUEST_B }, { targetId: ACTOR }, { committedAt: undefined }, { statusAtCommit: "wrong" }])
+    test(`${kind} malformed business ACK ${JSON.stringify(patch)} stays unresolved and can be confirmed by original-key read`, async t => {
+      const ui = await pendingCommand(t); ui.mutation.release();
+      ui.mutation.succeed({ ...savedCommand(ui.mutation), ...patch }); await ui.render.flush();
+      assert.equal(ui.storage.size, 1); const saved = [...ui.storage.entries()];
+      assert.ok(ui.render.content().includes("Результат исходной отправки не подтверждён"));
+      ui.invoke(ui.button("Проверить результат")); await ui.render.flush(); const read = ui.take("event", "GET");
+      assert.ok(read.url.includes(`commandId=${ui.mutation.body?.commandId}`)); read.succeed(savedCommand(ui.mutation)); await ui.render.flush();
+      assert.equal(ui.storage.size, 0); assert.equal(ui.requests.filter(item => item.method !== "GET").length, 1);
+      assert.ok(ui.render.content().includes("подтверждён")); assert.ok(saved[0][1].includes(String(ui.mutation.body?.commandId)));
+    });
+  for (const outcome of ["success", 403] as const)
+    test(`${kind} reply after explicit closure cannot clear or unlock a replacement command`, async t => {
+      const ui = await pendingCommand(t); ui.mutation.release();
+      ui.invoke(ui.button("Закрыть отправку")); await ui.render.flush(); const close = ui.take("event", "PATCH");
+      close.release(); close.succeed(); await ui.render.flush();
+      if (kind === "proposal") ui.invoke(ui.find(node => node.type === "form"), "onSubmit");
+      else ui.invoke(ui.button("Завершить сотрудничество"));
+      await ui.render.flush(); const current = ui.take("event", kind === "proposal" ? "POST" : "PATCH");
+      assert.notEqual(current.body?.commandId, ui.mutation.body?.commandId);
+      const before = [...ui.storage.entries()], writes = ui.render.writes(), count = ui.requests.length;
+      if (outcome === "success") ui.mutation.succeed(savedCommand(ui.mutation)); else ui.mutation.fail(outcome);
+      await ui.render.beforeEffects();
+      assert.deepEqual([...ui.storage.entries()], before); assert.equal(ui.render.writes(), writes); assert.equal(ui.requests.length, count);
+      assert.equal(current.settled, false);
+    });
+}
+for (const kind of ["send", "withdraw"] as const)for (const outcome of ["success", 403] as const)
+  test(`${kind} held recovery result after A-B-A cannot acknowledge the returned account's command`, async t => {
+    const ui = await clinicMutation(t, kind), original = await ui.start(); original.release(); original.reject(); await ui.render.flush();
+    ui.invoke(ui.button("Проверить результат")); await ui.render.flush(); const read = ui.take("event", "GET");
+    await ui.replaceActor(REQUEST_B); await ui.replaceActor(ACTOR);
+    const before = clinicSnapshot(ui), saved = [...ui.storage.entries()];
+    if (outcome === "success") read.succeed(savedCommand(original)); else read.fail(outcome);
+    await ui.render.beforeEffects(); assertClinicQuiet(ui, before); assert.deepEqual([...ui.storage.entries()], saved);
+    assert.ok(ui.render.content().includes("Результат отправки ещё не подтверждён"));
+  });
 for (const [label, patch] of [
   ["missing identity", { id: undefined }], ["foreign request identity", { id: REQUEST_B }],
   ["missing duration", { durationMinutes: undefined }], ["numeric price", { priceMinor: 100 }],
@@ -692,7 +773,10 @@ async function queuedAction(t: TestContext, target: QueuedAction, openStageBooki
   }
   assert.equal(mutation.expectedUserId, props.actorId);
   assert.equal(mutation.dispatched, false, "The real event handler must wait at the synthetic auth gate");
-  if (target === "request") assert.deepEqual(mutation.body, { id: REQUEST_A, action: "end" });
+  if (target === "request") {
+    assert.deepEqual(mutation.body, { id: REQUEST_A, action: "end", commandId: mutation.body?.commandId });
+    assert.match(String(mutation.body?.commandId), /^[0-9a-f-]{36}$/i);
+  }
   if (target === "clinic-assignment") {
     assert.equal(mutation.url, `/api/crm/clinic-operator-leads?workspaceId=${WORKSPACE}&requestId=${REQUEST_A}&search=`);
     assert.deepEqual(mutation.body, { leadId: LEAD, assigned: true });
@@ -724,7 +808,8 @@ async function queuedAction(t: TestContext, target: QueuedAction, openStageBooki
       const section = target === "request" ? ui.find((node) => node.type === "section")
         : ui.section(arrivals ? labels.arrivals : labels.leads);
       ui.invoke(ui.find((node) => node.type === "button" && elements(node.props.children)
-        .some((child) => child.type === (change === "page" ? icons.ChevronRight : icons.RefreshCw)), section));
+        .some((child) => child.type === (change === "page" ? icons.ChevronRight : icons.RefreshCw))
+        && (target !== "request" || change !== "refresh" || node.props["aria-label"] === "Обновить предложения"), section));
     }
     await ui.render.beforeEffects();
     assert.equal(initialRead.signal?.aborted, false, "Release queued actions before passive list cleanup can abort");
@@ -762,7 +847,8 @@ for (const target of ["request", "call", "stage", "booking", "clinic-assignment"
           pricePerArrivalMinor: "0", currency: "KZT", leadScope: "assigned" }]));
         await ui.render.flush();
         const control = ui.find(node => node.type === "button" && typeof node.props.disabled === "boolean", ui.find(node => node.type === "article"));
-        assert.equal(control.props.disabled, false, "The canceled original request lease must release the still-live scope");
+        assert.equal(control.props.disabled, true, "The lease settles, but an unresolved durable key still blocks a fresh intent");
+        assert.equal(ui.storage.size, 1, "A pre-dispatch cancellation is not a server-side fence against every delayed copy");
         assert.equal(ui.requests.filter(request => request.method === "PATCH").length, 1);
       } else if (releasesLiveLease && (target === "call" || target === "clinic-confirmation")) {
         await ui.render.flush();
@@ -825,7 +911,9 @@ async function clinicMutation(t: TestContext, target: ClinicMutation) {
     return target === "send" ? ui.find((node) => node.type === "button" && node.props.type === "submit", control()) : control();
   }
   async function prepareOffer() {
-    ui.invoke(ui.button("\u041f\u0440\u0435\u0434\u043b\u043e\u0436\u0438\u0442\u044c \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u0447\u0435\u0441\u0442\u0432\u043e"));
+    const offer = ui.button("\u041f\u0440\u0435\u0434\u043b\u043e\u0436\u0438\u0442\u044c \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u0447\u0435\u0441\u0442\u0432\u043e");
+    if (offer.props.disabled) return;
+    ui.invoke(offer);
     await ui.render.flush();
     ui.invoke(ui.find((node) => node.type === "textarea", control()), "onChange", { target: { value: "Synthetic user-only 0 KZT agreement" } });
     ui.invoke(ui.find((node) => node.type === "input" && node.props.inputMode === "decimal", control()), "onChange", { target: { value: "0" } });
@@ -842,8 +930,11 @@ async function clinicMutation(t: TestContext, target: ClinicMutation) {
       pricePerArrivalMinor: "0", currency: "KZT", leadScope: "assigned",
     }]));
     await ui.render.flush();
+    const unresolved = ui.render.nodes().some(node => node.type === "aside" && node.props["aria-label"] === "Неподтверждённая отправка");
     if (target === "send") await prepareOffer();
-    assert.notEqual(busyControl().props.disabled, true);
+    if (unresolved) assert.equal((target === "send" ? ui.button("Предложить сотрудничество") : busyControl()).props.disabled, true,
+      "Returning to an original account restores its unresolved command, not a fresh intent");
+    else assert.notEqual(busyControl().props.disabled, true);
   }
   async function start() {
     ui.invoke(control(), target === "send" ? "onSubmit" : "onClick");
@@ -851,16 +942,23 @@ async function clinicMutation(t: TestContext, target: ClinicMutation) {
     const mutation = ui.take("event", target === "send" ? "POST" : "PATCH");
     assert.equal(mutation.url, `/api/crm/clinic-operator-requests?workspaceId=${workspaceId}`);
     assert.deepEqual(mutation.body, target === "send" ? {
-      operatorId: REQUEST_B, clinicBrief: "Synthetic user-only 0 KZT agreement", pricePerArrivalMinor: "0", leadScope: "assigned",
-    } : { id: REQUEST_A, action: target });
+      operatorId: REQUEST_B, clinicBrief: "Synthetic user-only 0 KZT agreement", pricePerArrivalMinor: "0", leadScope: "assigned", commandId: mutation.body?.commandId,
+    } : { id: REQUEST_A, action: target, commandId: mutation.body?.commandId });
+    assert.match(String(mutation.body?.commandId), /^[0-9a-f-]{36}$/i);
     assert.equal(mutation.dispatched, false, "The real clinic handler must reach the synthetic lookup gate");
     assert.equal(busyControl().props.disabled, true);
     return mutation;
   }
+  async function closePending() {
+    ui.invoke(ui.button("Закрыть отправку")); await ui.render.flush();
+    const closure = ui.take("event", "PATCH"); assert.equal(closure.body?.action, "abandon");
+    closure.release(); closure.succeed(); await ui.render.flush();
+    if (target === "send" && !ui.render.nodes().some(node => node.type === "form")) await prepareOffer();
+  }
   ui.render.mount(view());
   await populate();
   return {
-    ...ui, start, control, busyControl,
+    ...ui, start, control, busyControl, closePending,
     cancelConfirmation() { confirmed = false; },
     confirmations: () => confirmations,
     changeRawActor(nextActor: string) {
@@ -951,6 +1049,7 @@ for (const target of ["send", "withdraw"] as const) {
         if (transition === "replacement A-B-A") {
           await ui.replaceActor(REQUEST_B);
           await ui.replaceActor(ACTOR);
+          await ui.closePending();
           current = await ui.start();
           current.release();
         } else { ui.changeRawActor(REQUEST_B); ui.changeRawActor(ACTOR); }
@@ -967,6 +1066,7 @@ for (const target of ["send", "withdraw"] as const) {
         if (current) {
           current.fail(409);
           await ui.render.flush();
+          await ui.closePending();
           assert.equal(ui.busyControl().props.disabled, false);
         }
       });
@@ -1011,7 +1111,7 @@ function offerDraft(ui: ClinicMutationUi) {
 async function editPendingOffer(ui: ClinicMutationUi, edit: OfferEdit) {
   if (edit === "directory-refresh") {
     const refresh = ui.render.nodes().find((node) => node.type === "button"
-      && elements(node.props.children).some((child) => child.type === icons.RefreshCw));
+      && node.props["aria-label"] === "Обновить операторов");
     assert.ok(refresh);
     ui.invoke(refresh);
     await ui.render.flush();
@@ -1061,18 +1161,23 @@ async function pendingOfferLease(t: TestContext, edit: OfferEdit, outcome: "canc
   assert.equal(obsolete.settled, true);
   assert.equal(obsolete.dispatched, outcome !== "canceled");
   assert.deepEqual(offerDraft(ui), draft, "Settling the old attempt must preserve newer fields rather than close or clear the form");
-  assert.equal(ui.render.nodes().filter((node) => node.props.role === "status" || node.props.role === "alert").length, 0,
+  const recovery = ui.find(node => node.type === "aside" && node.props["aria-label"] === "Неподтверждённая отправка");
+  const recoveryNodes = new Set(elements(recovery.props.children));
+  assert.equal(ui.render.nodes().filter((node) => (node.props.role === "status" || node.props.role === "alert") && !recoveryNodes.has(node)).length, 0,
     "The invalidated form frame cannot publish success or error notices");
   assert.equal(ui.requests.length, before.requests, "The old frame cannot refresh the request list");
-  assert.equal(ui.busyControl().props.disabled, false, "The owning attempt must release busy for this still-live actor/workspace");
+  assert.equal(ui.busyControl().props.disabled, true, "Settling a transport must not drop the unresolved original key");
+  await ui.closePending();
+  assert.equal(ui.busyControl().props.disabled, false, "Explicitly fencing the original key permits a genuinely new intent");
   ui.invoke(ui.control(), "onSubmit");
   await ui.render.flush();
   const current = ui.take("event", "POST");
   assert.equal(current.expectedUserId, ACTOR);
   assert.equal(current.dispatchGuard?.(), true);
   assert.deepEqual(current.body, {
-    operatorId: REQUEST_B, clinicBrief: draft.brief, pricePerArrivalMinor: "0", leadScope: draft.leadScope,
+    operatorId: REQUEST_B, clinicBrief: draft.brief, pricePerArrivalMinor: "0", leadScope: draft.leadScope, commandId: current.body?.commandId,
   });
+  assert.notEqual(current.body?.commandId, obsolete.body?.commandId);
   assert.equal(ui.busyControl().props.disabled, true);
   const dispatched = ui.dispatched.length;
   current.release();
@@ -1119,6 +1224,7 @@ for (const transition of ["actor", "workspace", "unmount"] as const) {
       assertClinicQuiet(ui, before);
       current.fail(409);
       await ui.render.flush();
+      await ui.closePending();
       assert.equal(ui.busyControl().props.disabled, false);
     });
   }
@@ -1149,7 +1255,7 @@ for (const status of [401, 403] as const) {
     const obsolete = await ui.start();
     obsolete.release();
     const section = ui.find((node) => node.type === "section" && Boolean(node.props["aria-label"]));
-    ui.invoke(ui.find((node) => node.type === "button" && elements(node.props.children).some((child) => child.type === icons.RefreshCw), section));
+    ui.invoke(ui.find((node) => node.type === "button" && node.props["aria-label"] === "Обновить предложения", section));
     await ui.render.flush();
     ui.take("OperatorRequests").succeed(list([{
       id: REQUEST_A, status: "requested", displayName: "Synthetic refreshed live agreement",

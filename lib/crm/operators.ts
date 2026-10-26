@@ -5,6 +5,8 @@ import { getSupabaseServerClient } from "../supabase/server";
 import { readWorkspaceContext } from "./server";
 import {
   OPERATOR_PAGE_SIZE,
+  parseOperatorCommandResult,
+  type OperatorCommandAction,
   type OperatorProfile,
   type OperatorRequest,
 } from "./operator-contracts";
@@ -37,14 +39,14 @@ function dbError(res: VercelResponse, error: unknown) {
     return fail(
       res,
       503,
-      "Раздел операторов ещё не подключён. Владелец платформы должен проверить миграции 052–054 и 094–096.",
+      "Раздел операторов ещё не подключён. Владелец платформы должен проверить миграции 052–054, 094–096 и 107–108.",
       "operators_not_provisioned",
     );
   }
   if (code === "P9601") return fail(res, 403, "Доступ изменился. Обновите страницу.", "operator_access_denied");
   if (code === "P9603") return fail(res, 404, "Предложение не найдено");
   if (code === "P9604") return fail(res, 400, "Проверьте предложение и действие");
-  if (["23505", "23514", "P0001", "P9602", "40001", "40P01", "55P03"].includes(code)) {
+  if (["23505", "23514", "P0001", "P9602", "P1072", "40001", "40P01", "55P03"].includes(code)) {
     return fail(
       res,
       409,
@@ -57,6 +59,36 @@ function dbError(res: VercelResponse, error: unknown) {
     503,
     "Не удалось сохранить или загрузить данные операторов. Попробуйте позже.",
   );
+}
+const exactBody = (body: Row, keys: string[]) => Object.keys(body).every(key => keys.includes(key));
+const commandUuid = (value: unknown): value is string => typeof value === "string" && isUuidValue(value);
+async function commandRead(db: NonNullable<ReturnType<typeof getSupabaseServerClient>>, res: VercelResponse,
+  commandId: unknown, actorId: string, workspaceId: string | null, staffId: string | null) {
+  if (!commandUuid(commandId)) return fail(res, 400, "Укажите исходную отправку");
+  const { data, error } = await db.rpc("read_operator_request_command_v2", { p_command_id: commandId,
+    p_actor_user_id: actorId, p_origin: workspaceId ? "clinic" : "operator", p_workspace_id: workspaceId, p_staff_user_id: staffId });
+  if (error) return dbError(res, error);
+  const result = parseOperatorCommandResult(data, commandId);
+  const allowed = workspaceId ? ["propose", "withdraw", "end"] : ["accept", "decline", "end"];
+  return result && (result.state === "unconfirmed" || allowed.includes(result.action))
+    ? json(res, 200, { success: true, data: result }) : fail(res, 503, "Результат отправки не подтверждён");
+}
+async function commandClose(db: NonNullable<ReturnType<typeof getSupabaseServerClient>>, res: VercelResponse,
+  body: Row, actorId: string, workspaceId: string | null, staffId: string | null) {
+  const actions = workspaceId ? ["propose", "withdraw", "end"] : ["accept", "decline", "end"];
+  if (!exactBody(body, ["action", "commandId", "commandAction", "targetId"]) || !commandUuid(body.commandId)
+    || !commandUuid(body.targetId) || typeof body.commandAction !== "string" || !actions.includes(body.commandAction))
+    return fail(res, 400, "Выберите исходную отправку");
+  const { data, error } = await db.rpc("close_operator_request_command_v2", { p_command_id: body.commandId,
+    p_actor_user_id: actorId, p_origin: workspaceId ? "clinic" : "operator", p_workspace_id: workspaceId,
+    p_staff_user_id: staffId, p_action: body.commandAction, p_target_id: body.targetId });
+  if (error) return dbError(res, error);
+  return commandReply(res, data, body.commandId, body.commandAction as OperatorCommandAction, body.targetId);
+}
+function commandReply(res: VercelResponse, data: unknown, commandId: string, action: OperatorCommandAction, targetId: string, status = 200) {
+  const result = parseOperatorCommandResult(data, commandId, { action, targetId });
+  return result && result.state !== "unconfirmed" ? json(res, status, { success: true, data: result })
+    : fail(res, 503, "Результат отправки не подтверждён. Проверьте исходную отправку.");
 }
 function profile(value: unknown): OperatorProfile {
   const row = record(value);
@@ -229,6 +261,7 @@ export async function handleOperatorInbox(
   if (!p) return fail(res, 403, "Нужно одобрение владельца платформы");
   const operatorId = str(record(p).id);
   if (req.method === "GET") {
+    if (req.query.commandId !== undefined) return commandRead(db, res, req.query.commandId, user.id, null, null);
     const offset = page(req);
     const { data, error } = await db
       .from("growth_operator_requests")
@@ -242,7 +275,9 @@ export async function handleOperatorInbox(
       : list(res, data, (row) => request(row, "workspaces"));
   }
   const body = record(req.body);
+  if (req.method === "PATCH" && body.action === "abandon") return commandClose(db, res, body, user.id, null, null);
   if (
+    req.method !== "PATCH" || !exactBody(body, ["id", "action", "commandId"]) || !commandUuid(body.commandId) ||
     typeof body.id !== "string" || !isUuidValue(body.id) ||
     typeof body.action !== "string" || !["accept", "decline", "end"].includes(body.action)
   )
@@ -256,13 +291,11 @@ export async function handleOperatorInbox(
     .maybeSingle();
   if (targetError) return dbError(res, targetError);
   if (!target) return fail(res, 404, "Предложение не найдено");
-  const { data, error } = await db.rpc("transition_growth_operator_request", {
-    p_request_id: body.id, p_operator_user_id: user.id, p_action: body.action,
+  const { data, error } = await db.rpc("execute_growth_operator_command_v2", {
+    p_command_id: body.commandId, p_request_id: body.id, p_operator_user_id: user.id, p_action: body.action,
   });
   if (error) return dbError(res, error);
-  return isUuidValue(data) && data.toLowerCase() === body.id.toLowerCase()
-    ? json(res, 200, { success: true })
-    : fail(res, 503, "Результат действия не подтверждён. Обновите список.");
+  return commandReply(res, data, body.commandId, body.action as OperatorCommandAction, body.id);
 }
 
 export async function handleClinicOperators(
@@ -276,6 +309,8 @@ export async function handleClinicOperators(
   const db = getSupabaseServerClient();
   if (!db) return fail(res, 503, "Хранилище не настроено");
   if (req.method === "GET") {
+    if (!directory && req.query.commandId !== undefined)
+      return commandRead(db, res, req.query.commandId, context.userId, context.workspaceId, context.staffUserId);
     const offset = page(req);
     if (directory) {
       const { data, error } = await db
@@ -300,12 +335,15 @@ export async function handleClinicOperators(
       : list(res, data, (row) => request(row, "growth_operator_profiles"));
   }
   const body = record(req.body);
+  if (req.method === "PATCH" && body.action === "abandon")
+    return commandClose(db, res, body, context.userId, context.workspaceId, context.staffUserId);
   if (req.method === "POST") {
     const brief = str(body.clinicBrief);
     const amount = str(body.pricePerArrivalMinor);
     const leadScope = body.leadScope ?? "assigned";
     if (
-      !isUuidValue(body.operatorId) ||
+      !exactBody(body, ["operatorId", "clinicBrief", "pricePerArrivalMinor", "leadScope", "commandId"]) || !commandUuid(body.commandId) ||
+      !commandUuid(body.operatorId) ||
       (leadScope !== "assigned" && leadScope !== "clinic") ||
       !brief ||
       brief.length > 2000 ||
@@ -318,23 +356,23 @@ export async function handleClinicOperators(
         "Нужны оператор, описание клиники до 2000 символов и согласованная цена за приход в тенге",
       );
     }
-    const { data, error } = await db.rpc("create_clinic_operator_request", {
+    const { data, error } = await db.rpc("execute_clinic_operator_command_v2", {
+      p_command_id: body.commandId, p_action: "propose", p_request_id: null,
       p_workspace_id: context.workspaceId, p_staff_user_id: context.staffUserId, p_auth_user_id: context.userId,
       p_operator_id: body.operatorId, p_clinic_brief: brief, p_price_minor: amount, p_lead_scope: leadScope,
     });
     return error
       ? dbError(res, error)
-      : isUuidValue(data) ? json(res, 201, { success: true, data: { id: data } })
-        : fail(res, 503, "Создание предложения не подтверждено. Обновите список.");
+      : commandReply(res, data, body.commandId, "propose", body.operatorId, 201);
   }
-  if (typeof body.id !== "string" || !isUuidValue(body.id) || typeof body.action !== "string" || !["withdraw", "end"].includes(body.action))
+  if (req.method !== "PATCH" || !exactBody(body, ["id", "action", "commandId"]) || !commandUuid(body.commandId)
+    || typeof body.id !== "string" || !isUuidValue(body.id) || typeof body.action !== "string" || !["withdraw", "end"].includes(body.action))
     return fail(res, 400, "Выберите предложение и действие");
-  const { data, error } = await db.rpc("transition_clinic_operator_request", {
+  const { data, error } = await db.rpc("execute_clinic_operator_command_v2", {
+    p_command_id: body.commandId, p_operator_id: null, p_clinic_brief: null, p_price_minor: null, p_lead_scope: null,
     p_workspace_id: context.workspaceId, p_staff_user_id: context.staffUserId, p_auth_user_id: context.userId,
     p_request_id: body.id, p_action: body.action,
   });
   if (error) return dbError(res, error);
-  return isUuidValue(data) && data.toLowerCase() === body.id.toLowerCase()
-    ? json(res, 200, { success: true })
-    : fail(res, 503, "Результат действия не подтверждён. Обновите список.");
+  return commandReply(res, data, body.commandId, body.action as OperatorCommandAction, body.id);
 }

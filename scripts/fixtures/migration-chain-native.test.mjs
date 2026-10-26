@@ -17,6 +17,7 @@ import { exerciseAnalyticsTimezone, exerciseAnalyticsTimezoneRefusals } from './
 import { exerciseContributorCumulative, exerciseDepartedOperatorAuthor } from './contributor-cumulative-cases.mjs';
 import { reproduceUnboundVideoDispatch, exerciseVideoQuotaDispatch, exerciseVideoQuotaMissing } from './video-quota-dispatch-cases.mjs';
 import { reproduceUnboundOperatorProposal, exerciseOperatorCommands } from './operator-command-recovery-fixture.mjs';
+import { exerciseOperatorCommandClosure, operatorLegacySignatures } from './operator-command-closure-cases.mjs';
 
 // Native application-chain acceptance, NOT an authority to release migrations.
 // 001-008 require an undocumented legacy baseline; data/*.sql is deliberately
@@ -226,6 +227,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     if(entry.file==='105_contributor_applications.sql') await exerciseContributorCumulative(db,entry.source,t);
     if(entry.file==='106_generated_video_quota_dispatch.sql') await exerciseVideoQuotaDispatch(db,fixture,entry.source,t);
     if(entry.file==='107_operator_request_commands.sql') await exerciseOperatorCommands(db,fixture,entry.source,t);
+    if(entry.file==='108_operator_command_closure.sql') await exerciseOperatorCommandClosure(db,fixture,entry.source,t);
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
       await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{
@@ -317,7 +319,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
   }));
 
   await t.test('RPC-only and read-only server boundaries survive later migrations', async () => {
-    for (const table of ['platform_subscription_operations', 'content_telegram_deliveries', 'content_telegram_delivery_guards', 'site_deletion_operations','growth_operator_request_commands']) {
+    for (const table of ['platform_subscription_operations', 'content_telegram_deliveries', 'content_telegram_delivery_guards', 'site_deletion_operations','growth_operator_request_commands','growth_operator_command_fences']) {
       const result = await one(db, `select has_table_privilege('service_role',$1,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') as tab,
         has_any_column_privilege('service_role',$1,'SELECT,INSERT,UPDATE,REFERENCES') as col`, [`public.${table}`]);
       assert.deepEqual(result, { tab: false, col: false }, `${table}: no direct service access may be restored`);
@@ -333,14 +335,16 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'public.delete_crm_site_inquiry(uuid,text,uuid,uuid[],timestamptz,uuid,uuid,uuid,boolean)',
       'public.lock_site_deletion_operation_actor(uuid,uuid,uuid)', 'public.validate_site_deletion_operation_request(jsonb)',
       'public.operator_request_command_receipt(public.growth_operator_request_commands)', 'public.confirm_operator_request_command(uuid,uuid,text,uuid,uuid,text)',
+      ...operatorLegacySignatures,'public.lock_operator_command_reader(uuid,text,uuid,uuid)',
+      'public.operator_command_result_v2(uuid,uuid,text,uuid,uuid,text,uuid)',
       'public.site_deletion_operation_receipt(public.site_deletion_operations,boolean)']) {
       assert.equal((await one(db, "select has_function_privilege('service_role',$1,'EXECUTE') as allowed", [signature])).allowed, false, signature);
     }
-    for (const name of ['create_clinic_operator_request', 'transition_clinic_operator_request', 'transition_growth_operator_request',
-      'admit_content_telegram_delivery', 'advance_content_telegram_delivery', 'accept_crm_site_inquiry_with_consent',
+    for (const name of ['admit_content_telegram_delivery', 'advance_content_telegram_delivery', 'accept_crm_site_inquiry_with_consent',
       'read_lead_team_analytics', 'read_generated_video_workflow', 'read_platform_subscription_operation',
       'prepare_site_deletion_operation', 'read_site_deletion_operations', 'execute_site_deletion_operation', 'close_site_deletion_operation',
-      'apply_growth_contributor', 'review_growth_contributor','execute_clinic_operator_command','execute_growth_operator_command','read_operator_request_command']) {
+      'apply_growth_contributor', 'review_growth_contributor','execute_clinic_operator_command_v2','execute_growth_operator_command_v2',
+      'read_operator_request_command_v2','close_operator_request_command_v2']) {
       const functions = (await db.query(`select p.oid::regprocedure::text as signature,has_function_privilege('service_role',p.oid,'EXECUTE') as allowed
         from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname=$1`, [name])).rows;
       assert.equal(functions.length, 1, name); assert.equal(functions[0].allowed, true, name);
@@ -387,13 +391,21 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     await db.query(`insert into public.growth_operator_profiles(id,auth_user_id,display_name,status,accepting_requests,approved_by,approved_at)
       values($1,$2,'Synthetic chain operator','approved',true,$3,clock_timestamp())`, [operator, operatorAuth, auth]);
     await role(db, 'service_role', async () => {
-      const request = (await one(db, 'select public.create_clinic_operator_request($1,$2,$3,$4,$5,0::bigint,$6) as id',
-        [workspace, staff, auth, operator, 'Synthetic technical terms, no payment or accrual', 'assigned'])).id;
-      assert.equal((await one(db, 'select public.transition_clinic_operator_request($1,$2,$3,$4,$5) as id', [workspace, staff, auth, request, 'withdraw'])).id, request);
-      const second = (await one(db, 'select public.create_clinic_operator_request($1,$2,$3,$4,$5,0::bigint,$6) as id',
-        [workspace, staff, auth, operator, 'Synthetic technical terms, no payment or accrual', 'assigned'])).id;
-      assert.equal((await one(db, 'select public.transition_growth_operator_request($1,$2,$3) as id', [second, operatorAuth, 'accept'])).id, second);
-      assert.equal((await one(db, 'select public.transition_growth_operator_request($1,$2,$3) as id', [second, operatorAuth, 'end'])).id, second);
+      const propose = async () => (await one(db,
+        "select public.execute_clinic_operator_command_v2($1,$2,$3,$4,'propose',null,$5,$6,0::bigint,'assigned') value",
+        [randomUUID(), workspace, staff, auth, operator, 'Synthetic technical terms, no payment or accrual'])).value;
+      const first = await propose(); assert.equal(first.state, 'committed'); const request = first.requestId;
+      const withdrawn = (await one(db,
+        "select public.execute_clinic_operator_command_v2($1,$2,$3,$4,'withdraw',$5,null,null,null,null) value",
+        [randomUUID(), workspace, staff, auth, request])).value;
+      assert.equal(withdrawn.state, 'committed'); assert.equal(withdrawn.requestId, request); assert.equal(withdrawn.statusAtCommit, 'declined');
+      const next = await propose(); assert.equal(next.state, 'committed'); const second = next.requestId;
+      assert.notEqual(second, request);
+      for (const action of ['accept', 'end']) {
+        const result = (await one(db, 'select public.execute_growth_operator_command_v2($1,$2,$3,$4) value', [randomUUID(), second, operatorAuth, action])).value;
+        assert.equal(result.state, 'committed'); assert.equal(result.requestId, second); assert.equal(result.action, action);
+        assert.equal(result.statusAtCommit, action === 'accept' ? 'accepted' : 'ended');
+      }
     });
     // The source Telegram RPC records a fake admission only. No Telegram API,
     // recipient/key, actual message, dispatch or success acknowledgement exists.

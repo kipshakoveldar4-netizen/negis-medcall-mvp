@@ -94,6 +94,9 @@ const compiled = (async () => {
     arrivals: "artifacts/negis/src/components/operators/OperatorArrivals.tsx",
     attempts: "artifacts/negis/src/lib/operatorBookingAttempt.ts",
     contracts: "lib/crm/operator-contracts.ts",
+    commandHook: "artifacts/negis/src/lib/useOperatorCommand.ts",
+    commandAttempts: "artifacts/negis/src/lib/operatorCommandAttempt.ts",
+    commandRecovery: "artifacts/negis/src/components/operators/OperatorCommandRecovery.tsx",
   };
   const result: Record<string, string> = {};
   for (const [name, filename] of Object.entries(files)) {
@@ -200,6 +203,7 @@ async function runtime(t: TestContext): Promise<Ui> {
       const aliases: Record<string, string> = {
         "@/lib/api": "crm", "@/lib/operatorApi": "api", "@/lib/operatorBookingAttempt": "attempts",
         "./OperatorLeads": "leads", "./OperatorBookingForm": "booking", "./OperatorServiceCatalog": "catalog", "./OperatorArrivals": "arrivals",
+        "@/lib/useOperatorCommand": "commandHook", "./operatorCommandAttempt": "commandAttempts", "./OperatorCommandRecovery": "commandRecovery",
       };
       if (aliases[dependency]) return load(aliases[dependency]);
       assert.fail(`Unexpected runtime dependency ${dependency}`);

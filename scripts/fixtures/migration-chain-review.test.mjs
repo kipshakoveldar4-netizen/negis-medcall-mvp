@@ -8,9 +8,9 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-107, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 99);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 99 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-108, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 100);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 100 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
@@ -26,6 +26,15 @@ test('107 adds only private committed operator command receipts and leaves the 0
   const previous=chain.find(item=>item.file.startsWith('096_'));
   for(const fn of previous.evidence.functions)assert.ok(entry.source.includes(digest(fn.body.replaceAll('\r\n','\n'))));
   assert.doesNotMatch(entry.source,/grant\s+(?:select|insert|update|delete)|on\s+delete\s+cascade/i);
+});
+test('108 adds only private command fences and coordinates four v2 entries with closure of old executors',()=>{
+  const entry=chain.find(item=>item.file.startsWith('108_'));
+  assert.deepEqual(entry.evidence.tables,['public.growth_operator_command_fences']);
+  assert.deepEqual(entry.evidence.rls,entry.evidence.tables);assert.equal(entry.evidence.functions.length,6);
+  assert.equal(entry.evidence.dynamicSqlLines.length,0);assert.equal(entry.evidence.storageCatalogueLines.length,0);
+  assert.ok(entry.source.includes('revoke all on function public.create_clinic_operator_request'));
+  assert.ok(entry.source.includes('close_operator_request_command_v2'));
+  assert.doesNotMatch(entry.source,/on\s+delete\s+cascade|grant\s+(?:select|insert|update|delete)/i);
 });
 
 for (const kind of ['missing', 'unknown', 'duplicate', 'reordered', 'renamed']) test(`preflight rejects ${kind} chain membership before any native startup`, () => {

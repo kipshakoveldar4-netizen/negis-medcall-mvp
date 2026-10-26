@@ -6,11 +6,16 @@ import { supabase } from "@/lib/supabase";
 import { OperatorLeads } from "./OperatorLeads";
 import { OperatorServiceCatalog } from "./OperatorServiceCatalog";
 import { OperatorArrivals } from "./OperatorArrivals";
+import { OperatorCommandRecovery } from "./OperatorCommandRecovery";
+import { useOperatorCommand } from "@/lib/useOperatorCommand";
+import type { OperatorCommandAttempt } from "@/lib/operatorCommandAttempt";
 import {
   formatArrivalPrice,
   operatorStatusLabels,
   operatorLeadScopeLabels,
   type OperatorRequest,
+  type OperatorCommandAction,
+  type OperatorCommandResult,
 } from "../../../../../lib/crm/operator-contracts";
 
 export function OperatorRequests({
@@ -30,6 +35,8 @@ export function OperatorRequests({
   const list = useOperatorList<OperatorRequest>(path, true, workspaceId ? undefined : onAccessDenied);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const command = useOperatorCommand(actorId, workspaceId, "transition", isSessionCurrent);
   const [openRequest, setOpenRequest] = useState<string | null>(null);
   const [openCatalog, setOpenCatalog] = useState<string | null>(null);
   const [openArrivals, setOpenArrivals] = useState<string | null>(null);
@@ -52,6 +59,7 @@ export function OperatorRequests({
     if (busy && !pending.current) setBusy(false);
     if (scopeChanged) {
       setError("");
+      setNotice("");
       setOpenRequest(null);
       setOpenCatalog(null);
       setOpenArrivals(null);
@@ -115,9 +123,19 @@ export function OperatorRequests({
     list.refresh();
     onAccessDenied?.();
   }, [isActorCurrent, list.refresh, onAccessDenied]);
+  function resolved(attempt: OperatorCommandAttempt, result: Exclude<OperatorCommandResult, { state: "unconfirmed" }>) {
+    if (!isScopeCurrent() || !command.isCurrent()) return;
+    pending.current = null; setBusy(false); setError("");
+    if (result.state === "committed") {
+      setOpenRequest(value => value === attempt.targetId ? null : value);
+      setOpenCatalog(value => value === attempt.targetId ? null : value);
+      setOpenArrivals(value => value === attempt.targetId ? null : value);
+      setNotice("Результат действия подтверждён."); list.refresh();
+    } else setNotice("Повтор отправки закрыт.");
+  }
   async function change(id: string, action: string) {
     const isCurrent = () => isScopeCurrent() && currentView.current === renderedView;
-    if (pending.current || !actorId || !isCurrent()) return;
+    if (pending.current || command.blocked || !actorId || !isCurrent()) return;
     // Own the command before a native dialog or React's disabled render. A
     // refresh may retire its view, but cannot admit a second unresolved action.
     const attempt = {};
@@ -135,24 +153,27 @@ export function OperatorRequests({
       if (pending.current === attempt) pending.current = null;
       return;
     }
+    const operation = command.claim(action as OperatorCommandAction, id);
+    if (!operation) { if (pending.current === attempt) pending.current = null; return; }
+    const ownsCommand = () => isCurrent() && command.isCurrent(operation);
     const isSameScope = isScopeCurrent;
     setBusy(true);
     setError("");
+    setNotice("");
     try {
-      await operatorApi(
+      const value = await operatorApi<unknown>(
         path,
-        { id, action },
+        { id, action, commandId: operation.commandId },
         "PATCH",
         undefined,
         actorId,
-        isCurrent,
+        ownsCommand,
       );
-      if (!isCurrent() || !await isActorCurrent() || !isCurrent()) return;
-      setOpenRequest(null);
-      setOpenCatalog(null);
-      setOpenArrivals(null);
-      list.refresh();
+      if (!ownsCommand() || !await isActorCurrent() || !ownsCommand()) return;
+      const confirmed = command.complete(operation, value);
+      if (confirmed) resolved(operation, confirmed);
     } catch (err) {
+      if (!command.isCurrent(operation)) return;
       const accessDenied = err instanceof OperatorApiError && [401, 403].includes(err.status);
       const requestRefused = err instanceof OperatorApiError && [404, 409].includes(err.status);
       // Refusal invalidates this actor/path even after a newer page or refresh.
@@ -207,6 +228,8 @@ export function OperatorRequests({
           <RefreshCw size={16} />
         </button>
       </div>
+      <OperatorCommandRecovery key={`${actorId}:${path}:${command.attempt?.commandId ?? "idle"}`} command={command} onResolved={resolved} onAccessDenied={() => void invalidateAccess()} />
+      {notice && <p role="status" className="break-words text-sm">{notice}</p>}
       {(error || list.error) && (
         <p role="alert" className="break-words text-sm text-red-700">
           {error || list.error}
@@ -247,7 +270,7 @@ export function OperatorRequests({
                   <button
                     type="button"
                     className="neu-btn-primary"
-                    disabled={busy}
+                    disabled={busy || command.blocked}
                     onClick={() => void change(item.id, "accept")}
                   >
                     <Check size={16} />
@@ -257,7 +280,7 @@ export function OperatorRequests({
                 <button
                   type="button"
                   className="neu-btn"
-                  disabled={busy}
+                  disabled={busy || command.blocked}
                   onClick={() =>
                     void change(item.id, workspaceId ? "withdraw" : "decline")
                   }
@@ -312,7 +335,7 @@ export function OperatorRequests({
                 <button
                   type="button"
                   className="neu-btn"
-                  disabled={busy}
+                  disabled={busy || command.blocked}
                   onClick={() => void change(item.id, "end")}
                 >
                   Завершить сотрудничество

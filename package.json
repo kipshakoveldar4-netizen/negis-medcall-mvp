@@ -23,6 +23,8 @@
     "test:migration-chain-native": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:migration-chain-native",
     "test:operator-actor-mutations-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:operator-actor-mutations-postgres",
     "test:operator-command-recovery-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:operator-command-recovery-postgres",
+    "test:operator-command-closure-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:operator-command-closure-postgres",
+    "test:operator-cooperation-native-http": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:operator-cooperation-native-http",
     "test:lead-taxonomy-access-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:lead-taxonomy-access-postgres",
     "test:operator-request-lifecycle-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:operator-request-lifecycle-postgres",
     "test:lead-team-analytics-locks-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:lead-team-analytics-locks-postgres",

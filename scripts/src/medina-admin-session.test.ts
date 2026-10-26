@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -244,6 +245,14 @@ function setup(search = "") {
     if (resource === "join-code") return ok({ code: "LOCAL123" });
     if (resource === "whatsapp-channels") return init.method === "PATCH"
       ? ok({ item: { id: JSON.parse(String(init.body)).id, enabled: false } }) : ok({ channels: channelRows });
+    if (resource === "clinic-operator-requests" && ["POST", "PATCH"].includes(String(init.method))) {
+      const body = JSON.parse(String(init.body)), action = init.method === "POST" ? "propose" : body.action;
+      return ok({ state: "committed", commandId: body.commandId, action,
+        targetId: action === "propose" ? body.operatorId : body.id,
+        requestId: action === "propose" ? "00000000-0000-4000-8000-000000000022" : body.id,
+        statusAtCommit: action === "propose" ? "requested" : action === "withdraw" ? "declined" : "ended",
+        committedAt: "2026-10-27T00:00:00Z" });
+    }
     return ok({ requests: [], launches: [], runs: [], insights: [] });
   };
   // Keep the real crmFetch token-wait/abort behavior without loading import.meta.env
@@ -324,6 +333,23 @@ const clinicSources = Promise.all([
   read("artifacts/negis/src/lib/operatorApi.ts"),
   read("lib/crm/operator-contracts.ts"),
 ]);
+const commandAttemptSource = await read("artifacts/negis/src/lib/operatorCommandAttempt.ts");
+const commandHookSource = await read("artifacts/negis/src/lib/useOperatorCommand.ts");
+const commandContracts = evaluate(await read("lib/crm/operator-contracts.ts"));
+const commandError = evaluate(select(await read("artifacts/negis/src/lib/operatorApi.ts"), ["OperatorApiError"])).selected;
+function commandHook(renderer: ReturnType<typeof hookRenderer>) {
+  const values = new Map<string, string>();
+  return evaluate(commandHookSource, { crypto: { randomUUID } }, {
+    react: renderer.hooks,
+    "@/lib/operatorApi": commandError,
+    "./operatorCommandAttempt": evaluate(commandAttemptSource, { window: { sessionStorage: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    } } }),
+    "../../../../lib/crm/operator-contracts": commandContracts,
+  });
+}
 async function clinicArrival(fixture: Fixture) {
   const [clinicSource, requestSource, arrivalSource, operatorSource, contractsSource] = await clinicSources;
   const contracts = evaluate(contractsSource);
@@ -340,6 +366,7 @@ async function clinicArrival(fixture: Fixture) {
   const directory = list([]);
   const clinic = evaluate(clinicSource, {}, {
     react: children[0].hooks, "@/lib/operatorApi": { useOperatorList: () => directory },
+    "@/lib/useOperatorCommand": commandHook(children[0]),
     "../../../../../lib/crm/operator-contracts": contracts,
   });
   children[0].mount(clinic.ClinicOperators, [], clinicProps); await children[0].flush();
@@ -349,6 +376,8 @@ async function clinicArrival(fixture: Fixture) {
     clinicBrief: "Local fixture only", pricePerArrivalMinor: "0", currency: "KZT", leadScope: "assigned" }]);
   const requests = evaluate(requestSource, {}, {
     react: children[1].hooks, "@/lib/operatorApi": { useOperatorList: () => requestsList },
+    "@/lib/useOperatorCommand": commandHook(children[1]),
+    "./OperatorCommandRecovery": { OperatorCommandRecovery: "OperatorCommandRecovery" },
     "@/lib/serverAuth": { getSupabaseAccessToken: fixture.getToken },
     "@/lib/supabase": { supabase: { auth: { getSession: fixture.sdkSession } } },
     "./OperatorLeads": { OperatorLeads: "OperatorLeads" },
@@ -516,6 +545,7 @@ async function clinicAction(fixture: Fixture, kind: ClinicAction, confirm?: () =
   const directory = list([{ id: profileId, displayName: "Synthetic operator" }]);
   const stableClinic = evaluate(clinicSource, {}, {
     react: children[0].hooks, "@/lib/operatorApi": { ...operator, useOperatorList: () => directory },
+    "@/lib/useOperatorCommand": commandHook(children[0]),
     "../../../../../lib/crm/operator-contracts": contracts,
   });
   children[0].mount(stableClinic.ClinicOperators, [], clinicProps); await children[0].flush();
@@ -545,6 +575,8 @@ async function clinicAction(fixture: Fixture, kind: ClinicAction, confirm?: () =
       window: { confirm: confirm ?? (() => true) },
     }, {
       react: target.hooks, "@/lib/operatorApi": { ...operator, useOperatorList: () => requests },
+      "@/lib/useOperatorCommand": commandHook(target),
+      "./OperatorCommandRecovery": { OperatorCommandRecovery: "OperatorCommandRecovery" },
       "@/lib/serverAuth": { getSupabaseAccessToken: fixture.getToken },
       "@/lib/supabase": { supabase: { auth: { getSession: fixture.sdkSession } } },
       "./OperatorLeads": { OperatorLeads: "OperatorLeads" },
@@ -571,9 +603,11 @@ test("clinic collaboration actual parent chain pins every mutation to the origin
       assert.equal(clinicActions(fixture).length, 1);
       const call = clinicActions(fixture)[0];
       assert.equal(call.init.method, kind === "send" ? "POST" : "PATCH");
+      const commandId = JSON.parse(String(call.init.body)).commandId;
+      assert.match(commandId, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i);
       assert.deepEqual(JSON.parse(String(call.init.body)), kind === "send"
-        ? { operatorId: ui.profileId, clinicBrief: "Synthetic technical agreement", pricePerArrivalMinor: "0", leadScope: "assigned" }
-        : { id: ui.requestId, action: kind });
+        ? { commandId, operatorId: ui.profileId, clinicBrief: "Synthetic technical agreement", pricePerArrivalMinor: "0", leadScope: "assigned" }
+        : { commandId, id: ui.requestId, action: kind });
       assert.equal(ui.refreshes(), kind === "send" ? 0 : 1);
     } finally { ui.dispose(); fixture.renderer.dispose(); }
   }
@@ -714,6 +748,7 @@ async function clinicAssignment(fixture: Fixture) {
   const directory = list([]);
   const clinic = evaluate(clinicSource, {}, {
     react: children[0].hooks, "@/lib/operatorApi": { ...operator, useOperatorList: () => directory },
+    "@/lib/useOperatorCommand": commandHook(children[0]),
     "../../../../../lib/crm/operator-contracts": contracts,
   });
   children[0].mount(clinic.ClinicOperators, [], clinicProps); await children[0].flush();
@@ -723,6 +758,8 @@ async function clinicAssignment(fixture: Fixture) {
     clinicBrief: "Synthetic agreement", pricePerArrivalMinor: "0", currency: "KZT", leadScope: "assigned" }]);
   const requests = evaluate(requestSource, { window: { confirm: () => true } }, {
     react: children[1].hooks, "@/lib/operatorApi": { ...operator, useOperatorList: () => requestsList },
+    "@/lib/useOperatorCommand": commandHook(children[1]),
+    "./OperatorCommandRecovery": { OperatorCommandRecovery: "OperatorCommandRecovery" },
     "@/lib/serverAuth": { getSupabaseAccessToken: fixture.getToken },
     "@/lib/supabase": { supabase: { auth: { getSession: fixture.sdkSession } } },
     "./OperatorLeads": { OperatorLeads: "OperatorLeads" },

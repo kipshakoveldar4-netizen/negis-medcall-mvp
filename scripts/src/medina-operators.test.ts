@@ -19,6 +19,7 @@ const REQUEST = "44444444-4444-4444-8444-444444444444";
 const LEAD = "55555555-5555-4555-8555-555555555555";
 const STAGE = "66666666-6666-4666-8666-666666666666";
 const ARRIVAL = "77777777-7777-4777-8777-777777777777";
+const COMMAND = "88888888-8888-4888-8888-888888888888";
 type Row = Record<string, unknown>;
 type Query = {
   table: string;
@@ -77,7 +78,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
     rpcMessage = "private-db-detail";
     rpcErrorFields = {};
     pipelineMissing = false;
-    rpcData = REQUEST;
+    rpcData = undefined;
     log = [];
     rpcCalls = [];
     process.env.MEDINA_PLATFORM_OWNER_IDS = OTHER;
@@ -189,12 +190,21 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
       },
       rpc(name: string, args: Row) {
         rpcCalls.push({ name, args });
-        if (!rpcFailure && name === "transition_clinic_operator_request"
+        if (!rpcFailure && name === "execute_clinic_operator_command_v2" && args.p_action !== "propose"
           && !tables.growth_operator_requests.some(row => row.id === args.p_request_id && row.workspace_id === args.p_workspace_id))
           return Promise.resolve({ data: null, error: { code: "P9603", message: "private-db-detail" } });
         if (pipelineMissing && name === "read_growth_operator_lead_pipeline")
           return Promise.resolve({data:null,error:{code:"PGRST202",message:"private-db-detail"}});
-        return Promise.resolve({ data: rpcData, error: rpcFailure ? { code: rpcFailure, message: rpcMessage, ...rpcErrorFields } : null });
+        let data=rpcData;
+        if(data===undefined){
+          data=REQUEST;
+          if(name==="execute_clinic_operator_command_v2"||name==="execute_growth_operator_command_v2"){
+            const action=String(args.p_action),targetId=action==="propose"?args.p_operator_id:args.p_request_id;
+            data={state:"committed",commandId:args.p_command_id,action,targetId,requestId:action==="propose"?REQUEST:targetId,
+              statusAtCommit:({propose:"requested",accept:"accepted",withdraw:"declined",decline:"declined",end:"ended"} as Record<string,string>)[action],committedAt:"2030-01-07T05:00:00Z"};
+          }
+        }
+        return Promise.resolve({ data, error: rpcFailure ? { code: rpcFailure, message: rpcMessage, ...rpcErrorFields } : null });
       },
     };
   }
@@ -228,7 +238,8 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
         method,
         headers: token ? { authorization: `Bearer ${token}` } : {},
         query: { path: [route], workspaceId: workspace, ...query },
-        body,
+        body: body && ["operator-inbox","clinic-operator-requests"].includes(route) && method!=="GET" && !Object.hasOwn(body,"commandId")
+          ? {...body,commandId:COMMAND}:body,
       },
       res,
     );
@@ -395,16 +406,18 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
           operatorId: OPERATOR,
           clinicBrief: "Описание",
           pricePerArrivalMinor: "150000",
-          requested_by_staff_user_id: "attacker",
-          status: "accepted",
-          currency: "USD",
         });
         assert.equal(res.statusCode, 201);
-        assert.deepEqual(rpcCalls, [{ name: "create_clinic_operator_request", args: {
+        assert.deepEqual(rpcCalls, [{ name: "execute_clinic_operator_command_v2", args: {
+          p_command_id: COMMAND, p_action: "propose", p_request_id: null,
           p_workspace_id: WORKSPACE, p_staff_user_id: "staff", p_auth_user_id: USER,
           p_operator_id: OPERATOR, p_clinic_brief: "Описание", p_price_minor: "150000", p_lead_scope: "assigned",
         } }]);
         assert.ok(!log.some(row => row.table === "growth_operator_requests" && row.op !== "select"));
+        for(const extra of [{requested_by_staff_user_id:"attacker"},{status:"accepted"},{currency:"USD"}]){
+          reset();assert.equal((await call("clinic-operator-requests","POST",{operatorId:OPERATOR,clinicBrief:"Описание",pricePerArrivalMinor:"150000",...extra})).statusCode,400);
+          assert.equal(rpcCalls.length,0);
+        }
       },
     );
     await t.test(
@@ -581,15 +594,14 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
             await call("operator-inbox", "PATCH", {
               id: REQUEST,
               action: "accept",
-              p_operator_user_id: OTHER,
             })
           ).statusCode,
           200,
         );
         assert.deepEqual(rpcCalls, [
           {
-            name: "transition_growth_operator_request",
-            args: { p_request_id: REQUEST, p_operator_user_id: USER, p_action: "accept" },
+            name: "execute_growth_operator_command_v2",
+            args: { p_command_id: COMMAND, p_request_id: REQUEST, p_operator_user_id: USER, p_action: "accept" },
           },
         ]);
         assert.ok(
@@ -597,6 +609,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
             ["staff_users", "meta_campaign_launches"].includes(row.table),
           ),
         );
+        reset();assert.equal((await call("operator-inbox","PATCH",{id:REQUEST,action:"accept",p_operator_user_id:OTHER})).statusCode,400);assert.equal(rpcCalls.length,0);
       },
     );
     await t.test("foreign operator request never reaches RPC", async () => {
@@ -627,7 +640,8 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
           ).statusCode,
           404,
         );
-        assert.deepEqual(rpcCalls, [{ name: "transition_clinic_operator_request", args: {
+        assert.deepEqual(rpcCalls, [{ name: "execute_clinic_operator_command_v2", args: {
+          p_command_id:COMMAND,p_operator_id:null,p_clinic_brief:null,p_price_minor:null,p_lead_scope:null,
           p_workspace_id: WORKSPACE, p_staff_user_id: "staff", p_auth_user_id: USER,
           p_request_id: REQUEST, p_action: "withdraw",
         } }]);
@@ -644,15 +658,15 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
             await call("operator-inbox", "PATCH", {
               id: REQUEST,
               action: "end",
-              price_per_arrival_minor: 0,
             })
           ).statusCode,
           200,
         );
-        assert.deepEqual(rpcCalls, [{ name: "transition_growth_operator_request", args: {
-          p_request_id: REQUEST, p_operator_user_id: USER, p_action: "end",
+        assert.deepEqual(rpcCalls, [{ name: "execute_growth_operator_command_v2", args: {
+          p_command_id: COMMAND, p_request_id: REQUEST, p_operator_user_id: USER, p_action: "end",
         } }]);
         assert.ok(!log.some(row => row.op === "update"));
+        reset();assert.equal((await call("operator-inbox","PATCH",{id:REQUEST,action:"end",price_per_arrival_minor:0})).statusCode,400);assert.equal(rpcCalls.length,0);
       },
     );
     await t.test(
@@ -1345,7 +1359,8 @@ test("operator entry, clinic and platform controls stay distinct", async () => {
     backend,
     /localStorage|launchMeta|meta_campaign_launches|from\("clients"\)|from\("leads"\)/,
   );
-  assert.match(backend, /transition_growth_operator_request/);
+  assert.match(backend, /execute_growth_operator_command_v2/);
+  assert.doesNotMatch(backend, /rpc\("(?:create_clinic_operator_request|transition_clinic_operator_request|transition_growth_operator_request)"/);
 });
 
 test("operator contact UI uses explicit scope and guarded stage writes without general CRM editing", async () => {

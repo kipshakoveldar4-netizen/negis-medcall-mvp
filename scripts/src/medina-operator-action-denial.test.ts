@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -29,9 +30,10 @@ type Request = {
   method: string;
   signal?: AbortSignal;
   expectedUserId?: string;
+  body?: Record<string,string>;
   claimed: boolean;
   settled: boolean;
-  succeed(data?: SyntheticList): void;
+  succeed(data?: unknown): void;
   fail(status: number): void;
   reject(): void;
 };
@@ -186,6 +188,8 @@ const compiled = (async () => {
     arrivals: "artifacts/negis/src/components/operators/OperatorArrivals.tsx",
     api: "artifacts/negis/src/lib/operatorApi.ts",
     contracts: "lib/crm/operator-contracts.ts",
+    commandHook: "artifacts/negis/src/lib/useOperatorCommand.ts",
+    commandAttempts: "artifacts/negis/src/lib/operatorCommandAttempt.ts",
   };
   const result: Record<string, string> = {};
   for (const [name, filename] of Object.entries(files)) {
@@ -201,6 +205,9 @@ const boundaries = {
   OperatorServiceCatalog: Symbol("OperatorServiceCatalog"),
   OperatorArrivals: Symbol("OperatorArrivals"),
 };
+const RecoveryBoundary=Symbol("OperatorCommandRecovery");
+const ACTION_ACTOR="11111111-1111-4111-8111-111111111111", ACTION_OTHER="22222222-2222-4222-8222-222222222222";
+const ACTION_REQUEST="33333333-3333-4333-8333-333333333333", ACTION_WORKSPACE="44444444-4444-4444-8444-444444444444";
 
 function eventTarget() {
   const listeners = new Map<string, Set<() => void>>();
@@ -214,7 +221,7 @@ function eventTarget() {
 }
 function dto(kind: Kind, label = "initial"): SyntheticList {
   const item = kind === "requests" ? {
-    id: "synthetic-request", status: "accepted", displayName: `Synthetic clinic ${label}`,
+    id: ACTION_REQUEST, status: "accepted", displayName: `Synthetic clinic ${label}`,
     clinicBrief: "Synthetic agreement", pricePerArrivalMinor: "100", currency: "KZT", leadScope: "assigned",
   } : {
     appointmentId: "synthetic-appointment", arrivalId: kind === "call" ? "synthetic-arrival" : null,
@@ -229,14 +236,16 @@ async function fixture(t: TestContext, kind: Kind) {
   const driver = hookDriver();
   t.after(() => driver.dispose());
   const requests: Request[] = [];
-  let sessionActor = "synthetic-actor";
+  let sessionActor = ACTION_ACTOR;
   let sessionRevision = 0;
-  const isSessionCurrent = () => sessionActor === "synthetic-actor" && sessionRevision === 0;
-  let props: Props = kind === "requests" ? { actorId: "synthetic-actor" }
-    : { actorId: "synthetic-actor", requestId: "synthetic-request-A", ...(kind === "confirm" ? { workspaceId: "synthetic-workspace-A", isSessionCurrent } : {}) };
+  const isSessionCurrent = () => sessionActor === ACTION_ACTOR && sessionRevision === 0;
+  let props: Props = kind === "requests" ? { actorId: ACTION_ACTOR }
+    : { actorId: ACTION_ACTOR, requestId: "synthetic-request-A", ...(kind === "confirm" ? { workspaceId: "synthetic-workspace-A", isSessionCurrent } : {}) };
+  const storage=new Map<string,string>();
   const globals = {
-    Error, AbortController,
-    window: { ...eventTarget(), confirm: () => true },
+    Error, AbortController, crypto:{randomUUID},
+    window: { ...eventTarget(), confirm: () => true,sessionStorage:{getItem:(key:string)=>storage.get(key)??null,
+      setItem:(key:string,value:string)=>storage.set(key,value),removeItem:(key:string)=>storage.delete(key)} },
     document: { ...eventTarget(), visibilityState: "visible" },
   };
   function evaluate<T>(code: string, require: (name: string) => unknown) {
@@ -271,7 +280,13 @@ async function fixture(t: TestContext, kind: Kind) {
         const request: Request = {
           url, method: init.method ?? "GET", signal: init.signal ?? undefined,
           expectedUserId: init.expectedUserId, claimed: false, settled: false,
-          succeed(data) { reply({ success: true, ...(data === undefined ? {} : { data }) }, 200); },
+          body:init.body?JSON.parse(String(init.body)):undefined,
+          succeed(data) {
+            if(data===undefined&&request.body?.commandId){const b=request.body,action=b.commandAction??b.action;
+              data=b.action==="abandon"?{state:"abandoned",commandId:b.commandId,action,targetId:b.targetId,closedAt:"2030-01-07T05:00:00Z"}
+                :{state:"committed",commandId:b.commandId,action,targetId:b.id,requestId:b.id,statusAtCommit:action==="accept"?"accepted":action==="end"?"ended":"declined",committedAt:"2030-01-07T05:00:00Z"};}
+            reply({ success: true, ...(data === undefined ? {} : { data }) }, 200);
+          },
           fail(status) { reply({ success: false, error: `Synthetic failure ${status}` }, status); },
           reject() { settle(); reject(new Error("Synthetic network failure")); },
         };
@@ -282,6 +297,12 @@ async function fixture(t: TestContext, kind: Kind) {
     };
     return unexpected(name);
   });
+  const commandAttempts=evaluate<object>(source.commandAttempts,unexpected);
+  const commandHook=evaluate<object>(source.commandHook,name=>{
+    if(name==="react")return{...driver.hooks,useLayoutEffect:driver.hooks.useEffect};
+    if(name==="@/lib/operatorApi")return api;if(name==="./operatorCommandAttempt")return commandAttempts;
+    if(name.endsWith("/crm/operator-contracts"))return contracts;return unexpected(name);
+  });
   const components = evaluate<Record<string, (props: Props) => Child>>(
     kind === "requests" ? source.requests : source.arrivals,
     (name) => {
@@ -289,6 +310,8 @@ async function fixture(t: TestContext, kind: Kind) {
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: Symbol("Fragment") };
       if (name === "lucide-react") return icons;
       if (name === "@/lib/operatorApi") return api;
+      if (name === "@/lib/useOperatorCommand") return commandHook;
+      if (name === "./OperatorCommandRecovery") return {OperatorCommandRecovery:RecoveryBoundary};
       if (name === "@/lib/serverAuth") return { getSupabaseAccessToken: async (expected: string) =>
         expected === sessionActor ? "synthetic-action-token" : "" };
       if (name === "@/lib/supabase") return { supabase: { auth: { getSession: async () => ({
@@ -349,8 +372,20 @@ async function fixture(t: TestContext, kind: Kind) {
   assert.equal(snapshot().cards, 1);
   if (kind === "requests") assert.equal(snapshot().nested.length, 3);
   if (kind === "call") assert.deepEqual(snapshot().phones, ["tel:SYNTHETIC_PHONE"]);
+  async function closeOriginalCommand(){
+    const boundary=driver.nodes().find(node=>node.type===RecoveryBoundary);assert.ok(boundary);
+    const command=boundary.props.command as {attempt:{commandId:string;action:string;targetId:string;actorId:string};path:string;
+      isCurrent(attempt?:unknown):boolean;complete(attempt:unknown,value:unknown):unknown};
+    const attempt=command.attempt;assert.ok(attempt);
+    const result=(api as {operatorApi(path:string,body:unknown,method:string,signal:undefined,actor:string,guard:()=>boolean):Promise<unknown>})
+      .operatorApi(command.path,{action:"abandon",commandId:attempt.commandId,commandAction:attempt.action,targetId:attempt.targetId},"PATCH",undefined,attempt.actorId,()=>command.isCurrent(attempt));
+    await driver.flush();take("PATCH").succeed();const value=await result;
+    const confirmed=command.complete(attempt,value);assert.ok(confirmed);
+    (boundary.props.onResolved as (attempt:unknown,result:unknown)=>void)(attempt,confirmed);await driver.flush();
+  }
   return {
     requests, take, snapshot, openNested,
+    closeOriginalCommand,
     flush: driver.flush,
     drainBeforeEffects: driver.drainBeforeEffects,
     renderBeforeEffects: driver.renderBeforeEffects,
@@ -371,12 +406,12 @@ async function fixture(t: TestContext, kind: Kind) {
       return mutation;
     },
     changeScope() {
-      props = kind === "requests" ? { ...props, workspaceId: "synthetic-workspace-B" }
+      props = kind === "requests" ? { ...props, workspaceId: ACTION_WORKSPACE }
         : { ...props, requestId: "synthetic-request-B" };
       driver.invalidate();
     },
     changeActor() {
-      props = { ...props, actorId: "synthetic-actor-B" };
+      props = { ...props, actorId: ACTION_OTHER };
       driver.invalidate();
     },
     changeSessionActor(actorId: string) {
@@ -410,7 +445,8 @@ for (const kind of kinds) {
       await ui.flush();
       assert.equal(ui.snapshot().cards, 1, "Only a fresh successful GET can restore cards");
       assert.deepEqual(ui.snapshot().nested, [], "Reverification must not reopen any of the three old nested views");
-      assert.equal(ui.snapshot().busy, false);
+      assert.equal(ui.snapshot().busy, kind==="requests");
+      if(kind==="requests"){await ui.closeOriginalCommand();assert.equal(ui.snapshot().busy,false);}
     });
   }
   for (const failure of [409, 503, "network"] as const) {
@@ -428,7 +464,7 @@ for (const kind of kinds) {
         assert.ok(after.content.includes("Synthetic failure 409"));
         ui.take("GET").succeed(dto(kind, "reverified")); await ui.flush();
         assert.equal(ui.snapshot().cards, 1); assert.deepEqual(ui.snapshot().nested, []);
-        assert.equal(ui.snapshot().busy, false);
+        assert.equal(ui.snapshot().busy, true);await ui.closeOriginalCommand();assert.equal(ui.snapshot().busy,false);
         return;
       }
       assert.equal(ui.requests.length, 2);
@@ -436,7 +472,8 @@ for (const kind of kinds) {
       assert.deepEqual(after.phones, before.phones);
       assert.deepEqual(after.nested, before.nested);
       assert.ok(after.content.includes(failure === "network" ? "Synthetic network failure" : `Synthetic failure ${failure}`));
-      assert.equal(after.busy, false);
+      assert.equal(after.busy, kind==="requests");
+      if(kind==="requests"){await ui.closeOriginalCommand();assert.equal(ui.snapshot().busy,false);}
     });
   }
   test(`${kind}: a current successful mutation still refreshes and releases busy`, async (t) => {
@@ -547,13 +584,15 @@ for (const kind of kinds) {
           await ui.flush();
           assert.equal(ui.snapshot().cards, 1);
           assert.deepEqual(ui.snapshot().nested, [], "A late refusal must close all three nested views, even after a newer GET");
-          assert.equal(ui.snapshot().busy, false);
+          assert.equal(ui.snapshot().busy, kind==="requests");
+          if(kind==="requests"){await ui.closeOriginalCommand();assert.equal(ui.snapshot().busy,false);}
         } else {
           await ui.flush();
           assert.deepEqual({ ...ui.snapshot(), busy: before.busy }, before,
             "Only the settled row lease may change; no obsolete content/error is published");
-          assert.equal(ui.snapshot().busy, false);
+          assert.equal(ui.snapshot().busy, kind==="requests");
           assert.equal(ui.requests.length, count);
+          if(kind==="requests")await ui.closeOriginalCommand();
           const next = await ui.startAction();
           next.fail(409);
           await ui.flush();
@@ -568,8 +607,8 @@ for (const transition of ["A-B", "A-B-A"] as const) {
     test(`confirm: raw ${transition} session expiration suppresses late ${outcome} without a render`, async (t) => {
       const ui = await fixture(t, "confirm");
       const obsolete = await ui.startAction();
-      ui.changeSessionActor("synthetic-actor-B");
-      if (transition === "A-B-A") ui.changeSessionActor("synthetic-actor");
+      ui.changeSessionActor(ACTION_OTHER);
+      if (transition === "A-B-A") ui.changeSessionActor(ACTION_ACTOR);
       const before = ui.snapshot();
       const writes = ui.setterCalls();
       const count = ui.requests.length;

@@ -1,6 +1,6 @@
 # Medina OS: циклы завершения продукта
 
-## Исполняемый план готовности — статус на 26 октября 2026
+## Исполняемый план готовности — статус на 27 октября 2026
 
 Владелец уточнил: «продвижение» означает доработку и готовность платформы,
 не маркетинговый запуск. Следующий порядок объединяет существующие R1–R4,
@@ -5974,6 +5974,52 @@ network/IPC guards; новые native cases не добавлены в фикс�
 retention/admission/erasure и точная target/ACL-приёмка. Cloud/Production,
 Baspana, рабочие салоны, WhatsApp, генерации, реклама и расходы не менялись.
 [Точный контракт и границы](OPERATOR-COMMAND-RECEIPTS-2026-10-26.md).
+
+### Цикл G1-C10/G7-C39: формы сотрудничества, проверка исхода и закрытие повтора — локально, 27 октября
+
+Base 093eba7. Matching API/обе настоящие формы теперь используют command UUID
+и только V2 RPC. Новая локальная 108 закрывает старые unbound/V1 service writers;
+fallback нет. До сети сохраняются только opaque actor/workspace/channel/key/
+action/target, без brief/цены/контактов. Повреждённое/недоступное хранилище,
+неполный 200 и неизвестный исход не открывают новое намерение. Черновик можно
+редактировать; подтверждение не удаляет более новую правку.
+
+Read не повторяет business POST/PATCH. Явное закрытие под тем же SQL key lock
+либо возвращает уже committed результат, либо навсегда блокирует позднюю
+исходную отправку. Это не undo сотрудничества; unconfirmed read не доказывает
+rollback. Исторический результат после удаления строки требует текущих прав,
+не открывает контакты. Recovery/response/finally привязаны к исходной команде
+и сессии, включая A/B/A и поздний отказ после закрытия.
+
+Локально приняты: focused native 108 **32/32**, raw review **44/44**, расширенный
+17-file regression **953/953**, fixed isolation **931/931** с прежними 41 readers,
+key-set/network/IPC guards. Настоящие React/HTTP/current handler/service SQL после
+raw 009–108 / 100 файлов — **19/19** с parent: шесть action/origin на 375/1440,
+committed lost ACK, оба порядка closure/commit, partial 200, reload и A/B/A;
+ровно один business запрос. Четыре component PNG с настоящим CSS/Inter сохранены,
+mobile/desktop acceptance просмотрены; это не полный shell/физический телефон.
+Ошибки первого прогона в расписании loaded/held исправлены явными assertions,
+не ослаблением late-response/no-duplicate проверок. Старые fixture ACK/imports
+и revoked RPC ожидания обновлены без восстановления legacy grants.
+
+Полный root build: оба API module modes, все workspace types, Vite и **169**
+normal/broken-renderer catch-all проверок. Наборы пересекаются, не суммируются.
+Отдельная финальная cumulative native lane 009–108 / 100 файлов — **306/306**:
+actual bodies, RLS/table/column/function ACL, future defaults, прежние workflow
+и all-table empty cleanup. Первые отказы старых service fixture вызовов 096
+исправлены переходом на полный V2 receipt, не восстановлением запрещённых
+grants и не удалением исходных business/authority assertions. Все нужные
+handles завершились успешно, owned test-процессы/каталоги убраны; оба
+пользовательских демо сохранены.
+
+Перед облаком остаются точный coordinated manifest, effective test-only
+build/runtime binding, target schema/ACL, stop/drain уже admitted legacy writers,
+retention/admission/erasure journal metadata и current Preview role/session matrix.
+Это не готовность всего G1–G8 и не коммерческая активация блогеров: обе роли
+сохраняют отдельные gates партнёрской атрибуции/выплат и заказов/прав на контент.
+Рабочая CRM/Baspana/салоны/WhatsApp, cloud SQL/config/deploy, реальные генерации,
+реклама, отправки и расходы не менялись. Protected raw 059/065 сохранены.
+[Полный контракт и доказательства](OPERATOR-COMMAND-WORKFLOW-2026-10-27.md).
 
 ### Цикл G2-C13: статус «Отложенные» — готов только локально, 22 октября
 
