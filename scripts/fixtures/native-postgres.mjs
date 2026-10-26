@@ -123,7 +123,8 @@ export async function startNativePostgres() {
       // Final resolved target and identity checks precede recursive removal.
       if (await realpath(directory) !== nativeRunDirectory(runs, runId)
         || await readFile(marker, 'utf8') !== identity) throw new Error('Unsafe native fixture cleanup target');
-      await rm(directory, { recursive: true });
+      // Windows may retain a stopped backend's file handles briefly.
+      await rm(directory, { recursive: true, maxRetries: 5, retryDelay: 100 });
     } finally {
       for (const client of sessions) await client.end().catch(() => {});
     }
