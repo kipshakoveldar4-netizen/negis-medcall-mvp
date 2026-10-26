@@ -31,7 +31,7 @@
   "lib/tiktok/videoUpload.ts": "eeeb297871732d579247830ee2de509caa5583a1154b660a3db38fc9032417de",
   "lib/whatsapp-cloud/webhook.ts": "c96fb3f8f07dd59c5828256555d39ec5e4ee25d831c151dc85011a5d5ecdd78c",
   "lib/wazzup/webhook.ts": "35b7922d0514be073819486a262c56abb03f572f22c3bf08254b77e7f9072698",
-  "artifacts/negis/src/contexts/AuthContext.tsx": "807af9f97d896eb227accf37a9a4fe5633fd1a4ed6ffc6923530c0377c3c69e9",
+  "artifacts/negis/src/contexts/AuthContext.tsx": "9ffc50c30164fa9c7162bc6f62e490c44e53d860cca3a5846db98f6030028c3a",
   "artifacts/api-server/src/routes/impersonation.ts": "856ed9e2c01b6bd9f3c3d61f7b3879e18891440433be03843287a4ac8f5c0f67",
   "artifacts/medina-control/build-preview.mjs": "79a7928fc17a4eea74baf30e6baeb925c7ede2ab14ce1e83c09362a3aaf55694",
   "artifacts/medina-control/preview-target.mjs": "c996cfffb224142fe699139ec0306288756cad6329a7b352e738dbaf09266bdb",

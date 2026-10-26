@@ -178,6 +178,8 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   // Identity bootstrap: any authenticated user, before a workspace is chosen.
   "auth-context": { kind: "bootstrap", methods: ["GET"] },
   "operator-account": { kind: "bootstrap", methods: ["GET", "POST", "PATCH"] },
+  "contributor-account": { kind: "bootstrap", methods: ["GET", "POST"] },
+  "platform-contributors": { kind: "platform", methods: ["GET", "PATCH"] },
   "operator-inbox": { kind: "bootstrap", methods: ["GET", "PATCH"] },
   "operator-leads": { kind: "bootstrap", methods: ["GET", "PATCH"] },
   "operator-services": { kind: "bootstrap", methods: ["GET"] },

@@ -377,6 +377,9 @@ export default function Login() {
               <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/operator")}>
                 Кабинет оператора колл-центра
               </button>
+              <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/contributors")}>
+                Кабинет блогера и партнёра
+              </button>
             </div>
           </div>
         </section>

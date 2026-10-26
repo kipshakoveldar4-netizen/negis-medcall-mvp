@@ -21,6 +21,9 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
     crm_site_inquiries: [{ id: id(42), site_id: id(40), lead_id: id(41) }],
     deals: [], tasks: [], wazzup_inbound_messages: [], whatsapp_cloud_inbound_messages: [],
     growth_operator_lead_assignments: [], growth_operator_bookings: [], audit_logs: [],
+    growth_contributor_profiles: [{ id: id(71), auth_user_id: users[0].auth_user_id, revision: id(72),
+      display_name: 'Own blogger', portfolio_urls: [], partner_status: 'pending', creator_status: 'pending', private_review: 'NEVER_RETURN_CONTRIBUTOR' },
+      { id: id(73), auth_user_id: id(74), revision: id(75), display_name: 'Other blogger', portfolio_urls: [], partner_status: null, creator_status: 'pending' }],
     site_blog_posts: [{ id: id(30), workspace_id: workspace, title: 'Private fixture',
       slug: 'private-fixture', excerpt: 'Private', body: 'Never public', version: 1,
       updated_at: '2026-01-01T00:00:00Z' }],
@@ -109,6 +112,13 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
   }
   try {
     for (const role of roles) {
+      const contributor = await call('contributor-account', role, 200);
+      assert.ok(!log.some(entry => entry.table === 'staff_users'), 'Independent application is not a clinic membership');
+      assert.equal(JSON.stringify(contributor).includes('NEVER_RETURN_CONTRIBUTOR'), false);
+      if (role === 'owner') assert.equal(contributor.data.displayName, 'Own blogger');
+      else assert.equal(contributor.data, null);
+      await call('platform-contributors', role, 404);
+      assert.ok(!log.some(entry => entry.table === 'growth_contributor_profiles'));
       const context = await call('auth-context', role, 200);
       assert.equal(context.mode, 'supabase');
       assert.equal(context.data.workspaceId, workspace);
@@ -189,6 +199,11 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
     await call('appointments', 'owner', 503);
     assert.ok(!log.some(entry => entry.table === 'appointments'));
     membershipFailure = false;
+    process.env.MEDINA_PLATFORM_OWNER_IDS = users[0].auth_user_id;
+    const applicants = await call('platform-contributors', 'owner', 200);
+    assert.equal(applicants.data.items.length, 2);
+    await call('contributor-account', 'owner', 404, { path: ['contributor-account', 'unexpected'] });
+    delete process.env.MEDINA_PLATFORM_OWNER_IDS;
     await call('site-page', undefined, brokenRenderer ? 503 : 404);
     if (brokenRenderer) {
       await call('site-page', undefined, 503, {}, 'HEAD');
@@ -226,6 +241,7 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
     delete process.env.MEDINA_PUBLIC_SITE_WORKSPACE_ID;
     delete process.env.MEDINA_SITE_INTAKE_KEY;
     delete process.env.MEDINA_SITE_ORIGIN;
+    delete process.env.MEDINA_PLATFORM_OWNER_IDS;
     global.fetch = async () => { throw new Error('Network forbidden'); };
   }
 };

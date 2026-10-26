@@ -62,6 +62,7 @@ try {
       const res = { setHeader() {}, status(n) { status = n; return res; },
         json(value) { body = value; }, end(value) { body = value; } };
       await handler({ method, url: '/api/crm/' + resource,
+        ...(method === 'GET' || method === 'HEAD' ? {} : { body: {} }),
         query: { path: [resource] }, headers: authorization ? { authorization } : {} }, res);
       assert.equal(status, expected, resource);
       if (expected === 401) assert.equal(body.success, false);
@@ -69,10 +70,14 @@ try {
       entryChecks++;
     }
     (async () => {
-      for (const route of ['auth-context', 'appointments', 'clients', 'staff', 'site-blog', 'site-inquiry-deletion-preview', 'site-inquiry-deletion-operations', 'lead-team-analytics']) {
+      for (const route of ['auth-context', 'appointments', 'clients', 'staff', 'site-blog', 'site-inquiry-deletion-preview', 'site-inquiry-deletion-operations', 'lead-team-analytics', 'contributor-account']) {
         await check(route, 401);
       }
       await check('auth-context', 401, 'Bearer invalid-test-token');
+      await check('contributor-account', 401, 'Bearer invalid-test-token');
+      await check('contributor-account', 401, undefined, 'POST');
+      await check('platform-contributors', 404);
+      await check('platform-contributors', 404, undefined, 'PATCH');
       await check('site-inquiry-deletion-preview', 401, 'Bearer invalid-test-token');
       await check('site-inquiry-deletion', 401, undefined, 'POST');
       await check('site-inquiry-deletion', 401, 'Bearer invalid-test-token', 'POST');

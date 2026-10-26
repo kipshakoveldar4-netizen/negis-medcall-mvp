@@ -27,6 +27,7 @@ const Onboarding = lazy(() => import("@/pages/Onboarding"));
 const JoinWorkspace = lazy(() => import("@/pages/JoinWorkspace"));
 const JoinRequest = lazy(() => import("@/pages/JoinRequest"));
 const OperatorPortal = lazy(() => import("@/pages/OperatorPortal"));
+const ContributorPortal = lazy(() => import("@/pages/ContributorPortal"));
 const ClientBasePage = lazy(() => import("@/pages/ClientBasePage"));
 const StatsPage = lazy(() => import("@/pages/StatsPage"));
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
@@ -282,6 +283,7 @@ function Router() {
           приглашения, и смешивать эти два пути нельзя. */}
       <Route path="/join-request" component={JoinRequest} />
       <Route path="/operator" component={OperatorPortal} />
+      <Route path="/contributors" component={ContributorPortal} />
       <Route path="/ai-control-center" component={() => <ProtectedPage component={AiControlCenter} permission="dashboard" />} />
       <Route path="/dashboard" component={() => <PurposePage mortgage={MortgageOverview} clinic={Dashboard} permission="dashboard" />} />
       <Route path="/analytics" component={() => <PurposePage mortgage={MortgageAnalytics} clinic={NotFound} permission="crm" />} />

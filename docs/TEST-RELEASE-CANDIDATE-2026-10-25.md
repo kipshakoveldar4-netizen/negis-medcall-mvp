@@ -148,6 +148,15 @@ this is a recorded release constraint, not fixed by a green characterization.
 Save/close legacy tabs and obtain first-rollout approval before any real release.
 Installed/real Router/real auth/offline CRUD/current Preview remain unaccepted.
 
+**G7-C35 local delta f3b69fd:** [logout ownership](AUTH-LOGOUT-OWNER-2026-10-26.md)
+fences obsolete provider completions. Provider/boundary VM 117/117, fixed
+no-network 931/931 and full build pass. No real SDK/browser logout acceptance.
+
+**Recruitment intake local delta:** [operator/blogger onboarding](CONTRIBUTOR-ONBOARDING-2026-10-26.md)
+adds both blogger applications and separate platform review. 105 is prepared
+locally only; no commercial activation, referral URL, creator job or new cloud
+account is credited. Operator workflow remains separate and unchanged.
+
 The latest recorded content/security Preview is **6c11l89kr / f18f411**,
 deployment `dpl_8CXaiuXmMfBY1EfrjqtMT2GNVjWv`: READY, target=null, aliases=[],
 846/846 sources matched. G5-C45 records site-test in loaded JS, absence of the

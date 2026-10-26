@@ -384,7 +384,8 @@ export default function OperatorPortal() {
             />
           </>
         )}
-        <footer className="flex gap-4 text-sm opacity-70">
+        <footer className="flex flex-wrap gap-4 text-sm opacity-70">
+          <Link href="/contributors">Блогерам и партнёрам</Link>
           <Link href="/privacy">Конфиденциальность</Link>
           <Link href="/terms">Условия</Link>
         </footer>
