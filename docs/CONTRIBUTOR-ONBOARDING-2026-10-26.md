@@ -169,6 +169,56 @@ bridge, account-switch/browser/mobile acceptance and exact isolated Preview.
 The owner's seven-day target is recorded in DELIVERY-CYCLES; it does not waive
 the remaining legal/retention/payment/rollout gates or authorize working clients.
 
+### Creator Stop Fence and Scoped Read Models: Local Follow-Up
+
+Base b859e1d. An actual 110 PostgreSQL reproduction read a missing command
+receipt, then applied the delayed original create. Missing is not stopped.
+Candidate 111 reuses the existing operator closure model rather than adding
+a second prepare protocol: an actor/key advisory lock coordinates execute,
+read and explicit close. Close returns the real committed result or installs
+a private stop fence; a delayed same-key writer then cannot create a job.
+It never cancels a committed job or waives exact original-intent comparison.
+Mixed receipt/fence state is unconfirmed and rerun refuses it atomically.
+
+The existing command routes now also accept POST only for the closed
+`operation: close` metadata contract. GET/POST use v2 envelopes: unconfirmed,
+committed or abandoned. Null/v1/contradictory replies are not cancellation.
+All seven creator routes, including router-level Auth/role/method denials,
+are no-store. Identity still comes only from verified Auth/company context;
+current mortgage-purpose restrictions and other staff permissions are unchanged.
+
+New exact GET paths are `creator-directory` (company owner/admin only),
+`clinic-creator-job-detail` and `creator-job-detail`. The directory returns
+approved display/portfolio fields, not Auth or review data. Detail returns
+current company display context and a contiguous submission history page of
+20, without another company/author or a silent partial history. No URL fetch,
+asset upload, paid generation, payout or legal acceptance was added.
+
+111 revokes service execution of the legacy 110 writer/command reader and
+keeps all private tables/helper closed. Adoption needs coordinated API/schema
+and a stopped/drained legacy writer, not mixed old and new instances. It is
+local only, not permission for a cloud migration. Raw SHA-256:
+`ca00557aafe4bab78a8e7643ad45ab4bea3d292ebd0f0ad2010f13f18e425a7f`.
+
+Evidence: 47/47 source review, 40/40 contract/API, selected six-file regression
+202/202, fixed 931/931 with the unchanged 41 readers and isolation guards.
+Focused native 50/50; exact raw 009-111, 103-file cumulative native 376/376.
+Six real lock-wait cases, legacy receipt compatibility, same-key conflicts,
+revocation/rebinding, strict directory and 22-version history pass. The first
+111 attempt failed/rolled back on a PL/pgSQL alias and was corrected before
+the passing runs; no partial installation is claimed. Root build/types/Vite
+pass, compiled cold-start 41+130 normal and 41+129 broken optional site (341).
+Auth/DB doubles at the HTTP layer are not a real Supabase or native HTTP/PG
+bridge. Owned clusters were cleaned; protected 059/065 and user demos remain.
+
+Next is the actual company/author UI with a metadata-only retained attempt,
+exact same-key in-memory retry, and read/close after losing the original body.
+Never persist raw briefs, fee terms or URLs in browser storage. A new key
+cannot be silently substituted while the original outcome is unknown.
+Cross-device metadata loss, retention and support remain explicit gates.
+Screens, real sessions, mobile/desktop acceptance and an attested isolated
+Preview are still unaccepted. No working client, cloud setting or expense changed.
+
 1. Isolate and attest a new Preview's build/runtime test database before applying
    105 there. Inherited/shared Production settings remain forbidden. Then test
    real sign-up email redirects, application/review and two-user session changes.

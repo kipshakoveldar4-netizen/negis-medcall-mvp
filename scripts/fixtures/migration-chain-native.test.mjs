@@ -19,7 +19,8 @@ import { reproduceUnboundVideoDispatch, exerciseVideoQuotaDispatch, exerciseVide
 import { reproduceUnboundOperatorProposal, exerciseOperatorCommands } from './operator-command-recovery-fixture.mjs';
 import { exerciseOperatorCommandClosure, operatorLegacySignatures } from './operator-command-closure-cases.mjs';
 import { exercisePartnerLedger } from './partner-ledger-cases.mjs';
-import { exerciseCreatorJobs, exerciseCreatorJobRefusals } from './creator-job-cases.mjs';
+import { exerciseCreatorJobs, exerciseCreatorJobRefusals, reproduceUnfencedCreatorCommand } from './creator-job-cases.mjs';
+import { exerciseCreatorClosure, exerciseCreatorClosureRefusals } from './creator-command-closure-cases.mjs';
 
 // Native application-chain acceptance, NOT an authority to release migrations.
 // 001-008 require an undocumented legacy baseline; data/*.sql is deliberately
@@ -159,6 +160,9 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
   await exerciseVideoQuotaMissing(db,chain.find(entry=>entry.file==='106_generated_video_quota_dispatch.sql').source,t);
   let legacyRlsBefore;
   for (const entry of chain) {
+    if(entry.file==='111_creator_command_closure.sql'){
+      await reproduceUnfencedCreatorCommand(db,t);await exerciseCreatorClosureRefusals(db,entry.source,t);
+    }
     if(entry.file==='110_creator_job_workflow.sql')await exerciseCreatorJobRefusals(db,entry.source,t);
     if(entry.file==='106_generated_video_quota_dispatch.sql') await reproduceUnboundVideoDispatch(db,t);
     if(entry.file==='107_operator_request_commands.sql') await reproduceUnboundOperatorProposal(db,t);
@@ -233,6 +237,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     if(entry.file==='108_operator_command_closure.sql') await exerciseOperatorCommandClosure(db,fixture,entry.source,t);
     if(entry.file==='109_partner_ledger_read.sql') await exercisePartnerLedger(db,fixture,entry.source,t);
     if(entry.file==='110_creator_job_workflow.sql') await exerciseCreatorJobs(db,fixture,entry.source,t);
+    if(entry.file==='111_creator_command_closure.sql') await exerciseCreatorClosure(db,fixture,entry.source,t);
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
       await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{
@@ -325,7 +330,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
 
   await t.test('RPC-only and read-only server boundaries survive later migrations', async () => {
     for (const table of ['platform_subscription_operations', 'content_telegram_deliveries', 'content_telegram_delivery_guards', 'site_deletion_operations','growth_operator_request_commands','growth_operator_command_fences',
-      'growth_creator_jobs','growth_creator_submissions','growth_creator_commands','growth_creator_events']) {
+      'growth_creator_jobs','growth_creator_submissions','growth_creator_commands','growth_creator_events','growth_creator_command_fences']) {
       const result = await one(db, `select has_table_privilege('service_role',$1,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') as tab,
         has_any_column_privilege('service_role',$1,'SELECT,INSERT,UPDATE,REFERENCES') as col`, [`public.${table}`]);
       assert.deepEqual(result, { tab: false, col: false }, `${table}: no direct service access may be restored`);
@@ -341,6 +346,8 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'public.delete_crm_site_inquiry(uuid,text,uuid,uuid[],timestamptz,uuid,uuid,uuid,boolean)',
       'public.lock_site_deletion_operation_actor(uuid,uuid,uuid)', 'public.validate_site_deletion_operation_request(jsonb)',
       'public.creator_job_actor(uuid,uuid,uuid)','public.creator_job_keys(jsonb,text[])','public.creator_job_text(jsonb,integer)','public.creator_job_links(jsonb)','public.creator_job_dto(uuid)',
+      'public.execute_growth_creator_job(uuid,uuid,uuid,uuid,uuid,uuid,text,jsonb)','public.read_growth_creator_command(uuid,uuid,uuid,uuid)',
+      'public.creator_command_result_v2(uuid,uuid,uuid,uuid,text,uuid)',
       'public.operator_request_command_receipt(public.growth_operator_request_commands)', 'public.confirm_operator_request_command(uuid,uuid,text,uuid,uuid,text)',
       ...operatorLegacySignatures,'public.lock_operator_command_reader(uuid,text,uuid,uuid)',
       'public.operator_command_result_v2(uuid,uuid,text,uuid,uuid,text,uuid)',
@@ -352,7 +359,8 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'prepare_site_deletion_operation', 'read_site_deletion_operations', 'execute_site_deletion_operation', 'close_site_deletion_operation',
       'apply_growth_contributor', 'review_growth_contributor','execute_clinic_operator_command_v2','execute_growth_operator_command_v2',
       'read_operator_request_command_v2','close_operator_request_command_v2','read_growth_partner_ledger',
-      'execute_growth_creator_job','read_growth_creator_jobs','read_growth_creator_command']) {
+      'read_growth_creator_jobs','execute_growth_creator_job_v2','read_growth_creator_command_v2','close_growth_creator_command_v2',
+      'read_growth_creator_directory','read_growth_creator_job_detail']) {
       const functions = (await db.query(`select p.oid::regprocedure::text as signature,has_function_privilege('service_role',p.oid,'EXECUTE') as allowed
         from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname=$1`, [name])).rows;
       assert.equal(functions.length, 1, name); assert.equal(functions[0].allowed, true, name);

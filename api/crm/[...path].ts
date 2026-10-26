@@ -6,7 +6,7 @@ import { handleSiteInquiryDeletion, handleSiteInquiryDeletionPreview, handleSite
 import { handlePlatformOperators, handleOperatorAccount, handleOperatorInbox, handleClinicOperators } from "../../lib/crm/operators";
 import { handleContributorAccount, handlePlatformContributors } from "../../lib/crm/contributors";
 import { handlePartnerLedger } from "../../lib/crm/partner-ledger";
-import { handleCreatorJobs } from "../../lib/crm/creator-jobs";
+import { handleCreatorJobs, handleCreatorJobReads } from "../../lib/crm/creator-jobs";
 import { handleOperatorLeads, handleClinicOperatorLeads } from "../../lib/crm/operator-leads";
 import { handleOperatorServices } from "../../lib/crm/operator-services";
 import { handleOperatorBookings } from "../../lib/crm/operator-bookings";
@@ -265,6 +265,9 @@ async function dispatch(
     case "creator-job-command": return segments.length === 1 ? handleCreatorJobs(req, res, false, true) : notFound(res);
     case "clinic-creator-jobs": return segments.length === 1 ? handleCreatorJobs(req, res, true) : notFound(res);
     case "clinic-creator-job-command": return segments.length === 1 ? handleCreatorJobs(req, res, true, true) : notFound(res);
+    case "creator-job-detail": return segments.length === 1 ? handleCreatorJobReads(req, res, false) : notFound(res);
+    case "clinic-creator-job-detail": return segments.length === 1 ? handleCreatorJobReads(req, res, true) : notFound(res);
+    case "creator-directory": return segments.length === 1 ? handleCreatorJobReads(req, res, true, true) : notFound(res);
     case "platform-operators": return handlePlatformOperators(req, res);
     case "operator-account": return handleOperatorAccount(req, res);
     case "operator-inbox": return handleOperatorInbox(req, res);
@@ -408,6 +411,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const route = resolveCrmRoute(segments);
   if (!route) {
     return notFound(res);
+  }
+
+  // Creator denials can happen in this router before the private handler runs.
+  if (["creator-jobs", "creator-job-command", "clinic-creator-jobs", "clinic-creator-job-command",
+    "creator-job-detail", "clinic-creator-job-detail", "creator-directory"].includes(route.key)) {
+    res.setHeader("Cache-Control", "no-store");
   }
 
   // This one write-only intake has its own bounded parser and bot verification.

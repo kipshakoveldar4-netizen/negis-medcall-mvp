@@ -20,6 +20,7 @@ async function seed(db){
   x.terms={creatorId:x.profile,title:'QA video',brief:'QA brief\nSecond paragraph',rightsTerms:'QA explicit rights, not public legal terms',feeMinor:'9007199254740993',currency:'KZT',dueAt:'2030-01-01T08:00:00.000Z'};
   return x;
 }
+export const seedCreatorJobFixture=seed;
 export async function creatorCommand(db,who,action,payload={},job=null,key=randomUUID()){
   const value=(await row(db,'select public.execute_growth_creator_job($1,$2,$3,$4,$5,$6,$7,$8) v',
     [who.actor,who.workspace??null,who.staff??null,key,job?.id??null,job?.revision??null,action,payload])).v;
@@ -38,7 +39,19 @@ async function cleanup(db,x){
   await db.query('delete from public.staff_users where id=any($1)',[[x.staff,x.otherStaff]]);
   await db.query('delete from public.workspaces where id=any($1)',[[x.w,x.otherW]]);
 }
+export const cleanupCreatorJobFixture=cleanup;
 async function blocked(db,waiter,blocker){for(let n=0;n<180;n++){if((await row(db,'select $1::int=any(pg_blocking_pids($2::int)) yes',[blocker,waiter])).yes)return;await new Promise(r=>setTimeout(r,10));}assert.fail('Expected the owned creator authority/command lock wait');}
+
+export async function reproduceUnfencedCreatorCommand(db,t){
+  await t.test('before command closure, an absent receipt does not prevent a late original create',async()=>rollback(db,async()=>{
+    const x=await seed(db),key=randomUUID();await db.query('set local role service_role');
+    const absent=(await row(db,'select public.read_growth_creator_command($1,$2,$3,$4) v',[x.owner,x.w,x.staff,key])).v;
+    assert.equal(absent,null,'Absence is only a point-in-time observation, not cancellation');
+    const late=await creatorCommand(db,x.clinic,'create',x.terms,null,key);
+    assert.equal(late.job.state,'offered');assert.equal(late.replayed,false);
+    assert.equal((await list(db,x.clinic)).items.length,1,'A delayed original request still writes after that absent read');
+  }));
+}
 
 export async function exerciseCreatorJobRefusals(db,source,t){
   for(const [name,change,message] of [

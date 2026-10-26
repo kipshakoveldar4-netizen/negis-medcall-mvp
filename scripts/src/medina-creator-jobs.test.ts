@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-const { creatorDeliverableUrl, parseCreatorJob, parseCreatorJobAction, parseCreatorJobPage, parseCreatorJobReceipt, parseCreatorJobTerms } = await import(new URL("../../lib/crm/creator-job-contracts.ts", import.meta.url).href);
+const { creatorDeliverableUrl, parseCreatorJob, parseCreatorJobAction, parseCreatorJobPage, parseCreatorJobReceipt, parseCreatorJobTerms,
+  parseCreatorCommandResult, parseCreatorDirectory, parseCreatorJobDetail } = await import(new URL("../../lib/crm/creator-job-contracts.ts", import.meta.url).href);
 const id = "10000000-0000-4000-8000-000000000001";
 const stamp = "2026-10-27T08:00:00.000Z";
 const terms = { creatorId: id, title: "QA video", brief: "QA brief\nSecond paragraph", rightsTerms: "QA explicit licence", feeMinor: "9007199254740993", currency: "KZT", dueAt: stamp };
@@ -65,4 +66,52 @@ test("replayed command reports the current job separately from its original appl
   assert.equal(parseCreatorJobReceipt(later), null);
   assert.ok(parseCreatorJobReceipt({ ...later, replayed: true }));
   assert.equal(parseCreatorJobReceipt({ ...receipt, originalIntent: { actor: id } }), null);
+});
+
+test("unconfirmed is not abandonment, legacy null/receipt is not a coordinated result", () => {
+  assert.deepEqual(parseCreatorCommandResult({ state: "unconfirmed", requestId: id }), { state: "unconfirmed", requestId: id });
+  for (const value of [null, { requestId: id, appliedRevision: id, replayed: false, job },
+    { state: "unconfirmed", requestId: id, action: "create" }, { state: "abandoned", requestId: id }]) assert.equal(parseCreatorCommandResult(value), null);
+});
+test("stop fences and committed results are bound to the exact original key/action/target", () => {
+  const expected = { requestId: id, action: "create", targetId: id };
+  const stopped = { ...expected, state: "abandoned", closedAt: stamp };
+  assert.ok(parseCreatorCommandResult(stopped, expected));
+  const committed = { ...expected, state: "committed", result: { requestId: id, appliedRevision: id, replayed: false, job } };
+  assert.ok(parseCreatorCommandResult(committed, expected));
+  for (const change of [{ action: "accept" }, { targetId: "20000000-0000-4000-8000-000000000001" }, { requestId: "20000000-0000-4000-8000-000000000001" }])
+    assert.equal(parseCreatorCommandResult({ ...stopped, ...change }, expected), null);
+  assert.equal(parseCreatorCommandResult({ ...stopped, result: committed.result }, expected), null);
+  assert.equal(parseCreatorCommandResult(committed, { ...expected, requestId: null }), null);
+});
+test("fresh and replayed command states respect the real job transition graph", () => {
+  const accepted = { ...job, state: "in_progress", acceptedAt: stamp };
+  const current = { state: "committed", requestId: id, action: "accept", targetId: id,
+    result: { requestId: id, appliedRevision: id, replayed: false, job: accepted } };
+  assert.ok(parseCreatorCommandResult(current));
+  assert.equal(parseCreatorCommandResult({ ...current, result: { ...current.result, job } }), null);
+  assert.equal(parseCreatorCommandResult({ ...current, action: "decline", result: { ...current.result, replayed: true } }), null);
+  assert.equal(parseCreatorCommandResult({ ...current, authUserId: id }), null);
+});
+test("creator directory is bounded, canonical, distinct and contains no hidden profile fields", () => {
+  const entry = { id, displayName: "QA author", portfolioUrls: ["https://example.com/portfolio"] };
+  assert.ok(parseCreatorDirectory({ items: [entry], hasMore: false }));
+  for (const item of [{ ...entry, authUserId: id }, { ...entry, portfolioUrls: ["javascript:alert(1)"] }, { ...entry, displayName: "" }])
+    assert.equal(parseCreatorDirectory({ items: [item], hasMore: false }), null);
+  const lower = "abcdefab-cdef-4abc-8abc-abcdefabcdef";
+  assert.equal(parseCreatorDirectory({ items: [{ ...entry, id: lower }, { ...entry, id: lower.toUpperCase() }], hasMore: false }), null);
+  assert.equal(parseCreatorDirectory({ items: [], hasMore: true }), null);
+});
+test("company detail and history require the exact current count, ordering, timestamps and latest version", () => {
+  const versions = Array.from({ length: 22 }, (_, n) => ({ sequence: n + 1, links: [`https://example.com/v${n + 1}`], note: `QA ${n + 1}`,
+    submittedAt: `2026-10-27T08:00:${String(n).padStart(2, "0")}.000Z` })).reverse();
+  const currentJob = { ...job, state: "submitted", acceptedAt: stamp, submissionCount: 22, latestSubmission: versions[0] };
+  const detail = { job: currentJob, companyName: "QA company", history: { offset: 0, items: versions.slice(0, 20), hasMore: true } };
+  assert.ok(parseCreatorJobDetail(detail));
+  assert.ok(parseCreatorJobDetail({ ...detail, history: { offset: 20, items: versions.slice(20), hasMore: false } }));
+  for (const change of [{ items: versions.slice(1, 20) }, { items: [...versions.slice(0, 19), versions[18]] }, { offset: 20 }, { hasMore: false }])
+    assert.equal(parseCreatorJobDetail({ ...detail, history: { ...detail.history, ...change } }), null);
+  assert.equal(parseCreatorJobDetail({ ...detail, workspaceId: id }), null);
+  assert.equal(parseCreatorJobDetail({ ...detail, companyName: " " }), null);
+  assert.equal(parseCreatorJobDetail({ ...detail, history: { ...detail.history, items: [{ ...versions[0], note: "different latest" }, ...versions.slice(1, 20)] } }), null);
 });

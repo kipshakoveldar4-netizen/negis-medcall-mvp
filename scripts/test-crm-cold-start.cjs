@@ -59,28 +59,35 @@ try {
     let entryChecks = 0;
     async function check(resource, expected, authorization, method = 'GET') {
       let status, body;
-      const res = { setHeader() {}, status(n) { status = n; return res; },
+      const headers = {};
+      const res = { setHeader(key, value) { headers[key] = value; }, status(n) { status = n; return res; },
         json(value) { body = value; }, end(value) { body = value; } };
       await handler({ method, url: '/api/crm/' + resource,
         ...(method === 'GET' || method === 'HEAD' ? {} : { body: {} }),
         query: { path: [resource] }, headers: authorization ? { authorization } : {} }, res);
       assert.equal(status, expected, resource);
+      if (['creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command',
+        'creator-job-detail','clinic-creator-job-detail','creator-directory'].includes(resource)) assert.equal(headers['Cache-Control'],'no-store');
       if (expected === 401) assert.equal(body.success, false);
       assert.ok(!JSON.stringify(body).includes('SIMULATED_PRIVATE_RENDERER_FAILURE'));
       entryChecks++;
     }
     (async () => {
       for (const route of ['auth-context', 'appointments', 'clients', 'staff', 'site-blog', 'site-inquiry-deletion-preview', 'site-inquiry-deletion-operations', 'lead-team-analytics', 'contributor-account', 'partner-ledger',
-        'creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command']) {
+        'creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command',
+        'creator-job-detail','clinic-creator-job-detail','creator-directory']) {
         await check(route, 401);
       }
       await check('auth-context', 401, 'Bearer invalid-test-token');
       await check('contributor-account', 401, 'Bearer invalid-test-token');
       await check('contributor-account', 401, undefined, 'POST');
       await check('partner-ledger', 401, 'Bearer invalid-test-token');
-      for (const route of ['creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command']) await check(route,401,'Bearer invalid-test-token');
+      for (const route of ['creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command',
+        'creator-job-detail','clinic-creator-job-detail','creator-directory']) await check(route,401,'Bearer invalid-test-token');
       await check('creator-jobs',401,undefined,'POST');
       await check('clinic-creator-jobs',401,undefined,'POST');
+      await check('creator-job-command',401,undefined,'POST');
+      await check('clinic-creator-job-command',401,undefined,'POST');
       await check('platform-contributors', 404);
       await check('platform-contributors', 404, undefined, 'PATCH');
       await check('site-inquiry-deletion-preview', 401, 'Bearer invalid-test-token');

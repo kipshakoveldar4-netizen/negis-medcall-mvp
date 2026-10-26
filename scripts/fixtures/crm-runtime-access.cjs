@@ -30,9 +30,12 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
   };
   const client = {
     async rpc(name, args) {
-      if (['read_growth_creator_jobs','execute_growth_creator_job','read_growth_creator_command'].includes(name)) {
-        const expected = name === 'read_growth_creator_jobs' ? ['p_actor','p_workspace','p_staff','p_offset']
-          : name === 'read_growth_creator_command' ? ['p_actor','p_workspace','p_staff','p_request']
+      if (['read_growth_creator_jobs','execute_growth_creator_job_v2','read_growth_creator_command_v2',
+        'close_growth_creator_command_v2','read_growth_creator_directory','read_growth_creator_job_detail'].includes(name)) {
+        const expected = ['read_growth_creator_jobs','read_growth_creator_directory'].includes(name) ? ['p_actor','p_workspace','p_staff','p_offset']
+          : name === 'read_growth_creator_command_v2' ? ['p_actor','p_workspace','p_staff','p_request']
+          : name === 'close_growth_creator_command_v2' ? ['p_actor','p_workspace','p_staff','p_request','p_action','p_target']
+          : name === 'read_growth_creator_job_detail' ? ['p_actor','p_workspace','p_staff','p_job','p_offset']
           : ['p_actor','p_workspace','p_staff','p_job','p_revision','p_request','p_action','p_payload'];
         assert.deepEqual(Object.keys(args),expected);
         log.push({rpc:name,args});
@@ -46,8 +49,13 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
           assert.ok(staff&&['owner','admin'].includes(staff.role));
         }
         if(name==='read_growth_creator_jobs')return{data:{items:[],hasMore:false},error:null};
-        if(name==='read_growth_creator_command')return{data:null,error:null};
-        // No writes are modelled here. Native 110 covers the real state machine.
+        if(name==='read_growth_creator_command_v2')return{data:{state:'unconfirmed',requestId:args.p_request},error:null};
+        if(name==='close_growth_creator_command_v2')return{data:{state:'abandoned',requestId:args.p_request,
+          action:args.p_action,targetId:args.p_target,closedAt:'2026-10-27T00:00:00.000Z'},error:null};
+        if(name==='read_growth_creator_directory')return{data:{items:tables.growth_contributor_profiles.filter(p=>p.creator_status==='approved')
+          .map(p=>({id:p.id,displayName:p.display_name,portfolioUrls:p.portfolio_urls})),hasMore:false},error:null};
+        if(name==='read_growth_creator_job_detail')return{data:null,error:{code:'P1111',message:'private database diagnostic'}};
+        // No business writes are modelled here. Native 110/111 covers persistence and locking.
         return{data:null,error:{code:'P1104',message:'private database diagnostic'}};
       }
       if (name === 'read_growth_partner_ledger') {
@@ -124,8 +132,10 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
     await handler({ method, url: `/api/crm/${route}`, headers: { 'content-type': 'application/json',
       ...(role ? { authorization: `Bearer fixture.${role}.signature` } : {}) },
       ...(method === 'GET' ? {} : { body: payload }),
-      query: { path: [route], ...(['site-page','partner-ledger','creator-jobs','creator-job-command'].includes(route) ? {} : { workspaceId: workspace }), ...query } }, response);
+      query: { path: [route], ...(['site-page','partner-ledger','creator-jobs','creator-job-command','creator-job-detail'].includes(route) ? {} : { workspaceId: workspace }), ...query } }, response);
     assert.equal(status, expected, `${route}: ${role || 'anonymous'}`);
+    if(['creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command',
+      'creator-job-detail','clinic-creator-job-detail','creator-directory'].includes(route))assert.equal(headers['Cache-Control'],'no-store');
     const serialized = JSON.stringify(body) ?? '';
     if (route === 'site-page' && expected === 503) {
       assert.equal(headers['Cache-Control'], 'no-store');
@@ -160,6 +170,15 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
       const companyJobs=await call('clinic-creator-jobs',role,role==='doctor'?403:200);
       if(role!=='doctor')assert.deepEqual(companyJobs.data,{items:[],hasMore:false});
       await call('clinic-creator-job-command',role,role==='doctor'?403:200,{requestId:id(81)});
+      const directory=await call('creator-directory',role,role==='doctor'?403:200);
+      if(role!=='doctor')assert.deepEqual(directory.data,{items:[],hasMore:false});
+      await call('creator-job-detail',role,403,{jobId:id(82)});
+      await call('clinic-creator-job-detail',role,403,{jobId:id(82)});
+      for(const [route,action] of [['creator-job-command','submit'],['clinic-creator-job-command','create']]) {
+        const stopped=await call(route,role,route==='creator-job-command'||role==='doctor'?403:200,{},'POST',
+          {operation:'close',requestId:id(81),action,targetId:id(82)});
+        if(route==='clinic-creator-job-command'&&role!=='doctor')assert.equal(stopped.data.state,'abandoned');
+      }
       const context = await call('auth-context', role, 200);
       assert.equal(context.mode, 'supabase');
       assert.equal(context.data.workspaceId, workspace);
@@ -246,19 +265,33 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
     const creatorJobs=await call('creator-jobs','owner',200);
     assert.deepEqual(creatorJobs.data,{items:[],hasMore:false});
     assert.ok(!log.some(entry=>entry.table==='staff_users'),'Independent creator Auth does not require a clinic membership');
+    const creatorDirectory=await call('creator-directory','owner',200);
+    assert.deepEqual(creatorDirectory.data,{items:[{id:id(71),displayName:'Own blogger',portfolioUrls:[]}],hasMore:false});
     users[0].status='inactive';
     await call('creator-jobs','owner',200);
     await call('clinic-creator-jobs','owner',403);
     users[0].status='active';
     await call('creator-job-command','owner',200,{requestId:id(81)});
+    const stopped=await call('creator-job-command','owner',200,{},'POST',
+      {operation:'close',requestId:id(81),action:'submit',targetId:id(82)});
+    assert.equal(stopped.data.state,'abandoned');
+    assert.ok(!log.some(entry=>entry.table==='staff_users'),'Creator close uses only its verified Auth');
+    await call('creator-job-detail','owner',403,{jobId:id(82)});
     tables.growth_contributor_profiles[0].creator_status='suspended';
     await call('creator-jobs','owner',403);
     tables.growth_contributor_profiles[0].creator_status='approved';
-    for(const route of ['creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command'])
+    for(const route of ['creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command',
+      'creator-job-detail','clinic-creator-job-detail','creator-directory'])
       await call(route,'owner',404,{path:[route,'unexpected']});
     await call('creator-jobs','owner',400,{workspaceId:workspace});
     await call('clinic-creator-jobs','owner',403,{workspaceId:id(2)});
     await call('creator-jobs','owner',405,{},'PATCH');
+    for(const route of ['creator-job-detail','clinic-creator-job-detail','creator-directory']) {
+      await call(route,'owner',405,{},'POST');
+      await call(route,'owner',400,{offset:'01',jobId:id(82)});
+    }
+    await call('creator-directory','owner',403,{workspaceId:id(2)});
+    assert.ok(!log.some(entry=>entry.rpc),'Directory cannot select another company');
     const ownLedger = await call('partner-ledger', 'owner', 200);
     assert.deepEqual(ownLedger.data, { state: 'not_activated' });
     assert.ok(!log.some(entry=>entry.table==='staff_users'), 'Own partner report does not require clinic membership');

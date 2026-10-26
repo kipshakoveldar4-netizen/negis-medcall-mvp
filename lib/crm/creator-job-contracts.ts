@@ -1,3 +1,4 @@
+import { publicPortfolioUrl } from "./contributor-contracts";
 export const CREATOR_JOB_PAGE_SIZE = 20;
 export const creatorJobStates = ["offered", "in_progress", "submitted", "changes_requested", "approved", "declined", "cancelled"] as const;
 export type CreatorJobState = typeof creatorJobStates[number];
@@ -13,6 +14,13 @@ export type CreatorJobAction = { action: "accept"; payload: { termsRevision: str
   | { action: "decline" | "approve" | "cancel"; payload: Record<string, never> }
   | { action: "submit"; payload: { links: string[]; note: string } }
   | { action: "request_changes"; payload: { feedback: string } };
+export type CreatorCommandAction = CreatorJobAction["action"] | "create";
+export type CreatorCommandIdentity = { requestId: string; action: CreatorCommandAction; targetId: string };
+export type CreatorCommandResult = { state: "unconfirmed"; requestId: string }
+  | (CreatorCommandIdentity & { state: "abandoned"; closedAt: string })
+  | (CreatorCommandIdentity & { state: "committed"; result: NonNullable<ReturnType<typeof parseCreatorJobReceipt>> });
+export type CreatorDirectoryEntry = { id: string; displayName: string; portfolioUrls: string[] };
+export type CreatorJobDetail = { job: CreatorJob; companyName: string; history: { offset: number; items: CreatorSubmission[]; hasMore: boolean } };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const object = (value: unknown): Record<string, unknown> | null => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 function keys(value: Record<string, unknown>, expected: string[]) {
@@ -105,4 +113,69 @@ export function parseCreatorJobReceipt(value: unknown): { requestId: string; app
   const job = parseCreatorJob(row.job);
   if (!job || (!row.replayed && row.appliedRevision !== job.revision)) return null;
   return { requestId: row.requestId, appliedRevision: row.appliedRevision, replayed: row.replayed, job };
+}
+
+const actions: readonly string[] = ["create", "accept", "decline", "submit", "request_changes", "approve", "cancel"];
+export function parseCreatorCommandIdentity(value: unknown): CreatorCommandIdentity | null {
+  const row = object(value);
+  return row && keys(row, ["requestId", "action", "targetId"]) && id(row.requestId) && id(row.targetId)
+    && typeof row.action === "string" && actions.includes(row.action) ? { requestId: row.requestId, action: row.action as CreatorCommandAction, targetId: row.targetId } : null;
+}
+export function parseCreatorCommandResult(value: unknown, expected?: CreatorCommandIdentity): CreatorCommandResult | null {
+  if (expected && !parseCreatorCommandIdentity(expected)) return null;
+  const row = object(value);
+  if (!row || !id(row.requestId) || (expected && row.requestId.toLowerCase() !== expected.requestId.toLowerCase())) return null;
+  if (row.state === "unconfirmed") return keys(row, ["state", "requestId"]) ? { state: "unconfirmed", requestId: row.requestId } : null;
+  const identity = parseCreatorCommandIdentity({ requestId: row.requestId, action: row.action, targetId: row.targetId });
+  if (!identity || (expected && (identity.action !== expected.action || identity.targetId.toLowerCase() !== expected.targetId.toLowerCase()))) return null;
+  if (row.state === "abandoned" && keys(row, ["state", "requestId", "action", "targetId", "closedAt"]) && instant(row.closedAt))
+    return { state: "abandoned", ...identity, closedAt: row.closedAt };
+  if (row.state !== "committed" || !keys(row, ["state", "requestId", "action", "targetId", "result"])) return null;
+  const result = parseCreatorJobReceipt(row.result);
+  if (!result || result.requestId.toLowerCase() !== row.requestId.toLowerCase()
+    || (identity.action !== "create" && result.job.id.toLowerCase() !== identity.targetId.toLowerCase())) return null;
+  const states: Record<CreatorCommandAction, readonly CreatorJobState[]> = {
+    create: creatorJobStates, accept: ["in_progress", "submitted", "changes_requested", "approved"], decline: ["declined"],
+    submit: ["submitted", "changes_requested", "approved"], request_changes: ["changes_requested", "submitted", "approved"], approve: ["approved"], cancel: ["cancelled"],
+  };
+  const initial: Record<CreatorCommandAction, CreatorJobState> = { create: "offered", accept: "in_progress", decline: "declined", submit: "submitted",
+    request_changes: "changes_requested", approve: "approved", cancel: "cancelled" };
+  if (result.replayed ? !states[identity.action].includes(result.job.state) : result.job.state !== initial[identity.action]) return null;
+  return { state: "committed", ...identity, result };
+}
+export function parseCreatorDirectory(value: unknown): { items: CreatorDirectoryEntry[]; hasMore: boolean } | null {
+  const row = object(value);
+  if (!row || !keys(row, ["items", "hasMore"]) || !Array.isArray(row.items) || row.items.length > CREATOR_JOB_PAGE_SIZE
+    || typeof row.hasMore !== "boolean" || (row.hasMore && row.items.length !== CREATOR_JOB_PAGE_SIZE)) return null;
+  const items: CreatorDirectoryEntry[] = [];
+  for (const value of row.items) {
+    const item = object(value);
+    if (!item || !keys(item, ["id", "displayName", "portfolioUrls"]) || !id(item.id) || !text(item.displayName, 120, false)
+      || !Array.isArray(item.portfolioUrls) || item.portfolioUrls.length > 5 || new Set(item.portfolioUrls).size !== item.portfolioUrls.length
+      || !item.portfolioUrls.every(url => publicPortfolioUrl(url) === url)) return null;
+    items.push({ id: item.id, displayName: item.displayName, portfolioUrls: [...item.portfolioUrls] });
+  }
+  return new Set(items.map(item => item.id.toLowerCase())).size === items.length ? { items, hasMore: row.hasMore } : null;
+}
+export function parseCreatorJobDetail(value: unknown): CreatorJobDetail | null {
+  const row = object(value), history = object(row?.history);
+  if (!row || !keys(row, ["job", "companyName", "history"]) || !text(row.companyName, 200, false) || !history
+    || !keys(history, ["offset", "items", "hasMore"]) || !Number.isInteger(history.offset) || (history.offset as number) < 0
+    || (history.offset as number) > 1000000 || !Array.isArray(history.items) || typeof history.hasMore !== "boolean") return null;
+  const job = parseCreatorJob(row.job);
+  if (!job) return null;
+  const remaining = Math.max(0, job.submissionCount - (history.offset as number));
+  if (history.items.length !== Math.min(CREATOR_JOB_PAGE_SIZE, remaining) || history.hasMore !== (remaining > CREATOR_JOB_PAGE_SIZE)) return null;
+  const items: CreatorSubmission[] = [];
+  for (const [index, value] of history.items.entries()) {
+    const item = object(value);
+    if (!item || !keys(item, ["sequence", "links", "note", "submittedAt"]) || item.sequence !== remaining - index
+      || !links(item.links) || typeof item.note !== "string" || item.note.length > 2000 || /[\u0000-\u0009\u000b-\u001f\u007f]/.test(item.note)
+      || !instant(item.submittedAt) || Date.parse(item.submittedAt) < Date.parse(job.acceptedAt!)) return null;
+    items.push({ sequence: item.sequence as number, links: [...item.links], note: item.note, submittedAt: item.submittedAt });
+    if ((index > 0 && Date.parse(items[index - 1].submittedAt) < Date.parse(item.submittedAt))
+      || (job.approvedAt !== null && Date.parse(job.approvedAt) < Date.parse(item.submittedAt))) return null;
+  }
+  if (history.offset === 0 && job.latestSubmission && JSON.stringify(items[0]) !== JSON.stringify(job.latestSubmission)) return null;
+  return { job, companyName: row.companyName, history: { offset: history.offset as number, items, hasMore: history.hasMore } };
 }
