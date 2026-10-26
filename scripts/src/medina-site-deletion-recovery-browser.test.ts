@@ -105,7 +105,11 @@ f.reset();window.__analyticsFixture=f;`;
     if (req.url !== "/") { res.writeHead(404).end(); return; }
     res.setHeader("Content-Type", "text/html; charset=utf-8");res.end('<!doctype html><html lang="ru"><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>'+css+'</style></head><body><main class="mx-auto w-full max-w-[1440px] p-4" id="root"></main><script src="/bundle.js"></script></body></html>');
   });
-  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>(resolve => {
+    server.close(() => resolve());
+    server.closeAllConnections();
+  }));
   const origin = `http://127.0.0.1:${(server.address() as any).port}`;
   const b = await ownedAnalyticsBrowser(origin, "f && document.body.textContent.includes('Результат не подтверждён')");t.after(b.close);
   const run = b.evaluate, settle = () => run("for(let i=0;i<10;i++)await new Promise(resolve=>setTimeout(resolve,0));");

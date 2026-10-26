@@ -1900,7 +1900,7 @@ test("P3d lead-manager correction and results are denied before profile lookup e
 
 for (const role of ["owner", "admin"]) {
   test(`P3e ${role} results allow only supported periods and verified identity`, async () => {
-    const fixture: MortgageOutcomesFixture = { calls: [], result: { members: [] } };
+    const fixture: MortgageOutcomesFixture = { calls: [], result: { members: [], timeZone: "Asia/Almaty" } };
     await withRouter({ memberships: [{ ...assignedLeadMember, role }], mortgageOutcomes: fixture,
       rows: { workspace_settings: outcomesProfile } }, async ctx => {
       for (const days of [undefined, "7", "30", "90"]) {
@@ -1920,6 +1920,21 @@ for (const role of ["owner", "admin"]) {
         assert.equal(businessQueries(log).length, 0);
       }
       assert.deepEqual(fixture.calls, []);
+    });
+  });
+
+  test(`P3e ${role} rejects results without a valid authoritative time zone`, async () => {
+    const fixture: MortgageOutcomesFixture = { calls: [] };
+    await withRouter({ memberships: [{ ...assignedLeadMember, role }], mortgageOutcomes: fixture,
+      rows: { workspace_settings: outcomesProfile } }, async ctx => {
+      for (const timeZone of [undefined, null, "", "not/an-iana-zone", 5, {}]) {
+        fixture.result = { members: [], timeZone, privateDetail: "must-not-leak" };
+        const { res, log } = await ctx.call({ segments: ["mortgage-results"], query: { days: "30", timeZone: "Asia/Almaty" } });
+        assert.equal(res.statusCode, 502);
+        assert.deepEqual(res.body, { success: false, code: "outcomes_unavailable", error: "Не удалось загрузить результаты" });
+        assertWorkspaceProfileQuery(log, WORKSPACE_A);
+        assert.deepEqual(fixture.calls.at(-1), { name: "read_mortgage_results", args: { ...outcomesIdentity, p_days: 30 } });
+      }
     });
   });
 }

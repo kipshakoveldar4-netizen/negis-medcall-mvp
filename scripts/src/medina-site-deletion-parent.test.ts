@@ -160,7 +160,10 @@ test("owned Chromium: real LeadsPage/session and composed deletion transport", {
     res.end('<!doctype html><html lang="ru"><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div><script src="/bundle.js"></script></body></html>');
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
-  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  t.after(() => new Promise<void>(resolve => {
+    server.close(() => resolve());
+    server.closeAllConnections();
+  }));
   const origin = `http://127.0.0.1:${(server.address() as any).port}`;
   const profile = await mkdtemp(path.join(tmpdir(), "medina-site-deletion-parent-owned-"));
   const child = spawn(browserPath, ["--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-extensions", "--disable-sync",

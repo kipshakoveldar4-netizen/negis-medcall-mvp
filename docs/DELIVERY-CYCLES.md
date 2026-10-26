@@ -6063,6 +6063,52 @@ Cloud/Production/рабочая CRM/Baspana/салоны/WhatsApp, real sends, �
 Control payment/payout и creator jobs/rights/fees, остальные G1–G8 gates.
 [Точный результат и ограничения](PARTNER-LEDGER-2026-10-27.md).
 
+### Цикл G7-C41: восстановлена проверка границ запросов — локально, 27 октября
+
+Base 0261259. Закрыты три сохранённых падения G7-C40 без изменения runtime,
+API, SQL, прав, платёжных правил или состава прежнего broad-набора:
+
+- Старый L5d ожидал прямой prop request=crmFetch и два model-вызова, а
+  настоящий LeadsPage уже передаёт lifetime-bound deletionRequest в обычную
+  форму и durable recovery; AiControlCenter использует свой account-bound
+  access.request и remoteRead. Эти обёртки не заменены общим запросом.
+- Для этих двух сложных цепочек добавлены ручные reviewed-source receipts
+  пяти полных исходников (нормализуются только CRLF/LF), закрытый список
+  runtime imports и точные AST-позиции двух/четырёх literal CRM-вызовов.
+  Подмена, неполный комплект, другой потребитель, alias/namespace/dynamic/
+  require/reexport и расширения JS/TS дают отказ. Type-only edges не дают
+  runtime-доступ. Любая правка требует повторного review, хеши не обновляются
+  автоматически. Это закрытый source snapshot, не общий semantic/dataflow
+  анализ и не доказательство полной авторизации приложения.
+- Прежний global-by-name допуск request удалён; остальные structural
+  admin/object/mortgage и raw-fetch проверки сохранены. Проверены подмены
+  обоих JSX consumers, account/workspace/dispatch fences, late options,
+  лишние вызовы, private-session export и comment decoys.
+- P3e positive fixture теперь содержит обязательный authoritative timeZone.
+  Новые owner/admin проверки отказывают отсутствующим/неверным значениям:
+  query timeZone не заменяет ответ, private diagnostics не выдаются.
+
+Финальный transport + tenant набор **491/491**; прежние пять файлов partner/
+contributors/growth/API/tenant теперь **229/229**, а не 224/227. Прежние ошибки
+и первый 489-case прогон сохранены в логах, не исключены из итоговой проверки.
+Отдельный actual React/owned Chromium набор из пяти файлов — **286/286**:
+актуальные формы и parent/recovery/API helper, потеря ответа, отзыв, A/B/A,
+исходный actor и отсутствие автоматического повтора с synthetic Auth/HTTP.
+Первый прогон зависал на cleanup preconnect сокета и потребовал закрыть только
+его owned browser; он не засчитан чистой приёмкой. Три deletion harness теперь
+закрывают свои HTTP connections при teardown. Полный повтор без вмешательства
+завершён за 75 секунд; assertions/границы сетевых запросов не ослаблены.
+
+Fixed no-network **931/931**, те же 41 readers/key-set/network/IPC guards.
+Root typecheck и финальный scripts typecheck прошли. Наборы пересекаются,
+не складываются в процент покрытия. Новый build/native SQL не запускался:
+ни app/runtime, ни API imports, ни зависимости/миграции не менялись.
+Все нужные handles завершены, свои браузеры/серверы убраны, user demos 5260/
+5264 сохранены. Protected raw 059/065 не изменены и не staged. Облако,
+Production, Baspana, салоны, WhatsApp, внешние отправки, генерации и расходы
+не затронуты. Current coordinated Preview/schema/ACL, остальные G1–G8 gates,
+рефералы/активация/выплаты и полный creator job workflow остаются открытыми.
+
 ### Цикл G2-C13: статус «Отложенные» — готов только локально, 22 октября
 
 - Код/тесты/документация в **9c42ef82f335fc621b8d985325d14d7c889d28f3**.

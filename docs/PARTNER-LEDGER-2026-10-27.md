@@ -83,17 +83,30 @@ or claim public recruitment, financial activation or complete platform readiness
   and network/IPC guards. New native/browser/partner suites are separate; counts
   overlap and are not cumulative platform coverage.
 
-The wider five-file regression is **224/227, not green**. Its three failures
-remain visible: L5d's old static transport verifier cannot trace current
+The initial wider five-file regression was **224/227, not green**. Its three
+failures are preserved in the initial log: L5d's old static transport verifier cannot trace current
 AiControlCenter and site-deletion wrappers; P3e owner/admin fixtures provide
 only `{members:[]}` while the current results API requires a valid timeZone.
 An actual full-source-map comparison against base HEAD reproduces the same
 four L5d findings before and after this increment; the results implementation
 and the old P3e fixture are unchanged. These are not treated as proof of a
 new partner defect or dismissed as permission to weaken authentication.
-Next local verification cycle must repair the exact transport proof with
-negative controls and modernize those positive fixture responses. The broad
-suite is not represented as passing by excluding its failures.
+The G7-C41 follow-up repaired the verifier/fixtures, rather than excluding
+these tests: the same five files now pass **229/229**, including two new
+invalid/missing-time-zone refusal cases. Transport audit plus tenant isolation
+passes **491/491** with current negative controls. The complex deletion and
+AI-control wrappers use explicit reviewed-source receipts and exact literal
+call-position admission, not a blanket request-name exemption or a claim of
+general JavaScript dataflow proof. Any source edit needs re-review; additional
+runtime deletion consumers fail closed. The current real React/owned Chromium
+five-file runtime suite separately passes **286/286** with synthetic Auth/HTTP.
+An initial run needed assistance closing its owned test browser after a cleanup
+socket stall; it is not the clean acceptance run. The three deletion harnesses
+now close only their own HTTP connections during teardown, and the full final
+runtime run terminates unassisted in about 75 seconds. App/runtime/SQL source
+is unchanged. Fixed isolation remains **931/931** with unchanged guards;
+root typecheck and final scripts typecheck pass. No new build, native SQL run
+or cloud acceptance is claimed by this verification-only follow-up.
 
 Required handles reached terminal states. Current owned native/browser/server
 fixtures were cleaned. Five older native run directories predating this cycle

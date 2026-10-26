@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { crmTransportOffenders } from "./crm-transport-audit";
+import { reviewedScopedTransports } from "./reviewed-scoped-transports";
 
 const model = "lib/siteInquiryDeletion.ts";
 const component = "components/crm/site-inquiry-deletion.tsx";
 const page = "pages/LeadsPage.tsx";
+const recovery = "components/crm/site-deletion-recovery.tsx";
 const sources = new Map<string, string>();
-for (const file of [model, component, page]) {
+for (const file of [model, component, page, recovery]) {
   sources.set(file, await readFile(new URL(`../../artifacts/negis/src/${file}`, import.meta.url), "utf8"));
 }
 
@@ -24,12 +26,12 @@ test("actual deletion composition passes only with the authenticated transport",
 });
 
 for (const [name, file, from, to] of [
-  ["bare fetch prop", page, "request={crmFetch}", "request={fetch}"],
-  ["missing prop", page, "request={crmFetch}", ""],
-  ["spread override", page, "request={crmFetch}", "request={crmFetch} {...unsafeProps}"],
-  ["duplicate prop", page, "request={crmFetch}", "request={crmFetch} request={fetch}"],
+  ["bare fetch prop", page, "request={access.deletionRequest}", "request={fetch}"],
+  ["missing prop", page, "request={access.deletionRequest}", ""],
+  ["spread override", page, "request={access.deletionRequest}", "request={access.deletionRequest} {...unsafeProps}"],
+  ["duplicate prop", page, "request={access.deletionRequest}", "request={access.deletionRequest} request={fetch}"],
   ["fake API import", page, 'from "@/lib/api"', 'from "@/lib/not-authenticated"'],
-  ["shadowed helper", page, "request={crmFetch}", "request={(() => { const crmFetch = fetch; return crmFetch; })()}"],
+  ["shadowed helper", page, "request={access.deletionRequest}", "request={(() => { const crmFetch = fetch; return crmFetch; })()}"],
   ["unsafe forwarding", component, "createSiteInquiryDeletion(workspaceId, leadId, request,", "createSiteInquiryDeletion(workspaceId, leadId, fetch,"],
   ["default bare fetch", model, "request: DeletionRequest,", "request: DeletionRequest = fetch,"],
   ["reassigned request", model, "const response = await request(base,", "request = fetch; const response = await request(base,"],
@@ -76,10 +78,140 @@ test("arrow wrappers delegate to the real helper, not a comment or neighboring f
   ]) assert.notDeepEqual(crmTransportOffenders(new Map([["components/admin/test.ts", source]])), []);
 });
 
-test("a comment describing the old composition cannot bless a replaced prop", () => {
-  const changed = mutate(page, "request={crmFetch}", "request={fetch}");
-  changed.set(page, changed.get(page)! + "\n// <SiteInquiryDeletion request={crmFetch} />\n");
+test("a comment describing the reviewed composition cannot bless a replaced prop", () => {
+  const changed = mutate(page, "request={access.deletionRequest}", "request={fetch}");
+  changed.set(page, changed.get(page)! + "\n// <SiteInquiryDeletion request={access.deletionRequest} />\n");
   assert.notDeepEqual(crmTransportOffenders(changed), []);
+});
+
+for (const [label, file, from, to] of [
+  ["raw guarded request", page, "await crmFetch(path, { ...init,", "await fetch(path, { ...init,"],
+  ["missing actor", page, "expectedUserId: actorId,", ""],
+  ["forged actor", page, "expectedUserId: actorId,", "expectedUserId: otherActor,"],
+  ["late options override", page, "dispatchGuard: isDispatchCurrent });", "dispatchGuard: isDispatchCurrent, ...init });"],
+  ["weakened caller guard", page, "dispatchGuard() && !init?.signal?.aborted", "true && !init?.signal?.aborted"],
+  ["missing input guard", page, "&& (init?.dispatchGuard?.() ?? true)", ""],
+  ["wrong workspace fence", page, "readWorkspaceId() === workspaceId", "readWorkspaceId() !== workspaceId"],
+  ["ordinary rather than deletion lifetime", page, "requestWithGuard(path, init, deletionLifetime.isCurrent)", "requestWithGuard(path, init, isCurrent)"],
+  ["unguarded content", page, "<LeadsPageContent key={lifetime.epoch} access={access}", "<LeadsPageContent key={lifetime.epoch} access={unsafe}"],
+  ["raw recovery request", recovery, "owner.request(path,", "fetch(path,"],
+  ["missing recovery dispatch fence", recovery, "dispatchGuard: owner.isCurrent", "dispatchGuard: () => true"],
+  ["missing recovery actor check", recovery, "parseSiteDeletionOperations(body, owner.workspaceId, owner.actorId)", "parseSiteDeletionOperations(body, owner.workspaceId, otherActor)"],
+] as const) {
+  test(`reviewed deletion receipt rejects ${label}`, () => {
+    const changed = mutate(file, from, to);
+    assert.ok(reviewedScopedTransports(changed).failures.has(file));
+    assert.notDeepEqual(crmTransportOffenders(changed), []);
+  });
+}
+
+for (const tag of ["SiteDeletionRecovery", "SiteInquiryDeletion"]) {
+  test(`both deletion consumers are checked independently: ${tag}`, () => {
+    const source = sources.get(page)!;
+    const start = source.indexOf("<" + tag);
+    assert.ok(start > 0);
+    const tail = source.slice(start);
+    assert.ok(tail.includes("request={access.deletionRequest}"));
+    const changed = new Map(sources).set(page, source.slice(0, start)
+      + tail.replace("request={access.deletionRequest}", "request={fetch}"));
+    assert.ok(reviewedScopedTransports(changed).failures.has(page));
+    assert.notDeepEqual(crmTransportOffenders(changed), []);
+  });
+}
+
+for (const missing of sources.keys()) {
+  test(`reviewed deletion receipt requires the complete source chain: ${missing}`, () => {
+    const changed = new Map(sources); changed.delete(missing);
+    assert.ok(reviewedScopedTransports(changed).failures.size > 0);
+    assert.notDeepEqual(crmTransportOffenders(changed), []);
+  });
+}
+
+for (const [label, extra] of [
+  ["recovery mount", 'import { SiteDeletionRecovery } from "@/components/crm/site-deletion-recovery"; const unsafe = <SiteDeletionRecovery request={fetch} />;'],
+  ["dynamic import", 'const unsafe = import("@/lib/siteInquiryDeletion");'],
+  ["require import", 'const unsafe = require("@/lib/siteInquiryDeletion");'],
+  ["relative import", 'import { createSiteInquiryDeletion } from "../../lib/siteInquiryDeletion";'],
+  ["JavaScript extension import", 'import { createSiteInquiryDeletion } from "@/lib/siteInquiryDeletion.js";'],
+  ["TypeScript extension import", 'import { createSiteInquiryDeletion } from "@/lib/siteInquiryDeletion.ts";'],
+  ["type specifier plus runtime alias", 'import { type DeletionRequest, createSiteInquiryDeletion as unsafe } from "@/lib/siteInquiryDeletion";'],
+  ["type specifier plus default import", 'import unsafe, { type DeletionRequest } from "@/lib/siteInquiryDeletion";'],
+  ["named reexport", 'export { createSiteInquiryDeletion } from "@/lib/siteInquiryDeletion";'],
+] as const) {
+  test(`reviewed deletion closure rejects additional ${label}`, () => {
+    assert.notDeepEqual(crmTransportOffenders(new Map(sources).set("components/crm/unsafe.tsx", extra)), []);
+  });
+}
+
+test("type-only imports do not create another deletion transport consumer", () => {
+  const extra = 'import type { DeletionRequest as RequestType } from "@/lib/siteInquiryDeletion"; export type { DeletionLifetime } from "@/lib/siteInquiryDeletion";';
+  assert.deepEqual(crmTransportOffenders(new Map(sources).set("components/crm/types.ts", extra)), []);
+});
+
+test("reviewed receipts normalize only line endings, not comments or changed code", () => {
+  const lf = new Map([...sources].map(([file, source]) => [file, source.replace(/\r\n/g, "\n")]));
+  const crlf = new Map([...lf].map(([file, source]) => [file, source.replace(/\n/g, "\r\n")]));
+  assert.deepEqual(crmTransportOffenders(lf), []);
+  assert.deepEqual(crmTransportOffenders(crlf), []);
+  lf.set(page, lf.get(page)! + "\n// Any edit needs source re-review.\n");
+  assert.ok(reviewedScopedTransports(lf).failures.has(page));
+});
+
+test("reviewed deletion admission is limited to the two literal call positions", () => {
+  const reviewed = reviewedScopedTransports(sources);
+  assert.deepEqual([...reviewed.failures], []);
+  assert.deepEqual([...reviewed.calls.keys()], [model]);
+  assert.equal(reviewed.calls.get(model)?.size, 2);
+  for (const file of sources.keys()) {
+    const changed = new Map(sources).set(file, sources.get(file)!
+      + '\nfunction unsafe(request: Function) { return request("/api/crm/leads"); }');
+    assert.notDeepEqual(crmTransportOffenders(changed), []);
+  }
+});
+
+const controlFile = "pages/AiControlCenter.tsx";
+const controlSource = await readFile(new URL(`../../artifacts/negis/src/${controlFile}`, import.meta.url), "utf8");
+const controlSources = new Map([[controlFile, controlSource]]);
+
+test("actual AI control lifetime admits exactly its four reviewed literal CRM calls", () => {
+  const reviewed = reviewedScopedTransports(controlSources);
+  assert.deepEqual([...reviewed.failures], []);
+  assert.equal(reviewed.calls.get(controlFile)?.size, 4);
+  assert.deepEqual(crmTransportOffenders(controlSources), []);
+});
+
+for (const [label, from, to] of [
+  ["raw transport", "await crmFetch(path, {", "await fetch(path, {"],
+  ["fake API import", 'from "@/lib/api"', 'from "@/lib/not-authenticated"'],
+  ["missing actor", "expectedUserId: actorId,", ""],
+  ["late option override", "dispatchGuard: isCurrent,", "dispatchGuard: isCurrent, ...init,"],
+  ["weakened dispatch fence", "dispatchGuard: isCurrent,", "dispatchGuard: () => true,"],
+  ["missing source lifetime", "if (!isCurrent() || localDemo)", "if (localDemo)"],
+  ["no auth retirement", "if ([401, 403].includes(response.status))", "if (false)"],
+  ["no late-response check", 'if (!isCurrent()) throw new DOMException("Control view changed", "AbortError");', ""],
+  ["raw nested read", "request: (path, init) => access.request(path,", "request: (path, init) => fetch(path,"],
+  ["unscoped fetchJson", "const response = await access.request(path);", "const response = await fetch(path);"],
+  ["remoteRead bypass", ": fetchJson(readAccess, path);", ": fetch(path);"],
+  ["exported private session", "function AiControlSession(", "export function AiControlSession("],
+  ["unsafe session prop", "access={access}", "access={unsafe}"],
+  ["duplicate session prop", "access={access}", "access={access} access={unsafe}"],
+  ["spread session override", "access={access}", "access={access} {...unsafe}"],
+] as const) {
+  test(`reviewed AI control receipt rejects ${label}`, () => {
+    const changed = mutate(controlFile, from, to, controlSources);
+    assert.ok(reviewedScopedTransports(changed).failures.has(controlFile));
+    assert.notDeepEqual(crmTransportOffenders(changed), []);
+  });
+}
+
+test("AI control's receipt cannot bless a new request or a comment decoy", () => {
+  const extra = '\nfunction unsafe(request: Function) { return request("/api/crm/leads"); }';
+  const changed = new Map(controlSources).set(controlFile, controlSource + extra);
+  assert.notDeepEqual(crmTransportOffenders(changed), []);
+  assert.notDeepEqual(crmTransportOffenders(new Map([...controlSources, ["pages/unsafe.ts", extra]])), []);
+  const decoy = mutate(controlFile, "await crmFetch(path, {", "await fetch(path, {", controlSources);
+  decoy.set(controlFile, decoy.get(controlFile)! + "\n// await crmFetch(path, init);\n");
+  assert.notDeepEqual(crmTransportOffenders(decoy), []);
 });
 
 const adminFile = 'pages/AdminCenter.tsx';
