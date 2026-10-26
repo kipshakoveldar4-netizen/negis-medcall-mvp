@@ -6,6 +6,7 @@ import { handleSiteInquiryDeletion, handleSiteInquiryDeletionPreview, handleSite
 import { handlePlatformOperators, handleOperatorAccount, handleOperatorInbox, handleClinicOperators } from "../../lib/crm/operators";
 import { handleContributorAccount, handlePlatformContributors } from "../../lib/crm/contributors";
 import { handlePartnerLedger } from "../../lib/crm/partner-ledger";
+import { handleCreatorJobs } from "../../lib/crm/creator-jobs";
 import { handleOperatorLeads, handleClinicOperatorLeads } from "../../lib/crm/operator-leads";
 import { handleOperatorServices } from "../../lib/crm/operator-services";
 import { handleOperatorBookings } from "../../lib/crm/operator-bookings";
@@ -260,6 +261,10 @@ async function dispatch(
     case "contributor-account": return segments.length === 1 ? handleContributorAccount(req, res) : notFound(res);
     case "platform-contributors": return segments.length === 1 ? handlePlatformContributors(req, res) : notFound(res);
     case "partner-ledger": return segments.length === 1 ? handlePartnerLedger(req, res) : notFound(res);
+    case "creator-jobs": return segments.length === 1 ? handleCreatorJobs(req, res) : notFound(res);
+    case "creator-job-command": return segments.length === 1 ? handleCreatorJobs(req, res, false, true) : notFound(res);
+    case "clinic-creator-jobs": return segments.length === 1 ? handleCreatorJobs(req, res, true) : notFound(res);
+    case "clinic-creator-job-command": return segments.length === 1 ? handleCreatorJobs(req, res, true, true) : notFound(res);
     case "platform-operators": return handlePlatformOperators(req, res);
     case "operator-account": return handleOperatorAccount(req, res);
     case "operator-inbox": return handleOperatorInbox(req, res);

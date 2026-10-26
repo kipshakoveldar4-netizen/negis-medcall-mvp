@@ -81,8 +81,9 @@ Database persistence/replay are separately exercised by the SQL suites.
 
 Base 7a99757. New local 110 and shared creator-job contracts extend the existing
 workspace/staff/contributor identities. They are not another CRM, Auth system,
-public site or replacement contributor portal. No HTTP route or UI consumes
-this foundation yet, and no cloud migration was applied.
+public site or replacement contributor portal. At this foundation milestone no
+HTTP route or UI consumed it. The local API follow-up below adds routes;
+UI, cloud schema and deployment remain unaccepted.
 
 - An active owner/admin can offer an approved creator a scoped job with explicit
   title, brief, rights terms, exact positive minor-unit fee/currency and UTC
@@ -123,13 +124,50 @@ handles terminated and owned clusters/data were removed; protected 059/065
 and the old user demos remain unchanged. No API/Vite build or browser acceptance
 is newly claimed: application imports and screens did not change.
 
-Next: verified catch-all routes and approved-creator directory; company and author
+Next: approved-creator directory; company and author
 controls in the current cabinets, exact terms confirmation, current company
 display context and submission history, unknown-outcome recovery, real session
 and mobile/desktop tests. Then attest the chosen isolated Preview/schema/ACL.
 Public legal terms, retention/tombstones, asset verification/private delivery,
 accepted-job disputes and recruitment approval remain separate gates. The
 intake-only creator card is deliberately not labelled as a working job cabinet.
+
+### Creator Job API: Local Follow-Up
+
+Base f84afb0. Four paths were added inside the existing catch-all and deny-by-
+default registry; no new Vercel function, database change or cloud release:
+
+| Route | Methods | Boundary |
+|---|---|---|
+| creator-jobs | GET/POST | Verified own Auth; no membership or caller-selected tenant |
+| creator-job-command | GET | Verified own Auth and original requestId |
+| clinic-creator-jobs | GET/POST | Verified active workspace owner/admin context |
+| clinic-creator-job-command | GET | Same workspace context and original requestId |
+
+The handler forwards only verified actor/workspace/staff to 110. Body identity,
+role/payment fields and extra selectors are rejected; each side has only its
+actions. Required keys/revisions/terms are not generated or defaulted by the
+server. Reads/denials are no-store. A malformed or mismatched receipt (including
+request, job or immutable create terms) is unconfirmed, not success. Original
+applied revision and current replay state remain distinct. Database errors are
+mapped to safe Russian responses without retries or diagnostic leakage.
+
+Actual compiled catch-all cold-start coverage includes normal/broken optional
+site rendering, anonymous/invalid tokens, own approved creator without clinic
+membership, pending/revoked creator, company owner/admin and doctor denial,
+foreign tenant/extra path/method rejection. Auth and database are doubles here,
+not real Supabase sessions or a native HTTP-to-PostgreSQL integration. The
+separate 110 native workflow evidence above is not relabelled as that integration.
+Root build/typecheck/Vite and 269 compiled checks pass; focused contract/API
+tests 29/29, six-file regression 208/208. These overlapping counts are not added.
+Current mortgage purpose policy is unchanged and still denies these company
+routes; creator approval does not open marketing, Content Studio or clinic data.
+
+Still needed: directory and scoped company/history read models; real controls
+and retained unknown-outcome recovery in the current cabinets; actual HTTP/native
+bridge, account-switch/browser/mobile acceptance and exact isolated Preview.
+The owner's seven-day target is recorded in DELIVERY-CYCLES; it does not waive
+the remaining legal/retention/payment/rollout gates or authorize working clients.
 
 1. Isolate and attest a new Preview's build/runtime test database before applying
    105 there. Inherited/shared Production settings remain forbidden. Then test

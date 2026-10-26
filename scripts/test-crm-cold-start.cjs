@@ -70,13 +70,17 @@ try {
       entryChecks++;
     }
     (async () => {
-      for (const route of ['auth-context', 'appointments', 'clients', 'staff', 'site-blog', 'site-inquiry-deletion-preview', 'site-inquiry-deletion-operations', 'lead-team-analytics', 'contributor-account', 'partner-ledger']) {
+      for (const route of ['auth-context', 'appointments', 'clients', 'staff', 'site-blog', 'site-inquiry-deletion-preview', 'site-inquiry-deletion-operations', 'lead-team-analytics', 'contributor-account', 'partner-ledger',
+        'creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command']) {
         await check(route, 401);
       }
       await check('auth-context', 401, 'Bearer invalid-test-token');
       await check('contributor-account', 401, 'Bearer invalid-test-token');
       await check('contributor-account', 401, undefined, 'POST');
       await check('partner-ledger', 401, 'Bearer invalid-test-token');
+      for (const route of ['creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command']) await check(route,401,'Bearer invalid-test-token');
+      await check('creator-jobs',401,undefined,'POST');
+      await check('clinic-creator-jobs',401,undefined,'POST');
       await check('platform-contributors', 404);
       await check('platform-contributors', 404, undefined, 'PATCH');
       await check('site-inquiry-deletion-preview', 401, 'Bearer invalid-test-token');

@@ -30,6 +30,26 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
   };
   const client = {
     async rpc(name, args) {
+      if (['read_growth_creator_jobs','execute_growth_creator_job','read_growth_creator_command'].includes(name)) {
+        const expected = name === 'read_growth_creator_jobs' ? ['p_actor','p_workspace','p_staff','p_offset']
+          : name === 'read_growth_creator_command' ? ['p_actor','p_workspace','p_staff','p_request']
+          : ['p_actor','p_workspace','p_staff','p_job','p_revision','p_request','p_action','p_payload'];
+        assert.deepEqual(Object.keys(args),expected);
+        log.push({rpc:name,args});
+        if(args.p_workspace===null){
+          assert.equal(args.p_staff,null);
+          const own=tables.growth_contributor_profiles.find(p=>p.auth_user_id===args.p_actor);
+          if(own?.creator_status!=='approved')return{data:null,error:{code:'P1101',message:'private database diagnostic'}};
+        }else{
+          assert.equal(args.p_workspace,workspace);
+          const staff=users.find(u=>u.id===args.p_staff&&u.auth_user_id===args.p_actor&&u.status==='active');
+          assert.ok(staff&&['owner','admin'].includes(staff.role));
+        }
+        if(name==='read_growth_creator_jobs')return{data:{items:[],hasMore:false},error:null};
+        if(name==='read_growth_creator_command')return{data:null,error:null};
+        // No writes are modelled here. Native 110 covers the real state machine.
+        return{data:null,error:{code:'P1104',message:'private database diagnostic'}};
+      }
       if (name === 'read_growth_partner_ledger') {
         assert.deepEqual(Object.keys(args), ['p_actor']);
         log.push({ rpc: name, actor: args.p_actor });
@@ -104,7 +124,7 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
     await handler({ method, url: `/api/crm/${route}`, headers: { 'content-type': 'application/json',
       ...(role ? { authorization: `Bearer fixture.${role}.signature` } : {}) },
       ...(method === 'GET' ? {} : { body: payload }),
-      query: { path: [route], ...(['site-page','partner-ledger'].includes(route) ? {} : { workspaceId: workspace }), ...query } }, response);
+      query: { path: [route], ...(['site-page','partner-ledger','creator-jobs','creator-job-command'].includes(route) ? {} : { workspaceId: workspace }), ...query } }, response);
     assert.equal(status, expected, `${route}: ${role || 'anonymous'}`);
     const serialized = JSON.stringify(body) ?? '';
     if (route === 'site-page' && expected === 503) {
@@ -132,6 +152,14 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
       await call('partner-ledger', role, 405, {}, 'POST');
       await call('partner-ledger', role, 400, { workspaceId: workspace });
       assert.deepEqual(log, []);
+      await call('creator-jobs',role,403);
+      assert.deepEqual(log,[{rpc:'read_growth_creator_jobs',args:{p_actor:users.find(u=>u.role===role).auth_user_id,p_workspace:null,p_staff:null,p_offset:0}}]);
+      await call('creator-job-command',role,403,{requestId:id(81)});
+      await call('creator-jobs',role,403,{},'POST',{requestId:id(81),action:'create',terms:{}});
+      assert.deepEqual(log,[],'Creator cannot create a company order');
+      const companyJobs=await call('clinic-creator-jobs',role,role==='doctor'?403:200);
+      if(role!=='doctor')assert.deepEqual(companyJobs.data,{items:[],hasMore:false});
+      await call('clinic-creator-job-command',role,role==='doctor'?403:200,{requestId:id(81)});
       const context = await call('auth-context', role, 200);
       assert.equal(context.mode, 'supabase');
       assert.equal(context.data.workspaceId, workspace);
@@ -214,6 +242,23 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
     membershipFailure = false;
     process.env.MEDINA_PLATFORM_OWNER_IDS = users[0].auth_user_id;
     tables.growth_contributor_profiles[0].partner_status = 'approved';
+    tables.growth_contributor_profiles[0].creator_status = 'approved';
+    const creatorJobs=await call('creator-jobs','owner',200);
+    assert.deepEqual(creatorJobs.data,{items:[],hasMore:false});
+    assert.ok(!log.some(entry=>entry.table==='staff_users'),'Independent creator Auth does not require a clinic membership');
+    users[0].status='inactive';
+    await call('creator-jobs','owner',200);
+    await call('clinic-creator-jobs','owner',403);
+    users[0].status='active';
+    await call('creator-job-command','owner',200,{requestId:id(81)});
+    tables.growth_contributor_profiles[0].creator_status='suspended';
+    await call('creator-jobs','owner',403);
+    tables.growth_contributor_profiles[0].creator_status='approved';
+    for(const route of ['creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command'])
+      await call(route,'owner',404,{path:[route,'unexpected']});
+    await call('creator-jobs','owner',400,{workspaceId:workspace});
+    await call('clinic-creator-jobs','owner',403,{workspaceId:id(2)});
+    await call('creator-jobs','owner',405,{},'PATCH');
     const ownLedger = await call('partner-ledger', 'owner', 200);
     assert.deepEqual(ownLedger.data, { state: 'not_activated' });
     assert.ok(!log.some(entry=>entry.table==='staff_users'), 'Own partner report does not require clinic membership');
