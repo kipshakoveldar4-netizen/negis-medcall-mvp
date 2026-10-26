@@ -60,6 +60,7 @@ function fixture(options: { controlled?: boolean; secure?: boolean; supported?: 
   waiting?: Worker; installing?: Worker } = {}) {
   let reloads = 0, writes = 0, registerCalls = 0, mounted = true, dirty = false, cursor = 0, tree: any;
   const slots: any[] = [], updates: ReturnType<typeof deferred<unknown>>[] = [];
+  const timers = new Map<number, () => void>(); let timerId = 0;
   const document = Object.assign(new Signals(), { visibilityState: "visible" });
   const registration = Object.assign(new Signals(), {
     waiting: options.waiting ?? null as Worker | null,
@@ -90,7 +91,9 @@ function fixture(options: { controlled?: boolean; secure?: boolean; supported?: 
   const exports: { UpdatePrompt?: () => unknown } = {};
   new Script(compiled.outputText, { filename: file }).runInNewContext({ exports, document,
     navigator: options.supported === false ? {} : { serviceWorker },
-    window: { isSecureContext: options.secure !== false, location: { reload() { reloads++; } } },
+    window: { isSecureContext: options.secure !== false, location: { reload() { reloads++; } },
+      setTimeout(callback: () => void, duration: number) { assert.equal(duration, 1000); const id = ++timerId; timers.set(id, callback); return id; },
+      clearTimeout(id: number) { timers.delete(id); } },
     fetch() { assert.fail("No network is allowed"); },
     require(name: string) {
       if (name === "react") return hooks;
@@ -114,6 +117,8 @@ function fixture(options: { controlled?: boolean; secure?: boolean; supported?: 
   }
   render();
   return { document, serviceWorker, registration, register, updates, flush,
+    timers,
+    async cancelNavigation() { const callbacks = [...timers.values()]; timers.clear(); for (const callback of callbacks) callback(); await flush(); },
     text: () => label(tree), writes: () => writes, reloads: () => reloads, registerCalls: () => registerCalls,
     button() { const button = nodes(tree).find(node => node.type === "button"); assert.ok(button, label(tree)); return button; },
     panel() { const panel = nodes(tree).find(node => node.props.role === "status"); assert.ok(panel, label(tree)); return panel; },
@@ -289,6 +294,30 @@ test("a retained reload-only action becomes inert on unmount", async () => {
   const action = f.action(); f.unmount(); const writes = f.writes(); action(); action(); await f.flush();
   assert.equal(f.reloads(), 0); assert.equal(f.writes(), writes);
 });
+
+for (const mode of ["own", "foreign"] as const) {
+  test(`${mode} activation: cancelled navigation releases busy and permits only a new explicit reload`, async () => {
+    const worker = new Worker(), f = fixture({ waiting: worker }); await f.ready();
+    const old = f.action();
+    if (mode === "own") { old(); worker.state = "activated"; f.registration.waiting = null; await f.control(worker); }
+    else { await f.control(new Worker("activated")); f.action()(); await f.flush(); }
+    assert.equal(f.reloads(), 1); assert.equal(f.timers.size, 1);
+    assert.equal(f.button().props.disabled, true);
+    await f.cancelNavigation();
+    assert.equal(label(f.button()), "Перезагрузить"); assert.equal(f.button().props.disabled, false);
+    assert.equal(f.reloads(), 1, "recovery must not itself retry navigation");
+    const messages = worker.messages.length; old(); await f.flush();
+    assert.equal(f.reloads(), 1); assert.equal(worker.messages.length, messages);
+    const retry = f.action(); retry(); retry(); await f.flush();
+    assert.equal(f.reloads(), 2); assert.equal(f.timers.size, 1);
+    await f.cancelNavigation(); assert.equal(f.button().props.disabled, false);
+    f.action()(); await f.flush();
+    const late = [...f.timers.values()]; f.unmount(); const writes = f.writes();
+    assert.equal(f.timers.size, 0);
+    for (const callback of late) callback(); await f.flush();
+    assert.equal(f.writes(), writes); assert.equal(f.reloads(), 3);
+  });
+}
 
 test("an installed worker which is not the registration's waiting worker cannot publish an action", async () => {
   const worker = new Worker("installing"), f = fixture(); await f.ready(); await f.found(worker);

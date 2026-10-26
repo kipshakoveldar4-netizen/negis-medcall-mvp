@@ -33,6 +33,7 @@ export function UpdatePrompt() {
     let requested: ServiceWorker | null = null;
     let reloadOnly = false;
     let reloading = false;
+    let reloadRecovery: number | undefined;
     let installing: ServiceWorker | null = null;
     let onInstallingStateChange: (() => void) | null = null;
 
@@ -44,7 +45,18 @@ export function UpdatePrompt() {
       if (cancelled || reloading) return;
       reloading = true;
       requested = null;
+      setUpdating(true);
       window.location.reload();
+      // A beforeunload warning can cancel navigation. If this document is
+      // still alive, offer a new explicit reload instead of a permanent lock.
+      reloadRecovery = window.setTimeout(() => {
+        if (cancelled) return;
+        reloading = false;
+        reloadOnly = true;
+        waiting = null;
+        setUpdating(false);
+        setPrompt({ reloadOnly: true, apply: reload });
+      }, 1000);
     };
 
     const offerWaiting = (worker: ServiceWorker) => {
@@ -150,6 +162,7 @@ export function UpdatePrompt() {
     return () => {
       cancelled = true;
       requested = null;
+      if (reloadRecovery !== undefined) window.clearTimeout(reloadRecovery);
       stopWatchingInstalling();
       registered?.removeEventListener("updatefound", onUpdateFound);
       document.removeEventListener("visibilitychange", recheck);
@@ -160,14 +173,14 @@ export function UpdatePrompt() {
   if (!prompt) return null;
 
   return (
-    <div className="fixed inset-x-3 bottom-3 z-50 sm:left-auto sm:right-4 sm:w-96">
+    <div className="fixed inset-x-3 bottom-[calc(92px+env(safe-area-inset-bottom))] z-40 sm:left-auto sm:right-4 sm:w-96 lg:bottom-3">
       <div className="neu-card flex flex-col items-stretch gap-3 p-4 sm:flex-row sm:items-center" role="status">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-black text-[#0F172A]">Вышла новая версия</p>
           <p className="text-xs font-semibold text-[#64748B]">
             {failed ? "Не удалось применить обновление. Попробуйте ещё раз."
               : prompt.reloadOnly ? "Новая версия уже запущена. Перезагрузите страницу, когда сохраните изменения."
-                : "Обновление уже скачано. Применить сейчас — страница перезагрузится."}
+                : "Обновление скачано. Сохраните изменения: страница перезагрузится."}
           </p>
         </div>
         <button type="button" className="neu-btn-primary w-full shrink-0 whitespace-nowrap text-sm sm:w-auto"

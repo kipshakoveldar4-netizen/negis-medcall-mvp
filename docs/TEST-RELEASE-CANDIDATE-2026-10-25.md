@@ -124,6 +124,13 @@ keyboard-wrapped controls. The real profile now participates in the nav handoff
 regression. This is not current Preview, whole-platform visual, PWA or physical
 device acceptance; other G4 residuals remain open.
 
+**G7-C32 local delta, base fca357c:** [real PWA update acceptance](PWA-UPDATE-2026-10-26.md)
+reproduces and fixes covered update controls below 1024px and a permanently busy
+button after native reload cancellation. Real worker versions, full CSS, actual
+meeting editor and six measured viewports pass locally. This is not installed
+standalone, universal draft protection or current Preview acceptance. The third
+worker run retains an old shell cache; late-write/cache eviction remains explicit.
+
 The latest recorded content/security Preview is **6c11l89kr / f18f411**,
 deployment `dpl_8CXaiuXmMfBY1EfrjqtMT2GNVjWv`: READY, target=null, aliases=[],
 846/846 sources matched. G5-C45 records site-test in loaded JS, absence of the
