@@ -27,6 +27,7 @@ import { exercisePartnerEntryHttp } from './partner-entry-native-http-cases.mjs'
 import { exercisePartnerTerms } from './partner-terms-cases.mjs';
 import { exercisePartnerTermsHttp } from './partner-terms-native-http-cases.mjs';
 import { exerciseAppointmentActor,exerciseAppointmentActorDependencies } from './appointment-actor-cases.mjs';
+import { exerciseAppointmentReadiness,exerciseAppointmentReadinessBeforeCutover } from './appointment-actor-readiness-cases.mjs';
 
 // Native application-chain acceptance, NOT an authority to release migrations.
 // 001-008 require an undocumented legacy baseline; data/*.sql is deliberately
@@ -166,7 +167,9 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
   await exerciseVideoQuotaMissing(db,chain.find(entry=>entry.file==='106_generated_video_quota_dispatch.sql').source,t);
   let legacyRlsBefore;
   for (const entry of chain) {
-    if(entry.file==='115_appointment_request_actor.sql')await exerciseAppointmentActorDependencies(db,entry.source,t);
+    if(entry.file==='115_appointment_request_actor.sql'){
+      await exerciseAppointmentReadinessBeforeCutover(db,t);await exerciseAppointmentActorDependencies(db,entry.source,t);
+    }
     if(entry.file==='111_creator_command_closure.sql'){
       await reproduceUnfencedCreatorCommand(db,t);await exerciseCreatorClosureRefusals(db,entry.source,t);
     }
@@ -248,7 +251,9 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     if(entry.file==='112_partner_first_source.sql') await exercisePartnerSources(db,fixture,entry.source,t);
     if(entry.file==='113_partner_entry_anchor.sql'){await exercisePartnerEntryAnchor(db,fixture,entry.source,t);await exercisePartnerEntryHttp(db,fixture,t);}
     if(entry.file==='114_partner_terms_activation.sql'){await exercisePartnerTerms(db,fixture,entry.source,t);await exercisePartnerTermsHttp(db,fixture,t);}
-    if(entry.file==='115_appointment_request_actor.sql')await exerciseAppointmentActor(db,fixture,t);
+    if(entry.file==='115_appointment_request_actor.sql'){
+      await exerciseAppointmentActor(db,fixture,t);await exerciseAppointmentReadiness(db,t);
+    }
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
       await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{

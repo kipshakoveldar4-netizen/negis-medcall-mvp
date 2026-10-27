@@ -1,6 +1,10 @@
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { appointmentActorReadinessQuery,buildAppointmentActorReadiness } from './appointment-actor-readiness.mjs';
+
+export const appointmentReadinessQuery=appointmentActorReadinessQuery;
+export const buildAppointmentPreviewReadiness=buildAppointmentActorReadiness;
 
 const columns = {
   workspaces: ['id'],
@@ -20,8 +24,9 @@ const functions = [
   'public.create_crm_appointment_once(uuid,uuid,uuid,text,jsonb,jsonb,text)',
 ];
 
-// Fixed metadata contract for 063/064. No patient rows, environment, network or SQL execution.
-export const appointmentReadinessQuery = `with
+// Historical 063/064 proof only. The CLI and default exports above select v2.
+// No patient rows, environment, network or SQL execution.
+export const legacyAppointmentReadinessQuery = `with
 required_columns(table_name, column_name) as (values
 ${Object.entries(columns).flatMap(([table, names]) => names.map(name => `  ('${table}', '${name}')`)).join(',\n')}
 ), required_functions(signature) as (values
@@ -58,13 +63,13 @@ checks as (
 )
 select check_name, ready from checks order by check_name;`;
 
-export function buildAppointmentPreviewReadiness() {
+export function buildLegacyAppointmentPreviewReadiness() {
   return `-- Read-only prerequisites for appointment creation RPCs 063/064.
 -- Run only in the approved isolated Preview database after checking its identity.
 -- Every row must be true. This is NOT end-to-end, concurrency or payment acceptance.
 begin read only;
 set local statement_timeout = '10s';
-${appointmentReadinessQuery}
+${legacyAppointmentReadinessQuery}
 commit;
 `;
 }

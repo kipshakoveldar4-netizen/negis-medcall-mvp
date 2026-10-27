@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test, { before, after, beforeEach, afterEach } from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
-import { appointmentReadinessQuery, buildAppointmentPreviewReadiness } from './appointment-preview-readiness.mjs';
+import { legacyAppointmentReadinessQuery as appointmentReadinessQuery, buildLegacyAppointmentPreviewReadiness as buildAppointmentPreviewReadiness } from './appointment-preview-readiness.mjs';
 import { buildSitePreviewBootstrap } from './site-preview-bootstrap.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -34,7 +34,7 @@ after(() => db.close());
 beforeEach(() => db.exec('begin'));
 afterEach(() => db.exec('rollback'));
 
-test('generated checks are read-only metadata, not clinical data or an execution command', () => {
+test('legacy 063/064 generated checks are read-only metadata, not clinical data or an execution command', () => {
   const sql = buildAppointmentPreviewReadiness();
   assert.match(sql, /begin read only;/);
   assert.match(sql, /NOT end-to-end, concurrency or payment acceptance/);

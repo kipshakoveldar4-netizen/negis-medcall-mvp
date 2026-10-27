@@ -96,6 +96,39 @@ and `appointment-v2-root-build-verified.log` records the successful root build.
 
 ## Before Any Cloud Acceptance
 
+### Current Read-Only Metadata Gate (G7-C54)
+
+Follow-up base 0dd8d22. The default `appointment-preview-readiness.mjs` CLI and
+exports now generate the post-115 contract, not the historical 063/064 service
+grant expectations. The old query and builder have explicit `legacy` names.
+The before-115 false-ready result was reproduced on the raw native chain; a
+green historical gate cannot authorize the new API. After 115, old entries
+must be closed, not reopened to satisfy the old checklist.
+
+The current query emits 93 unique boolean metadata checks. It reads only
+`pg_catalog`, never domain rows or domain RPCs. It verifies eight exact routine
+bodies and PostgREST argument names, owner/security/search_path/volatility,
+non-delegated final EXECUTE, required column types, receipt RLS/shape/ACL/FK,
+doctor identity uniqueness and the capacity trigger. Missing objects return
+blockers rather than an exception or apparent success. It deliberately does
+not inventory actual legacy pending results or prove a deployed target's
+identity, current Auth behavior or full application compatibility.
+
+Both current and historical suites passed 38/38, including CLI generation,
+exclusive output creation and argument-name drift with unchanged routine body
+and restored grants. Shared cases passed on the full raw 009-115 chain:
+528/528. The no-network suite 931/931, both API modes, all types, 353 cold-start
+checks and root build passed. These native cases overlap the WASM cases.
+No reader hash, test key set, network/IPC guard or SQL migration changed here.
+
+The generator wrote only `node_modules/.cache/appointment-v2-current-readiness.sql`,
+SHA-256 `eed50ca8f1d22f8b68adf89e010392d795d3e0ac6a04d5329f8df4f07e18448c`.
+It was not run against a cloud database. Final logs:
+`appointment-v2-readiness-wasm-final.log`, `appointment-readiness-native-verified.log`
+and `appointment-readiness-guard-build.log` in that ignored cache directory.
+
+### Required Rollout Evidence
+
 1. Inventory the approved test database's actual schema, owner, RLS, function
    ACLs and legacy pending receipts. The local raw chain is not a cloud plan.
 2. Drain old appointment writers and release the v2 API together with 115.
