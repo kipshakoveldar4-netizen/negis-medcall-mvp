@@ -48,6 +48,7 @@ before(async () => {
   await db.exec(await readFile(path.join(root, "migrations/116_appointment_patch_actor.sql"), "utf8"));
   await db.exec(await readFile(path.join(root, "migrations/117_appointment_edit_version.sql"), "utf8"));
   await db.exec(await readFile(path.join(root, "migrations/118_appointment_version_entry.sql"), "utf8"));
+  await db.exec(await readFile(path.join(root, "migrations/119_appointment_patch_journal.sql"), "utf8"));
 });
 after(() => db.close());
 beforeEach(async () => {
@@ -72,7 +73,7 @@ function apiDatabase(rpcRole: "postgres" | "service_role" | "anon" | "authentica
   };
   return {
     async rpc(name: string, args: Record<string, unknown>) {
-      if (name === "patch_crm_appointment_v2") queries.push({ table: "appointments", operation: "rpc:patch_crm_appointment_v2",
+      if (name === "patch_crm_appointment_journaled") queries.push({ table: "appointments", operation: "rpc:patch_crm_appointment_journaled",
         columns: "*", filters: [["id", "=", args.p_appointment_id], ["workspace_id", "=", args.p_workspace_id]] });
       const calls: Record<string, { sql: string; params: unknown[] }> = {
         create_crm_appointment_with_new_client: {
@@ -88,10 +89,10 @@ function apiDatabase(rpcRole: "postgres" | "service_role" | "anon" | "authentica
           params: [args.p_workspace_id, args.p_staff_user_id, args.p_auth_user_id, args.p_actor_role, args.p_request_key, args.p_request_fingerprint,
             args.p_new_client === null ? null : JSON.stringify(args.p_new_client), JSON.stringify(args.p_appointment), args.p_client_match],
         },
-        patch_crm_appointment_v2: {
-          sql: "select public.patch_crm_appointment_v2($1::uuid,$2::uuid,$3::uuid,$4,$5::uuid,$6::uuid,$7::jsonb,$8::jsonb) as item",
+        patch_crm_appointment_journaled: {
+          sql: "select public.patch_crm_appointment_journaled($1::uuid,$2::uuid,$3::uuid,$4,$5::uuid,$6::uuid,$7::jsonb,$8::jsonb,$9::jsonb) as item",
           params: [args.p_workspace_id, args.p_staff_user_id, args.p_auth_user_id, args.p_actor_role, args.p_appointment_id,
-            args.p_expected_edit_version, JSON.stringify(args.p_before), JSON.stringify(args.p_patch)],
+            args.p_expected_edit_version, JSON.stringify(args.p_before), JSON.stringify(args.p_patch), JSON.stringify(args.p_journal)],
         },
         read_crm_sale_create_request: {
           sql: "select public.read_crm_sale_create_request($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::text) as item",
@@ -1139,8 +1140,8 @@ for (const { label, author } of [
       assert.deepEqual(reply.queries.filter(query => query.table === "clients" || query.table === "deals"), []);
       if (method === "PATCH") {
         const writes = reply.queries.filter(query => query.operation !== "select");
-        assert.deepEqual(writes.map(query => query.table), ["appointments", "audit_logs"]);
-        assert.equal(writes[0].operation, "rpc:patch_crm_appointment_v2", "No direct service UPDATE fallback");
+        assert.deepEqual(writes.map(query => query.table), ["appointments"], "Audit is inside the SQL transaction, not a second SDK write");
+        assert.equal(writes[0].operation, "rpc:patch_crm_appointment_journaled", "No direct service UPDATE fallback");
         assert.deepEqual(writes[0].filters, [["id", "=", visit.id], ["workspace_id", "=", id(1)]]);
       } else {
         assert.deepEqual(reply.queries.filter(query => query.operation !== "select"), []);

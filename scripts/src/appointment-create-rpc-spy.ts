@@ -24,16 +24,25 @@ export function withAppointmentCreateRpcSpy<T extends { from(table: string): unk
   const writer = client as { from(table: string): { insert(row: unknown): Insert; update(row: unknown): Update } };
   return Object.assign(client, {
     async rpc(name: string, args: Record<string, unknown>): Promise<Result> {
-      assert.ok(["read_crm_appointment_request_v2", "create_crm_appointment_v2", "patch_crm_appointment_v2"].includes(name));
+      assert.ok(["read_crm_appointment_request_v2", "create_crm_appointment_v2", "patch_crm_appointment_journaled"].includes(name));
       assert.equal(typeof args.p_auth_user_id, "string");
       assert.ok(["owner", "admin", "receptionist", "manager", "doctor"].includes(String(args.p_actor_role)));
       if (name === "read_crm_appointment_request_v2") return { data: null, error: null };
-      if (name === "patch_crm_appointment_v2") {
+      if (name === "patch_crm_appointment_journaled") {
         assert.equal(typeof args.p_expected_edit_version, "string");
         const saved = await writer.from("appointments").update(args.p_patch).eq("id", args.p_appointment_id)
           .eq("workspace_id", args.p_workspace_id).select("*").single();
         if (saved.error) return saved;
         const row = Array.isArray(saved.data) ? saved.data[0] : saved.data;
+        // Query-spy compatibility only, not atomicity or rollback proof.
+        const journal = args.p_journal as { actorName: string; outsideSchedule: boolean; changes: unknown[] };
+        for (const action of [...(journal.outsideSchedule ? ["booked_outside_schedule"] : []), ...(journal.changes.length ? ["updated"] : [])]) {
+          const audit = await writer.from("audit_logs").insert({ workspace_id: args.p_workspace_id,
+            actor_name: journal.actorName || null, actor_role: args.p_actor_role, actor_staff_user_id: args.p_staff_user_id,
+            actor_kind: "manual", action, entity_type: "appointment", entity_id: args.p_appointment_id,
+            metadata: { changes: action === "updated" ? journal.changes : [] } });
+          if (audit.error) return audit;
+        }
         return { data: row ? { ...(args.p_before as Record<string, unknown>), ...(row as Record<string, unknown>),
           id: args.p_appointment_id, workspace_id: args.p_workspace_id, edit_version: randomUUID() } : null, error: null };
       }

@@ -15,6 +15,8 @@ The subsequent [open-form version candidate](APPOINTMENT-OPEN-VERSION-2026-10-27
 also requires 117 and supersedes that 100-check gate with 108 conditions.
 The later C23 section in that document requires 118, closes the legacy service
 PATCH entry and supersedes the earlier gates with 112 conditions.
+The later C24 section also requires journal transaction 119 and the current
+130-condition gate. Historical 112-check cloud observations do not attest 119.
 
 ## Reproduced Failure
 

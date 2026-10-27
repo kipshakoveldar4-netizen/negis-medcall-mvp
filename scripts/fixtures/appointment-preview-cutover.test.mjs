@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { startNativePostgres } from './native-postgres.mjs';
 import { readReviewedChain } from './migration-chain-review.mjs';
-import { appointmentActorReadinessQuery } from './appointment-actor-readiness.mjs';
+import { appointmentVersionEntryReadinessQuery as appointmentActorReadinessQuery,appointmentActorReadinessQuery as currentReadinessQuery } from './appointment-actor-readiness.mjs';
 
 const root=fileURLToPath(new URL('../../',import.meta.url));
 const baselineNumbers=new Set([9,10,11,12,13,14,19,20,29,30,32,33,34,35,36,40,43,45,52,53,54,55,56,57,61,63,64,72,73,76]);
@@ -120,9 +120,24 @@ test('selected source cutover matches the observed test catalog, without claimin
     assert.equal((await one(db,'select auth_user_id from crm_appointment_request_actors where workspace_id=$1',[f.workspace])).auth_user_id,f.actor);
     assert.equal((await one(db,'select count(*)::int n from workspace_settings where workspace_id=$1',[f.workspace])).n,0);
   });
+  await t.test('the selected sixth source 119 adds journal atomicity and closes the prior service entry',async()=>{
+    const entry=chain.find(row=>row.file==='119_appointment_patch_journal.sql');assert.ok(entry);await db.query(entry.source);
+    const checks=(await db.query(currentReadinessQuery)).rows;assert.equal(checks.length,130);assert.deepEqual(checks.filter(row=>!row.ready),[]);
+    const before=(await one(db,'select to_jsonb(a) value from appointments a where id=$1',[legacy.appointment.id])).value;
+    const args=[f.workspace,f.staff,f.actor,'owner',before.id,before.edit_version,JSON.stringify(before),JSON.stringify({notes:'Owned atomic cutover note'}),
+      JSON.stringify({actorName:'owned@example.invalid',outsideSchedule:false,changes:[{field:'notes',label:'Заметка',from:null,to:null}]})];
+    await role(db,'service_role',async()=>{
+      await assert.rejects(()=>db.query('select public.patch_crm_appointment_v2($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb)',args.slice(0,8)),error=>error.code==='42501');
+      const saved=(await one(db,'select public.patch_crm_appointment_journaled($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb) value',args)).value;
+      assert.equal(saved.notes,'Owned atomic cutover note');assert.notEqual(saved.edit_version,before.edit_version);
+      await assert.rejects(()=>db.query('select public.patch_crm_appointment_journaled($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb)',args),error=>error.code==='P1164');
+    });
+    assert.equal((await one(db,'select count(*)::int n from audit_logs where workspace_id=$1',[f.workspace])).n,1);
+    assert.deepEqual(await counts(),{visits:2,receipts:2,origins:1,sales:0});
+  });
   await db.query('delete from workspaces where id=$1',[f.workspace]);
   await t.test('all owned rows are removed and no external facility or main source mutation is accepted',async()=>{
-    for(const table of ['workspaces','staff_users','clients','appointments','crm_appointment_create_requests','crm_appointment_request_actors','deals'])
+    for(const table of ['workspaces','staff_users','clients','appointments','crm_appointment_create_requests','crm_appointment_request_actors','deals','audit_logs'])
       assert.equal((await one(db,'select count(*)::int n from public.'+table)).n,0,table);
     assert.equal((await one(db,'select count(*)::int n from pg_foreign_server')).n,0);
     assert.equal((await one(db,'select count(*)::int n from pg_subscription')).n,0);

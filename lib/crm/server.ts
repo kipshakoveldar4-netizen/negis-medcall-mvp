@@ -4851,8 +4851,8 @@ function checkAppointmentRequestError(error: { code?: unknown } | null) {
 function checkAppointmentPatchError(error: { code?: unknown } | null) {
   if (!error) return;
   const code = readString(error.code);
-  if (["PGRST202", "42883", "42703", "PGRST204", "42P01", "PGRST205", "P1165", "P6405"].includes(code)) {
-    throw new AppointmentRequestError(503, "appointment_patch_unavailable", "Не удалось подтвердить правку: администратору нужно проверить миграцию 116");
+  if (["PGRST202", "42883", "42703", "PGRST204", "42P01", "PGRST205", "P1165", "P6405", "P1191", "P1192"].includes(code)) {
+    throw new AppointmentRequestError(503, "appointment_patch_unavailable", "Не удалось подтвердить правку и историю изменений. Обновите список; администратору нужно проверить схему записи.");
   }
   if (["P1162", "P6404"].includes(code)) throw new AppointmentRequestError(403, "appointment_patch_access_denied", "Нет доступа к изменению записи");
   if (code === "P1163") throw new AppointmentRequestError(404, "appointment_patch_access_denied", "Запись недоступна");
@@ -5917,10 +5917,12 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
         if (!isUuid(actor?.staffUserId) || !isUuid(actor?.userId)) {
           throw new AppointmentRequestError(403, "appointment_patch_access_denied", "Нет доступа к изменению записи");
         }
-        const result = await supabase.rpc("patch_crm_appointment_v2", {
+        const result = await supabase.rpc("patch_crm_appointment_journaled", {
           p_workspace_id: workspaceId, p_staff_user_id: actor.staffUserId, p_auth_user_id: actor.userId,
           p_actor_role: actor.role, p_appointment_id: id,
           p_expected_edit_version: appointmentEditVersion(body.expectedEditVersion), p_before: before, p_patch: candidate,
+          p_journal: { actorName: journalActor(req).actorName, outsideSchedule: allowsOutsideSchedule(patchBody),
+            changes: diffForJournal("appointment", before, candidate) },
         });
         checkAppointmentPatchError(result.error);
         if (!result.error && (asRecord(result.data).id !== id || asRecord(result.data).workspace_id !== workspaceId
@@ -6051,12 +6053,8 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       readWorkspaceContext(req)?.staffUserId,
     );
 
-    if (patchedEntity) {
-      if (patchedEntity === "appointment" && allowsOutsideSchedule(patchBody)) {
-        // A refused atomic write must not leave a fabricated override event.
-        await recordCrmChange({ supabase, workspaceId, entity: "appointment", entityId: id,
-          action: "booked_outside_schedule", changes: [], ...journalActor(req) });
-      }
+    if (patchedEntity && patchedEntity !== "appointment") {
+      // Appointment PATCH writes its journal inside the same SQL transaction.
       // Сравнивается с `row`, а не с сохранённой строкой: в `row` лежит ровно
       // то, чего коснулась правка, поэтому поле, которого патч не касался, не
       // попадёт в ленту даже как «не изменилось».

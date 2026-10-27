@@ -252,3 +252,87 @@ missing-protocol/legacy-body reasons. The five-file appointment source delta
 102 + 115-118 is compatible with a disposable baseline matching that catalog
 slice; it is not applied remotely or approval to release all accumulated code.
 See [the later preflight receipt](PREVIEW-PREFLIGHT-2026-10-27.md#later-read-only-recheck).
+
+## C24 Transactional PATCH Journal
+
+G2-C24/G7-C60, local base eed7092. The existing versioned PATCH committed its
+domain RPC before a separate best-effort audit INSERT. An owned native SQL
+reproduction proves that the visit can persist while the later journal fails.
+It demonstrates that two-statement gap, not a production incident or a full
+pre-fix HTTP test.
+
+Local 119 adds patch_crm_appointment_journaled and closes effective service
+execution of 118. The API uses only this new entry; there is no legacy RPC,
+direct UPDATE or second audit INSERT fallback. 118/116 still enforce original
+live staff/Auth/role, own-work, typed preimage, frozen opening token and capacity
+under their existing locks. Journal INSERTs and any arrival-sale side effects
+belong to the same transaction. A failed, suppressed or mismatching audit row
+rolls back the visit, its token and both events, not an already committed save.
+
+The verified server computes the existing privacy-classified field diff and
+email snapshot; request data cannot choose the audit actor, workspace, entity
+or event type. SQL bounds its shape, unique allowed offered fields, exact Russian
+labels, fact-only notes and masked contacts. It does not independently recompute
+the JavaScript diff or attest a compromised trusted service caller. The original
+policy still omits unclassified fields and no-op updates; this is not a promise
+to record every physical column change. Non-appointment/create journals retain
+their existing separate best-effort behavior and are not declared crash-atomic.
+
+The shared name masker now preserves one Unicode code point instead of half a
+surrogate. The actual PostgreSQL JSON path accepts a masked non-BMP fixture;
+free-form notes and full contacts do not enter those audit values. This changes
+neither roles, contact-read rules nor journal field classification.
+
+119 raw SHA-256: 38730dd70d0a717855066a898aa11616f21dc904ce946ef68651450eda6001fe.
+Journaled body SHA-256: d9e7877ab5f1c0b30db564ac961ed3ef6b686c0743d544279d03925b5672d9ae.
+Current metadata contract: 130 conditions including journal shape/privacy ACL,
+the new entry and closure of 118. 118 alone produces five blockers. The prior
+112-check query remains a distinct historical export for the observed catalog
+receipt; that observation has not been rerun against the new candidate.
+Generated local read-only SQL: node_modules/.cache/appointment-journal-119-readiness.sql,
+SHA-256 079cfd2335099d741cbb626a2f51fba9718a889f3c7caea5c84c44eba6b3f190.
+The CLI generated it only; it was not executed against any cloud database.
+
+Verification artifacts are local logs with prefix appointment-journal-:
+
+- native-chain-final: 655/655, raw 009-119 / 111 sources on owned PostgreSQL
+  17.11. Before/after gap, journal/dependency/ACL refusal, both-event rollback,
+  Unicode/phone policy, current facade live-authority waits and all-table empty
+  cleanup pass. An initial import failure was fixed by using this repository's
+  existing CJS/TS interop, not by excluding the new SQL cases.
+- native-patch-final: 64/64, two parent suites. 13 source-baseline/cutover cases
+  plus 51 actual React/HTTP/native PATCH cases. Four audit-failure modes roll
+  back arrival-sale effects; a retained real form saves once after repair.
+  Lost ACK, stale independent versions, replacement account, own-work refusal
+  and live-role waits remain. Auth identities and SDK transport are doubles;
+  the SQL/HTTP/React domain path is real and loopback-only.
+- verified-preflight: 118/118, current WASM metadata, SQL outward-effect review
+  and actual Git checkouts. 111 original byte receipts survive four EOL modes;
+  protected SQL and earlier raw hashes are not normalized or repinned.
+- verified-isolation: 931/931, unchanged 41-reader key set/network/IPC guards.
+  Only reviewed server digest changes to
+  1779ab67fc10014e464d234385c2f203d3696bef5e924dd8d594626673b97322.
+- verified-build-final: full production-mode build, both API compiler modes, workspace
+  types, Vite and 47+130 / 47+129 compiled cold-start checks pass.
+
+The initial nine-module regression was 495/521, not green. Three expectations
+still counted the removed second SDK audit although the real SQL audit existed;
+23 old column-lag cases had no RPC transport and demanded the pre-115 practice
+of dropping columns and retrying direct writes. That practice is not restored.
+Their current-contract replacements require refusal without column stripping,
+exact capacity/error classification, author preservation and no invented audit;
+the original SQL-repair and task-fallback checks remain. A diagnostic rerun was
+524/525: its last assertion still expected advisory capacity before the current
+create RPC. Real capacity is covered by the existing native concurrent two-seat
+case, not a query double. The corrected nine-module run passed 525/525; after
+restoring its two neighboring non-appointment capacity checks,
+verified-regression-final passes 527/527, with the current schema-safe assertions.
+Counts overlap and do not measure whole-platform requirements or percentage.
+
+No cloud migration/release, real Auth, financial action, external provider or
+customer workspace was accessed in this cycle. The six-source appointment
+candidate still needs effective isolated Preview binding and approved coordinated
+API/UI/schema cutover, existing-outcome reconciliation and real Auth acceptance.
+Durable PATCH/task command recovery, other crash-atomic audit paths, shared
+schedule/catalogue races, physical devices, commercial/legal/provider gates and
+all other unaccepted G1-G8 work remain open. This does not close the full goal.

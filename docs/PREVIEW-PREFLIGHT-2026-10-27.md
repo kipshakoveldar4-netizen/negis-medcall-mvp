@@ -129,6 +129,24 @@ demo tabs were not changed or closed.
 
 Remaining: exact selected API/UI/SQL delta, verified test-only build/runtime
 credentials and sender/worker isolation, legacy-outcome reconciliation and
-coordinated writer drain. Execute the current 112-check gate again after any
+coordinated writer drain. That cycle used the then-current 112-check gate; the
+later journaled PATCH candidate below requires a new current check after any
 approved cutover. No cloud migration or candidate deployment is approved by
 these local tests or metadata observations alone.
+
+## Later Local Journaled PATCH Candidate
+
+G2-C24/G7-C60, base eed7092: the current API additionally requires 119 and its
+service-only journaled writer. The old version-bound entry is now owner-private
+in that source candidate. The current generated metadata gate has 130 conditions.
+The saved 69/112 result and exact two remote query hashes above remain historical
+observations; no new cloud query, DDL, fixture or deployment was performed here.
+
+The existing disposable source-baseline proof now has a sixth-source phase:
+original 119 follows original 102 + 115-118. Its 130 checks pass; one owned edit
+and journal commit together, a stale retry creates no extra event, and legacy
+service PATCH refuses. Its owned historical and current rows are then removed.
+This remains a catalog-slice compatibility proof, not a clone, reconciliation
+of unknown target outcomes, true Auth/Preview acceptance or a G1-G8 release.
+Test-only credentials/bindings, sender/worker isolation and a coordinated
+approved cutover are still required. Whole-branch cloud release is not implied.

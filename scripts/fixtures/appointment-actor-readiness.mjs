@@ -1,4 +1,4 @@
-// Current post-115/116/117/118 metadata contract. No environment, network, business reads,
+// Current post-115/116/117/118/119 metadata contract. No environment, network, business reads,
 // domain RPC execution or migration application belongs in this module.
 const functions = [
   ['public.create_crm_appointment_with_new_client(uuid,jsonb,jsonb)','jsonb','v',true,false,'11bb49a22da2ff5367e4769dd67f1c6857434f765a5798d0666508cc8bca7584',['p_workspace_id','p_client','p_appointment']],
@@ -29,7 +29,7 @@ const literal = value => "'"+String(value).replaceAll("'","''")+"'";
 const textArray = values => 'array['+values.map(literal).join(',')+']::text[]';
 const tuple = values => '('+values.map(v=>typeof v==='boolean'?String(v):literal(v)).join(',')+')';
 
-export const appointmentActorReadinessQuery = `with
+function metadataQuery(functions,columns,extraChecks='') { return `with
 required_columns(relation,column_name,type_name) as (values
 ${Object.entries(columns).flatMap(([table,names])=>Object.entries(names).map(([name,type])=>tuple([table,name,type]))).join(',\n')}
 ), routines(signature,return_type,volatility,definer,service_entry,body_hash,arg_names) as (values
@@ -105,11 +105,31 @@ ${Object.entries(receiptColumns).map(([table,shape])=>'('+literal(table)+','+lit
   union all select 'appointments:before_update_triggers',coalesce((select pg_catalog.array_agg(t.tgname::text order by t.tgname)
     from pg_catalog.pg_trigger t where t.tgrelid=pg_catalog.to_regclass('public.appointments') and not t.tgisinternal
       and (t.tgtype::int & 19)=19),'{}'::text[])=array['guard_appointment_capacity','stamp_appointment_edit_version']::text[]
-)
+${extraChecks})
 select check_name,coalesce(ready,false) ready from checks order by check_name;`;
+}
+
+// Preserve the exact historical query for the read-only 112-check receipt.
+export const appointmentVersionEntryReadinessQuery=metadataQuery(functions,columns);
+const journalSignature='public.patch_crm_appointment_journaled(uuid,uuid,uuid,text,uuid,uuid,jsonb,jsonb,jsonb)';
+const journalBodyHash='d9e7877ab5f1c0b30db564ac961ed3ef6b686c0743d544279d03925b5672d9ae';
+export const appointmentActorReadinessQuery=metadataQuery([
+  ...functions.map(row=>row[0].startsWith('public.patch_crm_appointment_v2(')?[...row.slice(0,4),false,...row.slice(5)]:row),
+  [journalSignature,'jsonb','v',true,true,journalBodyHash,['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_appointment_id','p_expected_edit_version','p_before','p_patch','p_journal']],
+],{...columns,audit_logs:{id:'uuid',workspace_id:'uuid',actor_name:'text',actor_role:'text',actor_staff_user_id:'uuid',actor_kind:'text',
+  action:'text',entity_type:'text',entity_id:'text',metadata:'jsonb',created_at:'timestamp with time zone'}},`
+  union all select 'audit:shape',exists(select 1 from pg_catalog.pg_class c where c.oid=pg_catalog.to_regclass('public.audit_logs')
+    and c.relowner=pg_catalog.to_regrole('postgres') and c.relkind='r' and not c.relispartition and c.relrowsecurity and not c.relforcerowsecurity
+    and not exists(select 1 from pg_catalog.pg_policy where polrelid=c.oid)
+    and not exists(select 1 from pg_catalog.pg_trigger where tgrelid=c.oid and not tgisinternal))
+  union all select 'audit:closed:'||r.name,case when pg_catalog.to_regclass('public.audit_logs') is null or pg_catalog.to_regrole(r.name) is null
+    then false else not pg_catalog.has_table_privilege(r.name,'public.audit_logs','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      and not pg_catalog.has_any_column_privilege(r.name,'public.audit_logs','SELECT,INSERT,UPDATE,REFERENCES') end
+    from roles r where r.name<>'service_role'
+`);
 
 export function buildAppointmentActorReadiness() {
-  return `-- Current appointment API: v2 create/replay + version-bound PATCH, post-115/116/117/118 read-only gate.
+  return `-- Current appointment API: v2 create/replay + journaled version-bound PATCH, post-115/116/117/118/119 read-only gate.
 -- Run only in the approved test database after verifying its separate identity.
 -- All checks must be true; legacy RPCs closed, only current server entries open.
 -- NOT end-to-end, concurrency or payment acceptance. No business rows are read.

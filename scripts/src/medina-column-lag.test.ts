@@ -3,9 +3,12 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { appointmentSpyBody, appointmentSpyRows, withAppointmentCreateRpcSpy } from "./appointment-create-rpc-spy.js";
 
-// Запись существующего клиента переживает базу, отставшую от кода.
-// New-client creation requires atomic RPC 063; its fail-closed path has SQL tests.
+// Current create/PATCH require their complete actor-bound SQL protocol. The
+// historical remove-a-column fallback is no longer an admitted appointment
+// writer. These SDK doubles test refusal/no fallback, not SQL atomicity; that
+// is exercised by the native appointment HTTP suite. Task fallback remains.
 //
 // Что было. Мастер салона не мог записать ни одного клиента: «Не удалось
 // создать запись: Сбой на стороне сервиса». В логе Vercel — отказ базы «Could
@@ -171,6 +174,8 @@ async function callRouter(options: {
     clients: [{ id: CLIENT_ID, workspace_id: WORKSPACE_A, full_name: "Мария Ли" }],
     staff_users: [{ id: STAFF_A, auth_user_id: USER_A, workspace_id: WORKSPACE_A, role: "owner", status: "active" }],
     clinic_services: [{ id: SERVICE_ID, name: "Маникюр", duration_minutes: 90, is_active: true, workspace_id: WORKSPACE_A }],
+    clinic_doctors: [{ id: "66666666-6666-4666-8666-666666666666", workspace_id: WORKSPACE_A, full_name: "Айгуль", is_active: true, capacity: 2 }],
+    workspace_settings: [{ workspace_id: WORKSPACE_A, key: "clinic_schedule", value: { timeZone: "UTC" } }],
     appointments: [
       { id: APPOINTMENT_ID, workspace_id: WORKSPACE_A, client_name: "Мария Ли", doctor_name: "Айгуль", starts_at: OTHER_SLOT, status: "scheduled" },
     ],
@@ -187,7 +192,11 @@ async function callRouter(options: {
   const supabaseModule = (await import(
     pathToFileURL(path.join(repoRoot, "lib", "supabase", "server.ts")).href
   )) as { setSupabaseServerClientFactoryForTests: (factory: (() => unknown) | null) => void };
-  supabaseModule.setSupabaseServerClientFactoryForTests(() => laggingClient(state, writes, rows));
+  const rpcCalls: string[] = [];
+  const client = withAppointmentCreateRpcSpy(laggingClient(state, writes, appointmentSpyRows(rows)));
+  const rpc = client.rpc.bind(client);
+  client.rpc = async (name, args) => { rpcCalls.push(name); return rpc(name, args); };
+  supabaseModule.setSupabaseServerClientFactoryForTests(() => client);
 
   const routerModule = (await import(pathToFileURL(routerPath).href)) as {
     default: (req: unknown, res: MockResponse) => Promise<unknown>;
@@ -204,7 +213,7 @@ async function callRouter(options: {
       method: options.method ?? "POST",
       headers: { authorization: `Bearer ${TOKEN}` },
       query: { path: [options.resource ?? "appointments"], workspaceId: WORKSPACE_A },
-      body: options.body,
+      body: appointmentSpyBody(options.resource ?? "appointments", options.method ?? "POST", options.body),
     },
     res,
   );
@@ -217,6 +226,7 @@ async function callRouter(options: {
     warnings,
     writes: writes.filter((w) => w.table === "appointments"),
     allWrites: writes,
+    rpcCalls,
   };
 }
 
@@ -230,167 +240,89 @@ const booking = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-test("CL1 без duration_minutes запись всё равно создаётся", async () => {
-  const { res, writes } = await callRouter({ missing: ["duration_minutes"], body: booking() });
-  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
-  assert.equal(writes.length, 1, "сохранилась ровно одна строка");
-  assert.ok(!("duration_minutes" in writes[0].row), "недостающая колонка снята");
-  assert.equal(writes[0].row.client_name, "Мария Ли", "а сама запись — на месте");
-});
-
-test("CL2 снимается названная колонка, а не всё необязательное разом", async () => {
-  const { res, writes } = await callRouter({
-    missing: ["duration_minutes"],
-    body: booking({ serviceId: SERVICE_ID }),
+for (const method of ["POST", "PATCH"]) for (const missing of [
+  ["duration_minutes"], ["whatsapp"], ["source"], ["service_id"], ["doctor_id"],
+  ["duration_minutes", "whatsapp", "source", "service_id", "doctor_id"], ["unknown_column"],
+]) test("current " + method + " never discards missing schema fields: " + missing.join(","), async () => {
+  const updates = { status: "confirmed", durationMinutes: 90, whatsapp: "+77010000000", source: "Owned source",
+    serviceId: SERVICE_ID, doctorId: "66666666-6666-4666-8666-666666666666" };
+  // The named unknown column is injected as the provider's error below.
+  const result = await callRouter({
+    missing: missing.includes("unknown_column") ? [] : missing,
+    ...(missing.includes("unknown_column") ? { writeError: { code: "PGRST204", message: "Missing owned unknown_column" } } : {}),
+    method,
+    body: method === "PATCH" ? { id: APPOINTMENT_ID, updates } : booking(updates),
   });
-  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
-  assert.equal(writes[0].row.service_id, SERVICE_ID, "связь с услугой не потеряна");
+  assert.equal(result.res.statusCode, 503, JSON.stringify(result.res.body));
+  assert.equal(result.res.body.success, false);
+  assert.equal(result.res.body.code, method === "POST" ? "appointment_create_unavailable" : "appointment_patch_unavailable");
+  assert.equal(result.attempts.writes, 1, "One RPC attempt, no column-removing/direct-write fallback");
+  assert.deepEqual(result.allWrites, [], "No domain or fabricated audit commit");
+  assert.deepEqual(result.rpcCalls, method === "POST"
+    ? ["read_crm_appointment_request_v2", "create_crm_appointment_v2"] : ["patch_crm_appointment_journaled"]);
 });
 
-test("CL3 отставание сразу на две миграции тоже переживается", async () => {
-  const { res, writes } = await callRouter({
-    missing: ["duration_minutes", "service_id"],
-    body: booking({ serviceId: SERVICE_ID }),
-  });
-  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
-  assert.ok(!("duration_minutes" in writes[0].row) && !("service_id" in writes[0].row));
+for (const method of ["POST", "PATCH"]) for (const [code, message, status] of [
+  ["PGRST205", "Could not find public.appointments", 503],
+  ["PGRST202", "Missing owned current RPC", 503],
+  ["23P01", "appointment_capacity_exceeded", 409],
+  ["23P01", "another_exclusion", 502],
+  ["23514", "appointment_capacity_exceeded", 502],
+  ["23P01", "appointment_capacity_exceeded: private-client", 502],
+] as const) test("current " + method + " preserves exact provider error classification: " + code + "/" + message, async () => {
+  const result = await callRouter({ writeError: { code, message }, method,
+    body: method === "PATCH" ? { id: APPOINTMENT_ID, updates: { status: "confirmed" } } : booking() });
+  assert.equal(result.res.statusCode, status, JSON.stringify(result.res.body));
+  assert.equal(result.res.body.success, false);
+  if (status === 409) assert.equal(result.res.body.code, "appointment_conflict");
+  assert.equal(result.attempts.writes, 1);
+  assert.deepEqual(result.allWrites, []);
+  assert.equal(JSON.stringify(result.res.body).includes("private-client"), false);
 });
 
-test("CL4 правка записи переживает то же отставание", async () => {
-  const { res, writes } = await callRouter({
-    missing: ["duration_minutes"],
-    method: "PATCH",
-    body: { id: APPOINTMENT_ID, updates: { status: "confirmed", durationMinutes: 45 } },
-  });
-  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
-  assert.equal(writes.at(-1)?.op, "update");
-  assert.equal(writes.at(-1)?.row.status, "confirmed", "то, что база принять может, сохранено");
-  assert.ok(!("duration_minutes" in (writes.at(-1)?.row ?? {})));
+for (const method of ["POST", "PATCH"]) test("capacity errors never become appointment conflicts on tasks: " + method, async () => {
+  const result = await callRouter({ resource: "tasks", method,
+    writeError: { code: "23P01", message: "appointment_capacity_exceeded" },
+    body: method === "PATCH" ? { id: APPOINTMENT_ID, updates: { title: "Owned changed task" } } : { title: "Owned task" } });
+  assert.equal(result.res.statusCode, 502, JSON.stringify(result.res.body));
+  assert.notEqual(result.res.body.code, "appointment_conflict");
+  assert.equal(result.attempts.writes, 1);assert.deepEqual(result.allWrites, []);assert.deepEqual(result.rpcCalls, []);
 });
 
-test("CL5 боевой случай целиком: нет всех трёх колонок 012 — запись создаётся", async () => {
-  // Ровно то состояние, в котором мастер не мог записать ни одного клиента.
-  const { res, writes, warnings } = await callRouter({ missing: [...COLUMNS_012], body: booking() });
-  assert.equal(res.statusCode, 201, JSON.stringify({ body: res.body, warnings }));
-  assert.equal(writes.length, 1);
-  for (const column of COLUMNS_012) assert.ok(!(column in writes[0].row), `${column} снята`);
-  assert.equal(writes[0].row.starts_at, SLOT_START, "время визита сохранено");
+test("current create keeps author and all supplied fields when the schema is ready", async () => {
+  const result = await callRouter({ body: booking({ durationMinutes: 90, whatsapp: "+77010000000", source: "Owned source" }) });
+  assert.equal(result.res.statusCode, 201, JSON.stringify(result.res.body));
+  assert.equal(result.writes.length, 1);
+  assert.equal(result.writes[0].row.created_by_staff_user_id, STAFF_A);
+  assert.equal(result.writes[0].row.duration_minutes, 90);
+  assert.equal(result.writes[0].row.whatsapp, "+77010000000");
+  assert.equal(result.writes[0].row.source, "Owned source");
+  assert.equal((result.res.body.data as Record<string, unknown>).unsaved, undefined);
 });
 
-test("CL6 потолок повторов считается по колонкам: 012 плюс 032 — всё ещё запись, а не отказ", async () => {
-  // Потолок, посчитанный по числу МИГРАЦИЙ, здесь исчерпывался на четвёртой
-  // колонке, и мастер снова получал «Сбой на стороне сервиса».
-  const { res, writes } = await callRouter({
-    missing: [...COLUMNS_012, "service_id"],
-    body: booking({ serviceId: SERVICE_ID }),
-  });
-  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
-  assert.equal(writes.length, 1, "и сохранилась ровно одна строка, а не несколько");
-  assert.equal(writes[0].row.client_name, "Мария Ли");
+test("missing author cannot silently remove provenance from a current create", async () => {
+  const result = await callRouter({ missing: ["created_by_staff_user_id"], body: booking() });
+  assert.equal(result.res.statusCode, 503, JSON.stringify(result.res.body));
+  assert.deepEqual(result.allWrites, []);
+  assert.equal(result.attempts.writes, 1);
 });
 
-test("CL7 отказ не про колонку не лечится повтором без колонок", async () => {
-  // Иначе любой сбой базы молча снимал бы связи: запись сохранялась бы, но уже
-  // не той, какой её создавали.
-  const { res, writes, attempts } = await callRouter({
-    writeError: { code: "23505", message: "duplicate key value violates unique constraint" },
-    body: booking({ serviceId: SERVICE_ID }),
-  });
-  assert.equal(res.statusCode, 502, JSON.stringify(res.body));
-  assert.equal(writes.length, 0, "ничего не сохранено");
-  assert.equal(attempts.writes, 1, "и повторов не было вовсе");
+test("a schema that heals only on a second write does not trigger an automatic retry", async () => {
+  const result = await callRouter({ missing: ["duration_minutes"], healAfter: 2, body: booking() });
+  assert.equal(result.res.statusCode, 503, JSON.stringify(result.res.body));
+  assert.equal(result.attempts.writes, 1);
+  assert.deepEqual(result.allWrites, []);
 });
 
-for (const method of ["POST", "PATCH"]) {
-  for (const [code, message, status] of [
-    ["23P01", "appointment_capacity_exceeded", 409],
-    ["23P01", "another_exclusion", 502],
-    ["23514", "appointment_capacity_exceeded", 502],
-    ["23P01", "appointment_capacity_exceeded: private-client", 502],
-  ] as const) {
-    test(`capacity ${method} classifies only the exact database pair: ${code}/${message}`, async () => {
-      const writeError = { code, message, details: "private-client +77000000000", hint: "private SQL constraint" };
-      const { res, writes, allWrites, attempts } = await callRouter({
-        method,
-        writeError,
-        body: method === "POST" ? booking() : { id: APPOINTMENT_ID, updates: { status: "confirmed" } },
-      });
-      assert.equal(res.statusCode, status, JSON.stringify(res.body));
-      if (status === 409) {
-        assert.deepEqual(res.body, {
-          success: false,
-          error: "Это время у врача уже занято",
-          code: "appointment_conflict",
-        });
-      } else {
-        assert.equal(res.body.code, undefined);
-      }
-      assert.doesNotMatch(JSON.stringify(res.body), /private-client|77000000000|SQL|23P01|appointment_capacity_exceeded|another_exclusion/);
-      assert.equal(writes.length, 0);
-      assert.equal(allWrites.length, 0, "no successful journal, payment or other writes");
-      assert.equal(attempts.writes, 1, "no retry or success-side-effect write after refusal");
-    });
-  }
-
-  test(`capacity ${method} does not classify a non-appointment resource`, async () => {
-    const { res, allWrites, attempts } = await callRouter({
-      method,
-      resource: "tasks",
-      writeError: { code: "23P01", message: "appointment_capacity_exceeded" },
-      body: method === "POST" ? { title: "Fixture task" } : { id: APPOINTMENT_ID, updates: { title: "Fixture task" } },
-    });
-    assert.equal(res.statusCode, 502, JSON.stringify(res.body));
-    assert.equal(res.body.code, undefined);
-    assert.equal(allWrites.length, 0);
-    assert.equal(attempts.writes, 1);
-  });
-}
-
-test("CL8 незнакомая колонка не крутит цикл до таймаута", async () => {
-  const { res, writes, attempts } = await callRouter({
-    writeError: { code: "PGRST204", message: "Could not find the mystery_column of appointments in the schema cache" },
-    body: booking(),
-  });
-  assert.equal(res.statusCode, 502, JSON.stringify(res.body));
-  assert.equal(writes.length, 0);
-  assert.ok(attempts.writes <= 4, `попыток должно быть немного, было ${attempts.writes}`);
-});
-
-test("CL9 устаревший кэш схемы не стоит оператору введённого значения", async () => {
-  // Секунды между ALTER TABLE и перечитыванием кэша: колонка в базе ЕСТЬ, а
-  // PostgREST отвечает как будто её нет. Дословный повтор проходит целым — без
-  // него длительность визита молча превратилась бы в шестьдесят минут.
-  const { res, writes } = await callRouter({
-    missing: ["duration_minutes"],
-    healAfter: 2,
-    body: booking({ durationMinutes: 90 }),
-  });
-  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
-  assert.equal(writes[0].row.duration_minutes, 90, "введённая длительность сохранена, а не снята");
-});
-
-test("CL10 правка, от которой осталась одна метка времени, не отвечает «сохранено»", async () => {
-  const { res, writes } = await callRouter({
-    missing: ["duration_minutes"],
-    method: "PATCH",
-    body: { id: APPOINTMENT_ID, updates: { durationMinutes: 90 } },
-  });
-  assert.notEqual(res.statusCode, 200, `тихий успех: ${JSON.stringify(res.body)}`);
-  assert.equal(res.body.success, false, "и ответ честно говорит об отказе");
-  const saved = writes.at(-1)?.row ?? {};
-  assert.ok(!("duration_minutes" in saved), "значение действительно не сохранилось");
-  // Отказ отвечается ПОСЛЕ того, как повтор уже прошёл в базу: там осталась
-  // сдвинутая метка времени и больше ничего. Это закрепляется явно, иначе
-  // проверка одинаково зеленела бы и на «не записали вовсе».
-  assert.deepEqual(Object.keys(saved), ["updated_at"], "в базу ушла ровно одна служебная колонка");
-});
-
-test("CL11 лог называет владельцу миграцию и колонку — иначе он не знает, что применять", async () => {
-  const { warnings } = await callRouter({ missing: ["duration_minutes"], body: booking() });
-  assert.ok(
-    warnings.some((line) => line.includes("012") && line.includes("duration_minutes")),
-    `в логе нет миграции и колонки: ${JSON.stringify(warnings)}`,
-  );
+test("an advisory busy row cannot authorize a column-stripping save on an incomplete schema", async () => {
+  // Capacity is now enforced inside the real SQL RPC; its concurrent two-seat
+  // case is in crm-appointment-native-http.test.mjs, not this query double.
+  const result = await callRouter({ missing: [...COLUMNS_012], body: booking({ starts_at: OTHER_SLOT }) });
+  assert.equal(result.res.statusCode, 503, JSON.stringify(result.res.body));
+  assert.equal(result.res.body.code, "appointment_create_unavailable");
+  assert.deepEqual(result.allWrites, []);
+  assert.equal(result.attempts.writes, 1);
+  assert.deepEqual(result.rpcCalls, ["read_crm_appointment_request_v2", "create_crm_appointment_v2"]);
 });
 
 test("CL12 миграция 039 добавляет ровно те колонки и повторный запуск безопасен", async () => {
@@ -410,35 +342,6 @@ test("CL13 039 стоит в чек-листе владельца — иначе
   const doc = await readFile(path.join(repoRoot, "docs", "MIGRATIONS.md"), "utf8");
   const pending = doc.slice(doc.indexOf("## Ждут применения руками"));
   assert.ok(pending.includes("039_appointments_calendar_columns_repair.sql"), "миграция названа в списке ожидающих");
-});
-
-test("CL14 без duration_minutes защита от двойной записи продолжает работать", async () => {
-  // На отставшей базе проверка пересечений падала целиком — салон терял
-  // единственную серверную защиту занятого времени, и узнать об этом можно
-  // было только из лога Vercel.
-  const { res, warnings } = await callRouter({
-    missing: [...COLUMNS_012],
-    body: booking({ starts_at: OTHER_SLOT }),
-  });
-  assert.equal(res.statusCode, 409, `двойная запись прошла: ${JSON.stringify(res.body)}`);
-  assert.equal(res.body.code, "appointment_conflict");
-  assert.ok(
-    warnings.some((line) => line.includes("without duration_minutes")),
-    "и оператор узнаёт, что длительность соседнего визита взята по умолчанию",
-  );
-});
-
-test("CL15 частичная потеря доезжает до экрана, а не остаётся в логе", async () => {
-  const { res, writes } = await callRouter({
-    missing: ["duration_minutes", "whatsapp"],
-    method: "PATCH",
-    body: { id: APPOINTMENT_ID, updates: { status: "confirmed", durationMinutes: 90, whatsapp: "+7 701 000 00 00" } },
-  });
-  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
-  assert.equal(writes.at(-1)?.row.status, "confirmed", "то, что база принять может, сохранено");
-  const unsaved = (res.body.data as Record<string, unknown>).unsaved;
-  assert.ok(Array.isArray(unsaved), `ответ молчит о потере: ${JSON.stringify(res.body)}`);
-  assert.deepEqual([...(unsaved as string[])].sort(), ["WhatsApp", "длительность"].sort());
 });
 
 test("CL16 задача, от которой ничего не сохранилось, тоже не отвечает «сохранено»", async () => {
@@ -474,35 +377,4 @@ test("CL17 журнал изменений не пишет то, чего в б�
     !changes.some((change) => change.field === "client_id"),
     `в журнале связь, которой не сохранилось: ${JSON.stringify(changes)}`,
   );
-});
-
-test("CL18 «нет таблицы» не обвиняет миграцию 012 и не повторяется впустую", async () => {
-  const { res, attempts, warnings } = await callRouter({
-    writeError: { code: "PGRST205", message: "Could not find the table 'public.appointments' in the schema cache" },
-    body: booking(),
-  });
-  assert.equal(res.statusCode, 502, JSON.stringify(res.body));
-  assert.equal(attempts.writes, 1, "повторять нечего: колонки ни при чём");
-  assert.ok(
-    !warnings.some((line) => line.includes("migration 012")),
-    `лог обвиняет невиновную миграцию: ${JSON.stringify(warnings)}`,
-  );
-});
-
-test("CL19 создание называет потерю тем же способом, что и правка", async () => {
-  const { res, writes } = await callRouter({ missing: ["whatsapp"], body: booking({ whatsapp: "+7 701 000 00 00" }) });
-  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
-  assert.equal(writes.length, 1, "запись создана");
-  const unsaved = (res.body.data as Record<string, unknown>).unsaved;
-  assert.deepEqual(unsaved, ["WhatsApp"], `ответ молчит о потере: ${JSON.stringify(res.body)}`);
-});
-
-test("CL20 отставшая база без колонки автора не блокирует запись клиента", async () => {
-  // Регрессия 21.08.2026: колонка автора уехала в INSERT раньше миграции 043,
-  // и администратор салона получил «Сбой на стороне сервиса» на каждой
-  // попытке записать клиента. Каталог обходов обязан знать про неё.
-  const { res, writes } = await callRouter({ missing: ["created_by_staff_user_id"], body: booking() });
-  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
-  assert.equal(writes.length, 1, "запись создана");
-  assert.ok(!("created_by_staff_user_id" in writes[0].row), "недостающая колонка снята");
 });

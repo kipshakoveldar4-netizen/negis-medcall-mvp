@@ -239,7 +239,7 @@ function maskValue(field: string, raw: string): string {
   // product; a name by its first letter is enough to tell two leads apart.
   if (digits.length >= 7) return `…${digits.slice(-4)}`;
   if (field.includes("phone") || field.includes("whatsapp")) return "…";
-  return `${raw.slice(0, 1)}…`;
+  return `${Array.from(raw)[0]}…`;
 }
 
 /**
@@ -346,7 +346,8 @@ type RecordChangeInput = {
 /**
  * Write one journal row.
  *
- * Never throws. A journal that can fail a save is worse than no journal: the
+ * Best-effort generic writer; appointment PATCH instead uses transaction 119.
+ * Never throws. A journal that can fail an already committed save is worse than no journal: the
  * operator would lose real work because a secondary write hiccuped. This
  * follows the precedent already in this file's neighbour — insertMetaAuditLog
  * warns and returns — and it is what keeps test:failure-honesty meaningful,

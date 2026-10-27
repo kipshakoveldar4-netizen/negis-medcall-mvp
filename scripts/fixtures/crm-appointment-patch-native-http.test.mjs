@@ -79,13 +79,13 @@ test('appointment PATCH pins the HTTP actor at the actual SQL write',{timeout:30
   await t.test('a missing version-bound writer refuses instead of calling the legacy entry or direct UPDATE',async()=>{
     const f=await setup();let renamed=false;
     try{
-      await db.query('alter function public.patch_crm_appointment_v2(uuid,uuid,uuid,text,uuid,uuid,jsonb,jsonb) rename to owned_missing_version_writer');renamed=true;
+      await db.query('alter function public.patch_crm_appointment_journaled(uuid,uuid,uuid,text,uuid,uuid,jsonb,jsonb,jsonb) rename to owned_missing_version_writer');renamed=true;
       const count=transport.controls.calls.length,result=await patch();assert.equal(result.status,503,JSON.stringify(result));
       assert.equal(result.body.code,'appointment_patch_unavailable');assert.equal(transport.controls.calls.length,count+1);
-      assert.equal(transport.controls.calls.at(-1).name,'patch_crm_appointment_v2');
+      assert.equal(transport.controls.calls.at(-1).name,'patch_crm_appointment_journaled');
       assert.equal((await f.read()).notes,'Owned original note');assert.equal((await f.counts()).audits,0);
     }finally{
-      if(renamed)await db.query('alter function public.owned_missing_version_writer(uuid,uuid,uuid,text,uuid,uuid,jsonb,jsonb) rename to patch_crm_appointment_v2');
+      if(renamed)await db.query('alter function public.owned_missing_version_writer(uuid,uuid,uuid,text,uuid,uuid,jsonb,jsonb,jsonb) rename to patch_crm_appointment_journaled');
       await f.close();
     }
   });
@@ -151,7 +151,39 @@ test('appointment PATCH pins the HTTP actor at the actual SQL write',{timeout:30
     const f=await setup();try{const result=await patch({},'DELETE');assert.equal(result.status,405);assert.ok(await f.read());}
     finally{await f.close();}
   });
+  for(const mode of ['throw-first','throw-second','drop','mutate'])await t.test('actual HTTP/SQL: '+mode+' journal failure rolls back the visit and arrival sale',async()=>{
+    const f=await setup(),before=await f.fullRead();
+    try{
+      const failure="raise exception using errcode='P1192',message='PRIVATE_OWNED_AUDIT_FAILURE'";
+      const behavior=mode==='throw-first'?failure:mode==='throw-second'?`if new.action='updated' then ${failure};end if;return new`:mode==='drop'?'return null':"new.entity_id='owned_wrong_entity';return new";
+      await db.query(`create function public.owned_http_audit_failure() returns trigger language plpgsql as $$begin ${behavior};end$$;
+        create trigger owned_http_audit_failure before insert on audit_logs for each row execute function public.owned_http_audit_failure()`);
+      const count=transport.controls.calls.length,result=await patch({status:'arrived',allowOutsideSchedule:true});
+      assert.equal(result.status,503,JSON.stringify(result));assert.equal(result.body.code,'appointment_patch_unavailable');
+      assert.equal(JSON.stringify(result.body).includes('PRIVATE_OWNED_AUDIT_FAILURE'),false);
+      assert.equal(transport.controls.calls.length,count+1);assert.deepEqual(await f.fullRead(),before);
+      assert.equal((await f.counts()).audits,0);
+      assert.equal((await db.query('select count(*)::int n from deals where workspace_id=$1',[ids.workspace])).rows[0].n,0);
+    }finally{await db.query('drop trigger if exists owned_http_audit_failure on audit_logs;drop function if exists public.owned_http_audit_failure()');await f.close();}
+  });
   const script=await recoveryBundle({jwtLikeTokens:true});
+  await t.test('actual React keeps the draft after a rolled-back journal failure and saves once after repair',async()=>{
+    const f=await setup(),ui=await appointmentNativeServer(http.handler,script);let browser;
+    try{
+      const before=await f.fullRead();browser=await ownedRecoveryBrowser(ui.origin);const run=browser.evaluate,wait=browser.waitFor;
+      await db.query(`create function public.owned_http_audit_failure() returns trigger language plpgsql as $$begin return null;end$$;
+        create trigger owned_http_audit_failure before insert on audit_logs for each row execute function public.owned_http_audit_failure()`);
+      await run(`f.edit(${JSON.stringify(before)});f.view.setForm(current=>({...current,notes:'Owned retained draft'}));await f.tick();f.start();`);
+      await wait('f.tasks[0]?.done');const rejected=await run('return f.snapshot();');
+      assert.equal(ui.controls.responses[0]?.status,503,JSON.stringify(ui.controls.responses));
+      assert.equal(rejected.modalOpen,true);assert.equal(rejected.form.notes,'Owned retained draft');assert.deepEqual(rejected.successes,[]);
+      assert.deepEqual(await f.fullRead(),before);assert.equal((await f.counts()).audits,0);
+      await db.query('drop trigger owned_http_audit_failure on audit_logs;drop function public.owned_http_audit_failure()');
+      await run('f.start();');await wait('f.tasks[1]?.done');const saved=await run('return f.snapshot();');
+      assert.equal(ui.controls.responses[1]?.status,200);assert.equal(saved.successes.length,1);assert.equal((await f.read()).notes,'Owned retained draft');
+      assert.equal((await f.counts()).audits,1);assert.deepEqual(ui.controls.errors,[]);assert.deepEqual(browser.exceptions,[]);
+    }finally{await db.query('drop trigger if exists owned_http_audit_failure on audit_logs;drop function if exists public.owned_http_audit_failure()');await browser?.close();await ui.close();await f.close();}
+  });
   for(const refreshed of [false,true])await t.test('a form opened before another account saves cannot overwrite it; background refresh='+refreshed,async()=>{
     const f=await setup(),ui=await appointmentNativeServer(http.handler,script);let browser;
     try{
@@ -232,7 +264,7 @@ test('appointment PATCH pins the HTTP actor at the actual SQL write',{timeout:30
     }finally{transport.controls.beforePatch=null;await browser?.close();await ui.close();await f.close();}
   });
   assert.deepEqual(http.state.unexpected,[]);assert.deepEqual(server.controls.errors,[]);
-  assert.ok(transport.controls.calls.length>0&&transport.controls.calls.every(call=>call.name==='patch_crm_appointment_v2'));
-  assert.ok(transport.controls.writes.every(write=>write.table==='audit_logs'),'No direct appointment UPDATE fallback');
-  await exerciseAppointmentPatch(db,fixture,t,{versioned:true});
+  assert.ok(transport.controls.calls.length>0&&transport.controls.calls.every(call=>call.name==='patch_crm_appointment_journaled'));
+  assert.deepEqual(transport.controls.writes,[],'No direct appointment UPDATE or second-statement audit fallback');
+  await exerciseAppointmentPatch(db,fixture,t,{versioned:true,journaled:true});
 });

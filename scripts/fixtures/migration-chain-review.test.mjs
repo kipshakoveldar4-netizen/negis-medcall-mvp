@@ -8,9 +8,9 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-118, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 110);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 110 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-119, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 111);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 111 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
@@ -226,6 +226,15 @@ test('116 admits only a source-reviewed tenant/actor patch with bound values and
   assert.ok(entry.source.includes('using next_row,p_workspace_id,p_appointment_id'));
   assert.ok(entry.source.includes('jsonb_object_keys(p_patch) k where k<>all'));
   assert.doesNotMatch(entry.source,/grant\s+(?:select|insert|update|delete)|alter\s+table|create\s+policy/i);
+});
+
+test('119 adds only a service-only journaled facade and closes effective old service PATCH',()=>{
+  const entry=chain.find(item=>item.file.startsWith('119_'));
+  assert.deepEqual(entry.evidence.tables,[]);
+  assert.deepEqual(entry.evidence.functions.map(fn=>fn.name),['public.patch_crm_appointment_journaled']);
+  assert.equal(entry.evidence.dynamicSqlLines.length,0);assert.equal(entry.evidence.storageCatalogueLines.length,0);
+  assert.ok(entry.source.includes('d5f8355441890ab3bb910adcb34a0cd9e3211685431ffee7826e0eb283bb11a8'));
+  assert.doesNotMatch(entry.source,/grant\s+(?:select|insert|update|delete)|alter\s+table|create\s+trigger/i);
 });
 
 test('118 introduces only a version-bound server facade and closes effective legacy execution',()=>{

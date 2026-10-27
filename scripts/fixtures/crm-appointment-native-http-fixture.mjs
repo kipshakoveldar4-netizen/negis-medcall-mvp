@@ -9,7 +9,7 @@ import { ids, visit } from '../src/appointment-recovery-committed-fixture.ts';
 const rpcArgs = {
   read_crm_appointment_request_v2: ['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_request_key','p_request_fingerprint'],
   create_crm_appointment_v2: ['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_request_key','p_request_fingerprint','p_new_client','p_appointment','p_client_match'],
-  patch_crm_appointment_v2: ['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_appointment_id','p_expected_edit_version','p_before','p_patch'],
+  patch_crm_appointment_journaled: ['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_appointment_id','p_expected_edit_version','p_before','p_patch','p_journal'],
 };
 const allowed = new Set(['staff_users','workspace_settings','clients','clinic_doctors','clinic_services','appointments','clinic_doctor_shifts','audit_logs']);
 const identifier = value => { assert.match(value,/^[a-z_][a-z0-9_]*$/); return '"'+value+'"'; };
@@ -26,7 +26,7 @@ export function appointmentNativeAdapter(fixture) {
       const keys=rpcArgs[name];assert.deepEqual(Object.keys(args).sort(),[...keys].sort());
       controls.calls.push({name,args:structuredClone(args)});
       if(controls.beforeRpc)await controls.beforeRpc(name,args);
-      if(name==='patch_crm_appointment_v2'&&controls.beforePatch)await controls.beforePatch();
+      if(name==='patch_crm_appointment_journaled'&&controls.beforePatch)await controls.beforePatch();
       try {return {data:(await query(`select public.${name}(${keys.map((_,i)=>'$'+(i+1)).join(',')}) value`,keys.map(key=>args[key]))).rows[0].value,error:null};}
       catch(e){controls.errors.push({name,code:e.code});return {data:null,error:{code:e.code,message:e.code==='23P01'?'appointment_capacity_exceeded':'PRIVATE_NATIVE_APPOINTMENT_SQL'}};}
     },

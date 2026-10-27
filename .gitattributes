@@ -111,3 +111,4 @@
 /migrations/116_appointment_patch_actor.sql text eol=lf
 /migrations/117_appointment_edit_version.sql text eol=lf
 /migrations/118_appointment_version_entry.sql text eol=lf
+/migrations/119_appointment_patch_journal.sql text eol=lf

@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { appointmentActorReadinessQuery,buildAppointmentActorReadiness } from './appointment-actor-readiness.mjs';
+import { appointmentActorReadinessQuery,appointmentVersionEntryReadinessQuery,buildAppointmentActorReadiness } from './appointment-actor-readiness.mjs';
 import { legacyAppointmentReadinessQuery } from './appointment-preview-readiness.mjs';
 
 const read='public.read_crm_appointment_request_v2(uuid,uuid,uuid,text,uuid,text)';
 const create='public.create_crm_appointment_v2(uuid,uuid,uuid,text,uuid,text,jsonb,jsonb,text)';
 const patch='public.patch_crm_appointment_as_actor(uuid,uuid,uuid,text,uuid,jsonb,jsonb)';
 const entry='public.patch_crm_appointment_v2(uuid,uuid,uuid,text,uuid,uuid,jsonb,jsonb)';
+const journal='public.patch_crm_appointment_journaled(uuid,uuid,uuid,text,uuid,uuid,jsonb,jsonb,jsonb)';
 const entryChecks=['routine:'+entry,...['anon','authenticated','service_role'].map(role=>'execute:'+role+':'+entry)];
 const version='public.stamp_appointment_edit_version()';
 const versionChecks=['column:appointments.edit_version','routine:'+version,
@@ -13,6 +14,7 @@ const versionChecks=['column:appointments.edit_version','routine:'+version,
   'appointments:edit_version_shape','appointments:edit_version_trigger','appointments:before_update_triggers'];
 const routine='routine:'+read;
 const blockers=async db=>(await db.query(appointmentActorReadinessQuery)).rows.filter(r=>!r.ready).map(r=>r.check_name);
+const historicalBlockers=async db=>(await db.query(appointmentVersionEntryReadinessQuery)).rows.filter(r=>!r.ready).map(r=>r.check_name);
 
 export async function exerciseAppointmentReadinessBeforeCutover(db,t){
   await t.test('current gate refuses a real legacy-ready schema before 115',async()=>{
@@ -25,7 +27,7 @@ export async function exerciseAppointmentReadinessBeforeCutover(db,t){
 export async function exerciseAppointmentReadiness(db,t){
   await t.test('current metadata gate passes the selected schema and is unique, boolean and bounded',async()=>{
     const result=(await db.query(appointmentActorReadinessQuery)).rows;
-    assert.equal(result.length,112);assert.equal(new Set(result.map(r=>r.check_name)).size,result.length);
+    assert.equal(result.length,130);assert.equal(new Set(result.map(r=>r.check_name)).size,result.length);
     assert.ok(result.every(r=>typeof r.ready==='boolean'));assert.deepEqual(result.filter(r=>!r.ready),[]);
   });
   for(const [sql,failure] of [
@@ -48,7 +50,13 @@ export async function exerciseAppointmentReadiness(db,t){
     [`alter function ${patch} rename to owned_missing_patch`,'routine:'+patch],
     [`alter function ${patch} security invoker`,'routine:'+patch],
     [`grant execute on function ${patch} to service_role`,'execute:service_role:'+patch],
-    [`revoke execute on function ${entry} from service_role`,'execute:service_role:'+entry],
+    [`grant execute on function ${entry} to service_role`,'execute:service_role:'+entry],
+    [`revoke execute on function ${journal} from service_role`,'execute:service_role:'+journal],
+    [`grant execute on function ${journal} to public`,'execute:anon:'+journal],
+    [`alter function ${journal} security invoker`,'routine:'+journal],
+    ['alter table audit_logs disable row level security','audit:shape'],
+    ['grant select(metadata) on audit_logs to authenticated','audit:closed:authenticated'],
+    ['alter table audit_logs rename column actor_kind to owned_missing_kind','column:audit_logs.actor_kind'],
     [`grant execute on function ${entry} to public`,'execute:anon:'+entry],
     [`alter function ${entry} security invoker`,'routine:'+entry],
     [`grant execute on function ${patch} to public`,'execute:anon:'+patch],
@@ -104,18 +112,26 @@ export async function exerciseAppointmentReadiness(db,t){
 
 export async function exerciseAppointmentPatchReadinessBeforeCutover(db,t){
   await t.test('a complete create/replay schema is not ready for current API PATCH before 116',async()=>{
-    assert.deepEqual((await blockers(db)).sort(),['appointments:server_access','routine:'+patch,...['anon','authenticated','service_role'].map(role=>'execute:'+role+':'+patch),...versionChecks,...entryChecks].sort());
+    assert.deepEqual((await historicalBlockers(db)).sort(),['appointments:server_access','routine:'+patch,...['anon','authenticated','service_role'].map(role=>'execute:'+role+':'+patch),...versionChecks,...entryChecks].sort());
   });
 }
 
 export async function exerciseAppointmentVersionReadinessBeforeCutover(db,t){
   await t.test('current API refuses the otherwise complete 116 schema without the 117 edit version',async()=>{
-    assert.deepEqual((await blockers(db)).sort(),[...versionChecks,...entryChecks,'execute:service_role:'+patch].sort());
+    assert.deepEqual((await historicalBlockers(db)).sort(),[...versionChecks,...entryChecks,'execute:service_role:'+patch].sort());
   });
 }
 
 export async function exerciseAppointmentEntryReadinessBeforeCutover(db,t){
   await t.test('117 alone cannot authorize the current version-bound API while legacy service execution remains open',async()=>{
-    assert.deepEqual((await blockers(db)).sort(),[...entryChecks,'execute:service_role:'+patch].sort());
+    assert.deepEqual((await historicalBlockers(db)).sort(),[...entryChecks,'execute:service_role:'+patch].sort());
+  });
+}
+
+export async function exerciseAppointmentJournalReadinessBeforeCutover(db,t){
+  await t.test('118 alone cannot authorize the journaled API or its legacy-service closure',async()=>{
+    assert.deepEqual(await historicalBlockers(db),[]);
+    assert.deepEqual((await blockers(db)).sort(),['routine:'+journal,...['anon','authenticated','service_role'].map(role=>'execute:'+role+':'+journal),
+      'execute:service_role:'+entry].sort());
   });
 }
