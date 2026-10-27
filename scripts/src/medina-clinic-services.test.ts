@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { withAppointmentCreateRpcSpy } from "./appointment-create-rpc-spy.js";
+import { withAppointmentCreateRpcSpy, appointmentSpyRows, appointmentSpyBody } from "./appointment-create-rpc-spy.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -201,7 +201,7 @@ async function loadRouter(options: {
   };
 
   supabaseModule.setSupabaseServerClientFactoryForTests(() =>
-    withAppointmentCreateRpcSpy(spyClient(clientRows, log, options.injected ?? [], new Set(options.missingColumns ?? []))));
+    withAppointmentCreateRpcSpy(spyClient(appointmentSpyRows(clientRows), log, options.injected ?? [], new Set(options.missingColumns ?? []))));
 
   const routerModule = (await import(pathToFileURL(routerPath).href)) as {
     default: (req: unknown, res: MockResponse) => Promise<unknown>;
@@ -227,7 +227,7 @@ async function loadRouter(options: {
             workspaceId: WORKSPACE_A,
             ...(input.query ?? {}),
           },
-          body: input.body,
+          body: appointmentSpyBody(input.resource ?? "clinic-services", input.method, input.body),
         },
         res,
       );
@@ -590,25 +590,22 @@ test("CS11 длительность берётся из услуги, но вв�
   assert.equal(writtenTo(explicit.log, "appointments")?.duration_minutes, 90, "тело всегда сильнее каталога");
 });
 
-test("CS12 запись существующего клиента до миграции теряет только связь", async () => {
+test("CS12 атомарная запись отказывает без колонки, не отбрасывая связь услуги", async () => {
   const call = await loadRouter({
     rows: { clinic_services: [activeService], clients: [{ id: CLIENT_ID, workspace_id: WORKSPACE_A }] },
     missingColumns: ["service_id"],
   });
-  const { res, log, warnings: warned } = await call({
+  const { res, log } = await call({
     resource: "appointments",
     method: "POST",
     body: { client: "Пациент", clientId: CLIENT_ID, serviceId: SERVICE_ID, startsAt: "2026-09-01T09:00:00.000Z" },
   });
 
-  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  assert.equal(res.statusCode, 503, JSON.stringify(res.body));
+  assert.equal(res.body.code, "appointment_create_unavailable");
   const rows = log.filter((entry) => entry.table === "appointments" && entry.op === "insert");
-  assert.equal(rows.length, 2, "первая попытка отвергается, вторая идёт без колонки");
-  assert.equal((rows[1].filters.__row as Record<string, unknown>).service_id, undefined);
-  assert.ok(
-    warned.some((line) => line.includes("032") && line.includes("service_id")),
-    "оператор обязан узнать из лога, какой миграции не хватает и что именно потеряно",
-  );
+  assert.equal(rows.length, 1, "No separate retry after the atomic writer refuses");
+  assert.equal((rows[0].filters.__row as Record<string, unknown>).service_id, SERVICE_ID);
 });
 
 /* ── Журнал ── */
@@ -673,10 +670,8 @@ test("CS19 продажа связывается с услугой и на пр�
   );
 });
 
-test("CS20 запись существующего клиента обрабатывает отсутствие колонки в кэше схемы", async () => {
-  // PostgREST отвергает запись в неизвестную колонку кодом PGRST204, не доходя
-  // до Postgres. Откат, знающий только 42703, не сработал бы ни разу на hosted
-  // Supabase — и всё окно между деплоем и миграцией запись не создавалась бы.
+test("CS20 атомарная запись отказывает при PGRST204 без потери связи услуги", async () => {
+  // Schema-cache lag cannot authorize a separate insert with missing fields.
   const call = await loadRouter({
     rows: { clinic_services: [activeService], clients: [{ id: CLIENT_ID, workspace_id: WORKSPACE_A }] },
     injected: [{
@@ -686,20 +681,16 @@ test("CS20 запись существующего клиента обрабат
       message: "Could not find the 'service_id' column of 'appointments' in the schema cache",
     }],
   });
-  const { res, warnings: warned } = await call({
+  const { res, log } = await call({
     resource: "appointments",
     method: "POST",
     body: { client: "Пациент", clientId: CLIENT_ID, serviceId: SERVICE_ID, startsAt: "2026-09-01T09:00:00.000Z" },
   });
 
-  // Заглушка отвечает отказом на каждую вставку, поэтому вторая попытка тоже
-  // не пройдёт; проверяется, что она вообще СОСТОЯЛАСЬ — то есть код распознал
-  // форму ошибки и пошёл на откат, а не сразу в пятьсот вторую.
-  assert.ok(
-    warned.some((line) => line.includes("032") && line.includes("service_id")),
-    `откат обязан сработать на PGRST204, а не только на 42703: ${JSON.stringify(warned)}`,
-  );
-  assert.equal(res.statusCode, 502, "после второй неудачи ответ остаётся честным отказом");
+  assert.equal(res.statusCode, 503, "Schema-cache lag cannot authorize a lossy fallback");
+  assert.equal(res.body.code, "appointment_create_unavailable");
+  const writes = log.filter(entry => entry.table === "appointments" && entry.op === "insert");
+  assert.equal(writes.length, 1);assert.equal((writes[0].filters.__row as Record<string, unknown>).service_id, SERVICE_ID);
 });
 
 test("CS21 «Скрыть услугу» действительно скрывает", async () => {

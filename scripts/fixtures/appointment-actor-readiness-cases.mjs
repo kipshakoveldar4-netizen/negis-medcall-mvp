@@ -5,6 +5,10 @@ import { legacyAppointmentReadinessQuery } from './appointment-preview-readiness
 const read='public.read_crm_appointment_request_v2(uuid,uuid,uuid,text,uuid,text)';
 const create='public.create_crm_appointment_v2(uuid,uuid,uuid,text,uuid,text,jsonb,jsonb,text)';
 const patch='public.patch_crm_appointment_as_actor(uuid,uuid,uuid,text,uuid,jsonb,jsonb)';
+const version='public.stamp_appointment_edit_version()';
+const versionChecks=['column:appointments.edit_version','routine:'+version,
+  ...['anon','authenticated','service_role'].map(role=>'execute:'+role+':'+version),
+  'appointments:edit_version_shape','appointments:edit_version_trigger','appointments:before_update_triggers'];
 const routine='routine:'+read;
 const blockers=async db=>(await db.query(appointmentActorReadinessQuery)).rows.filter(r=>!r.ready).map(r=>r.check_name);
 
@@ -19,7 +23,7 @@ export async function exerciseAppointmentReadinessBeforeCutover(db,t){
 export async function exerciseAppointmentReadiness(db,t){
   await t.test('current metadata gate passes the selected schema and is unique, boolean and bounded',async()=>{
     const result=(await db.query(appointmentActorReadinessQuery)).rows;
-    assert.equal(result.length,100);assert.equal(new Set(result.map(r=>r.check_name)).size,result.length);
+    assert.equal(result.length,108);assert.equal(new Set(result.map(r=>r.check_name)).size,result.length);
     assert.ok(result.every(r=>typeof r.ready==='boolean'));assert.deepEqual(result.filter(r=>!r.ready),[]);
   });
   for(const [sql,failure] of [
@@ -28,6 +32,11 @@ export async function exerciseAppointmentReadiness(db,t){
     ['grant update on appointments to service_role','appointments:server_access'],
     ['grant update(notes) on appointments to service_role','appointments:server_access'],
     ['revoke select on appointments from service_role','appointments:server_access'],
+    ['alter table appointments alter column edit_version drop not null','appointments:edit_version_shape'],
+    ["alter table appointments alter column edit_version set default '00000000-0000-0000-0000-000000000000'::uuid",'appointments:edit_version_shape'],
+    ['alter table appointments disable trigger stamp_appointment_edit_version','appointments:edit_version_trigger'],
+    ['alter function '+version+' security definer','routine:'+version],
+    ['grant execute on function '+version+' to service_role','execute:service_role:'+version],
     [`alter function ${read} rename to owned_missing_v2_reader`,routine],
     [`alter function ${read} owner to service_role`,routine],
     [`alter function ${read} security invoker`,routine],
@@ -90,6 +99,12 @@ export async function exerciseAppointmentReadiness(db,t){
 
 export async function exerciseAppointmentPatchReadinessBeforeCutover(db,t){
   await t.test('a complete create/replay schema is not ready for current API PATCH before 116',async()=>{
-    assert.deepEqual((await blockers(db)).sort(),['appointments:server_access','routine:'+patch,...['anon','authenticated','service_role'].map(role=>'execute:'+role+':'+patch)].sort());
+    assert.deepEqual((await blockers(db)).sort(),['appointments:server_access','routine:'+patch,...['anon','authenticated','service_role'].map(role=>'execute:'+role+':'+patch),...versionChecks].sort());
+  });
+}
+
+export async function exerciseAppointmentVersionReadinessBeforeCutover(db,t){
+  await t.test('current API refuses the otherwise complete 116 schema without the 117 edit version',async()=>{
+    assert.deepEqual((await blockers(db)).sort(),[...versionChecks].sort());
   });
 }

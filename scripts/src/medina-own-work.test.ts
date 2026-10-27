@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { withAppointmentCreateRpcSpy } from "./appointment-create-rpc-spy.js";
+import { withAppointmentCreateRpcSpy, appointmentSpyRows, appointmentSpyBody, APPOINTMENT_SPY_VERSION } from "./appointment-create-rpc-spy.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -180,6 +180,7 @@ const journalEvent = (entityId: string, clientName: string) => ({
 });
 
 const appointment = (over: Record<string, unknown>) => ({
+  edit_version: APPOINTMENT_SPY_VERSION,
   workspace_id: WORKSPACE,
   client_name: "Клиент",
   starts_at: "2026-08-20T09:00:00.000Z",
@@ -263,7 +264,7 @@ async function callRouter(options: {
     pathToFileURL(path.join(repoRoot, "lib", "supabase", "server.ts")).href
   )) as { setSupabaseServerClientFactoryForTests: (factory: (() => unknown) | null) => void };
   supabaseModule.setSupabaseServerClientFactoryForTests(() =>
-    withAppointmentCreateRpcSpy(spyClient(rows, log, new Set(options.failReadsOn ?? []))));
+    withAppointmentCreateRpcSpy(spyClient(appointmentSpyRows(rows), log, new Set(options.failReadsOn ?? []))));
 
   const routerModule = (await import(pathToFileURL(routerPath).href)) as {
     default: (req: unknown, res: MockResponse) => Promise<unknown>;
@@ -275,7 +276,7 @@ async function callRouter(options: {
       method: options.method ?? "GET",
       headers: { authorization: `Bearer ${TOKEN}` },
       query: { path: options.pathSegments ?? ["appointments"], workspaceId: WORKSPACE, ...(options.query ?? {}) },
-      body: options.body,
+      body: appointmentSpyBody((options.pathSegments ?? ["appointments"])[0], options.method, options.body),
     },
     res,
   );

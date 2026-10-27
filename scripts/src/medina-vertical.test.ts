@@ -228,6 +228,7 @@ test("VT11 мобильное меню ведёт к справочнику и �
   }
   function drawer(code: Script, vertical: string, purpose: string | null, role: string, permissions: Record<string, boolean>) {
     const states: any[] = [], navigations: string[] = [];
+    const body = {};
     let cursor = 0, mounting = true;
     const module = evaluate(code, {
       react: {
@@ -236,15 +237,22 @@ test("VT11 мобильное меню ведёт к справочнику и �
           if (!(slot in states)) states[slot] = typeof initial === "function" ? initial() : initial;
           return [states[slot], (value: any) => { states[slot] = typeof value === "function" ? value(states[slot]) : value; }];
         },
+        useRef(initial: any) {
+          const slot = cursor++;
+          if (!(slot in states)) states[slot] = { current: initial };
+          return states[slot];
+        },
         useLayoutEffect(effect: () => void) { if (mounting) effect(); },
       },
+      "react-dom": { createPortal(content: unknown, target: unknown) { assert.equal(target, body); return content; } },
+      "@/lib/supabase": { hasSupabaseFrontendEnv: false, supabase: new Proxy({}, { get() { throw new Error("No SDK access in a directory-label fixture"); } }) },
       wouter: { useLocation: () => ["/leads", (href: string) => navigations.push(href)] },
       "@/contexts/AuthContext": { useAuth: () => ({ user: { id: "local-staff" }, clinicId: "local-workspace",
         userRole: role, vertical, workspacePurpose: purpose, rolePermissions: permissions, signOut() {} }) },
       "@/lib/workspaceRoutes": policy,
       "../../../../../lib/vertical/terms": terms,
       "./ProfileDialog": { ProfileDialog: "ProfileDialog" },
-    });
+    }, { document: { body } });
     const closed = module.MobileNav(); mounting = false;
     const more = elements(closed).find((node) => node.type === "button" && label(node) === "Ещё");
     assert.ok(more, "the actual drawer is openable");

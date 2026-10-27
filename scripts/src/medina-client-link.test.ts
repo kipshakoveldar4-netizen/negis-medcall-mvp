@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { withAppointmentCreateRpcSpy } from "./appointment-create-rpc-spy.js";
+import { withAppointmentCreateRpcSpy, appointmentSpyRows, appointmentSpyBody } from "./appointment-create-rpc-spy.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -168,7 +168,7 @@ async function loadRouter(
   const owner: StaffRow = { id: STAFF_A, workspace_id: WORKSPACE_A, role: "owner", status: "active" };
   const clientRows: Record<string, unknown[]> = { staff_users: [owner], ...rows };
   supabaseModule.setSupabaseServerClientFactoryForTests(() =>
-    withAppointmentCreateRpcSpy(spyClient(clientRows, log, new Set(missingColumns), new Set(hardFailTables))));
+    withAppointmentCreateRpcSpy(spyClient(appointmentSpyRows(clientRows), log, new Set(missingColumns), new Set(hardFailTables))));
 
   const routerModule = (await import(pathToFileURL(routerPath).href)) as {
     default: (req: unknown, res: MockResponse) => Promise<unknown>;
@@ -182,7 +182,7 @@ async function loadRouter(
         method: input.method ?? "GET",
         headers: { authorization: `Bearer ${TOKEN}` },
         query: { path: input.segments, workspaceId: WORKSPACE_A, ...(input.query ?? {}) },
-        body: input.body,
+        body: appointmentSpyBody(input.segments[0], input.method, input.body),
       },
       res,
     );

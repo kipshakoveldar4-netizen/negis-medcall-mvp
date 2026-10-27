@@ -46,6 +46,7 @@ before(async () => {
   await db.exec(await readFile(path.join(root, "migrations/076_crm_sale_create_requests.sql"), "utf8"));
   await db.exec(await readFile(path.join(root, "migrations/115_appointment_request_actor.sql"), "utf8"));
   await db.exec(await readFile(path.join(root, "migrations/116_appointment_patch_actor.sql"), "utf8"));
+  await db.exec(await readFile(path.join(root, "migrations/117_appointment_edit_version.sql"), "utf8"));
 });
 after(() => db.close());
 beforeEach(async () => {
@@ -211,9 +212,14 @@ async function apiFixture(role = "owner") {
     let status = 0; let body: Record<string, unknown> = {};
     const res = { setHeader() {}, status(value: number) { status = value; return res; },
       json(value: Record<string, unknown>) { body = value; } };
+    // These stateless API tests start from a newly observed row. The native
+    // composed browser suite separately freezes and races the open form token.
+    const version = route === "appointments" && method === "PATCH" ? (await db.query<{ edit_version: string }>(
+      "select edit_version from appointments where id=$1 and workspace_id=$2", [appointmentId, id(workspace)],
+    )).rows[0]?.edit_version : undefined;
     await handler({ method, headers: { authorization: "Bearer fixture.test.signature" },
       query: { path: [route], workspaceId: id(workspace) },
-      body: method === "GET" ? undefined : method === "POST" ? updates : { id: appointmentId, updates } }, res);
+      body: method === "GET" ? undefined : method === "POST" ? updates : { id: appointmentId, expectedEditVersion: version, updates } }, res);
     return { status, body, queries: [...queries] };
   };
 }
@@ -1120,8 +1126,12 @@ for (const { label, author } of [
       }
       assert.equal(item.createdByStaffUserId, author ?? "", "readback reports stored author, never supplied author");
       const after = await row(`select * from appointments where id='${visit.id}'`);
+      if (method === "PATCH") {
+        assert.notEqual(after.edit_version, stored.edit_version, "Every accepted edit rotates its server version");
+        assert.equal(item.editVersion, after.edit_version, "The response publishes the final stored token");
+      }
       assert.deepEqual(after, method === "PATCH"
-        ? { ...stored, status: "scheduled", updated_at: after.updated_at } : stored,
+        ? { ...stored, status: "scheduled", updated_at: after.updated_at, edit_version: after.edit_version } : stored,
       "readback/redaction must not change stored contacts or authorship");
       assert.deepEqual(await row(`select * from clients where id='${visit.clientId}'`), clientBefore);
       assert.deepEqual(await retryCounts(), method === "PATCH" ? { ...before, journal: Number(before.journal) + 1 } : before);
@@ -1164,7 +1174,9 @@ test("API same-name doctor reassignment revokes author access and redacts contac
   assert.equal(moved.doctor, "Test master");
   assert.equal(moved.createdByStaffUserId, id(40));
   const stored = await row(`select * from appointments where id='${visit.id}'`);
-  assert.deepEqual(stored, { ...authored, doctor_id: id(47), updated_at: stored.updated_at },
+  assert.notEqual(stored.edit_version, authored.edit_version);
+  assert.equal(moved.editVersion, stored.edit_version);
+  assert.deepEqual(stored, { ...authored, doctor_id: id(47), updated_at: stored.updated_at, edit_version: stored.edit_version },
     "admin reassignment changes the doctor ID, not the identical name, contacts or author");
   const clientBefore = await row(`select * from clients where id='${visit.clientId}'`);
   assert.equal(clientBefore.phone, lateDoctorPhone);

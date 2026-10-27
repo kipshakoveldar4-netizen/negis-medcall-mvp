@@ -14,7 +14,7 @@ const rpcArgs = {
 const allowed = new Set(['staff_users','workspace_settings','clients','clinic_doctors','clinic_services','appointments','clinic_doctor_shifts','audit_logs']);
 const identifier = value => { assert.match(value,/^[a-z_][a-z0-9_]*$/); return '"'+value+'"'; };
 export function appointmentNativeAdapter(fixture) {
-  const controls = { calls:[], reads:[], writes:[], beforeRpc:null, beforePatch:null, errors:[] };
+  const controls = { calls:[], reads:[], writes:[], beforeRpc:null, beforePatch:null, beforeAppointmentRead:null, errors:[] };
   async function query(sql,args) {
     const db=await fixture.connect();
     try { await db.query('set role service_role'); return await db.query(sql,args); }
@@ -48,6 +48,7 @@ export function appointmentNativeAdapter(fixture) {
       function add(k,op,v){filters.push(`${identifier(k)} ${op} ${bind(v)}`);return q;}
       async function run(single) {
         assert.ok(insert||filters.length,'No unscoped dependency read');
+        if (!insert&&!update&&table==='appointments'&&fields==='*'&&controls.beforeAppointmentRead) await controls.beforeAppointmentRead();
         const projection=fields==='*'?'*':fields.split(',').map(v=>identifier(v.trim())).join(',');
         let sql;
         if(insert){const columns=Object.keys(insert);sql=`insert into public.${identifier(table)} (${columns.map(identifier).join(',')}) values (${columns.map(k=>bind(insert[k])).join(',')}) returning ${projection}`;controls.writes.push({table,columns});}

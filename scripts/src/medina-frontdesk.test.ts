@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 // FD — день регистратора без лишних кликов.
 //
@@ -22,11 +23,34 @@ const sales = await readFile(path.join(negisSrc, "pages", "SalesPage.tsx"), "utf
 test("FD1 запись, созданная из заявки, сама переводит заявку в «Записана»", () => {
   assert.ok(/leadId: lead\.id/.test(leads), "заявка передаёт свой id в префилл записи");
   assert.ok(/prefillLeadRef\.current = readString\(prefill\.leadId\)/.test(appointments), "запись запоминает, из какой заявки пришла");
-  // Перевод — только после успешного создания, и отказ говорится вслух.
-  assert.ok(
-    /await createAppointment\(appointment, allowConflict[\s\S]{0,400}markLeadBooked\(/.test(appointments),
-    "стадия меняется после успеха, не до",
-  );
+  function confirmedHandoff(source: string) {
+    const ast = ts.createSourceFile("AppointmentsPage.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const nodes: ts.Node[] = [];
+    const visit = (node: ts.Node) => { nodes.push(node); ts.forEachChild(node, visit); };
+    visit(ast);
+    const submit = nodes.find(node => ts.isVariableDeclaration(node) && node.name.getText(ast) === "submitForm");
+    assert.ok(submit);
+    const local = nodes.filter(node => node.pos >= submit.pos && node.end <= submit.end);
+    const calls = (name: string) => local.filter((node): node is ts.CallExpression => ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression) && node.expression.text === name);
+    const [created] = calls("createAppointment"), [marked] = calls("markLeadBooked");
+    assert.equal(calls("createAppointment").length, 1); assert.equal(calls("markLeadBooked").length, 1);
+    assert.ok(ts.isAwaitExpression(created.parent), "creation must be awaited before a handoff");
+    const result = created.parent.parent;
+    assert.ok(ts.isVariableDeclaration(result) && result.name.getText(ast) === "result");
+    assert.ok(marked.getStart(ast) > created.end, "handoff must follow the confirmed result");
+    assert.equal(marked.arguments[0].getText(ast), "result.leadId", "use the confirmed captured lead, not the mutable prefill");
+    assert.ok(local.some(node => ts.isIfStatement(node) && node.expression.getText(ast) === "activeStatuses.includes(result.status)"
+      && marked.pos >= node.thenStatement.pos && marked.end <= node.thenStatement.end), "cancelled recovery must not mark a lead booked");
+    assert.ok(local.some(node => ts.isIfStatement(node) && node.expression.getText(ast) === "!isCurrentMutationScope()"
+      && node.getStart(ast) > created.end && node.end < marked.getStart(ast)
+      && ts.isReturnStatement(node.thenStatement)), "a changed account must stop the handoff");
+  }
+  confirmedHandoff(appointments);
+  for (const mutant of [appointments.replace("const result = await createAppointment(", "const result = createAppointment("),
+    appointments.replace("if (activeStatuses.includes(result.status)) void markLeadBooked(result.leadId);", "void markLeadBooked(result.leadId);")]) {
+    assert.notEqual(mutant, appointments); assert.throws(() => confirmedHandoff(mutant));
+  }
   assert.ok(/semanticGroup === "booked"/.test(appointments), "стадия берётся из пайплайна клиники");
   assert.ok(/заявка не переведена/.test(appointments), "отказ перевода не молчит");
 });

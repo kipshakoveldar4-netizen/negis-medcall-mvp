@@ -374,15 +374,24 @@ test("F13 сбой чтения не рисуется как пустая баз
 
 test("F14 патч, в котором сервер не понял ни одного поля, не выдаётся за сохранение", async () => {
   const source = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
-  const patch = source.slice(source.indexOf("if (Object.keys(row).length === 0) {"));
-  const block = patch.slice(0, patch.indexOf("// «Было» приходится читать отдельно"));
+  const ast = ts.createSourceFile("server.ts", source, ts.ScriptTarget.Latest, true);
+  const handler = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "patchItem");
+  assert.ok(handler && ts.isFunctionDeclaration(handler) && handler.body);
+  const branches: import("typescript").IfStatement[] = [];
+  const visit = (node: import("typescript").Node) => {
+    if (ts.isIfStatement(node) && node.expression.getText(ast).replace(/\s/g, "") === "Object.keys(row).length===0") branches.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(handler.body);assert.equal(branches.length, 1);
+  const block = branches[0].thenStatement.getText(ast);
   // Присланные, но не принятые поля — молчаливая потеря: браузер оставлял
   // оптимистичное значение, сотрудник видел «сохранено», база не менялась.
   assert.ok(/code: "no_patchable_fields"/.test(block), "непонятый патч отвечает отказом");
   assert.ok(/const offered = Object\.keys\(patchBody\)/.test(block), "решение принимается по тому, что реально прислали");
-  // Пустой патч так и остаётся успехом: иначе updated_at двигался бы на
-  // каждом открытии карточки (пин CS4 держит это с другой стороны).
-  assert.ok(/if \(offered\.length > 0\)/.test(block), "пустой запрос по-прежнему ничего не меняет и не ругается");
+  // Other resources retain their no-write no-op (CS4 is the positive control).
+  // An appointment cannot echo an invented confirmed row without a writer.
+  assert.ok(/if \(offered\.length > 0 \|\| resource === "appointments"\)/.test(block));
+  assert.ok(block.indexOf('code: "no_patchable_fields"') < block.indexOf('success("supabase"'), "Refusal precedes generic no-op success");
 });
 
 test("F15 кэш не переживает запись и не прячет заполненный справочник", async () => {

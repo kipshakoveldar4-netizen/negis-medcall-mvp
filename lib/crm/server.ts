@@ -217,6 +217,10 @@ function isUuid(value: unknown): value is string {
   return typeof value === "string" && uuidPattern.test(value);
 }
 
+function appointmentEditVersion(value: unknown): string | null {
+  return isUuid(value) || value === "00000000-0000-0000-0000-000000000000" ? (value as string).toLowerCase() : null;
+}
+
 function asRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
 }
@@ -1461,6 +1465,7 @@ function makeAppointment(body: JsonRecord): JsonRecord {
     // Та же причина, что и у serviceId: связь, которую нельзя прочитать,
     // затирается первым же сохранением статуса.
     doctorId: firstString(body.doctorId, body.doctor_id),
+    ...(appointmentEditVersion(body.editVersion ?? body.edit_version) ? { editVersion: appointmentEditVersion(body.editVersion ?? body.edit_version) } : {}),
   };
 }
 
@@ -2025,6 +2030,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
         client_id: row.client_id,
         service_id: row.service_id,
         doctor_id: row.doctor_id,
+        editVersion: row.edit_version,
       }),
   },
   calls: {
@@ -5750,6 +5756,7 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       }));
       Object.assign(row, await buildAppointmentServicesRow(supabase, workspaceId, patchBody, before));
       Object.assign(row, await buildDoctorLinkRow(supabase, workspaceId, patchBody, { requireActive: false }));
+      if (Object.keys(row).every(key => key === "updated_at")) delete row.updated_at;
     }
 
     if (Object.keys(row).length === 0) {
@@ -5760,7 +5767,7 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       // оставлял оптимистичное значение на экране, сотрудник видел «сохранено»,
       // а в базе не менялось ничего.
       const offered = Object.keys(patchBody).filter((key) => key !== "id" && key !== "workspaceId" && key !== "updates");
-      if (offered.length > 0) {
+      if (offered.length > 0 || resource === "appointments") {
         return sendJson(res, 400, {
           ...errorBody("PATCH failed", ["Ни одно из присланных полей не принимается этим разделом"]),
           resource,
@@ -5803,6 +5810,15 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
           "an own-work role cannot reassign an appointment",
         ]));
       }
+    }
+
+    if (resource === "appointments") {
+      const expected = appointmentEditVersion(body.expectedEditVersion);
+      if (!expected) throw new AppointmentRequestError(body.expectedEditVersion === undefined ? 428 : 400,
+        "appointment_edit_version_required", "Обновите список и заново откройте запись перед сохранением.");
+      const current = appointmentEditVersion(before.edit_version);
+      if (!current) throw new AppointmentRequestError(503, "appointment_edit_version_unavailable",
+        "Не удалось проверить версию записи: администратору нужно проверить миграцию 117.");
     }
 
     if (patchedEntity === "task" && typeof row.status === "string") {
@@ -5903,10 +5919,12 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
         }
         const result = await supabase.rpc("patch_crm_appointment_as_actor", {
           p_workspace_id: workspaceId, p_staff_user_id: actor.staffUserId, p_auth_user_id: actor.userId,
-          p_actor_role: actor.role, p_appointment_id: id, p_before: before, p_patch: candidate,
+          p_actor_role: actor.role, p_appointment_id: id,
+          p_before: { ...before, edit_version: appointmentEditVersion(body.expectedEditVersion) }, p_patch: candidate,
         });
         checkAppointmentPatchError(result.error);
-        if (!result.error && (asRecord(result.data).id !== id || asRecord(result.data).workspace_id !== workspaceId)) {
+        if (!result.error && (asRecord(result.data).id !== id || asRecord(result.data).workspace_id !== workspaceId
+          || !appointmentEditVersion(asRecord(result.data).edit_version) || asRecord(result.data).edit_version === before.edit_version)) {
           throw new AppointmentRequestError(503, "appointment_patch_unavailable", "Сервер не подтвердил изменённую запись. Обновите список.");
         }
         return result;

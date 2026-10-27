@@ -22,13 +22,15 @@ test('appointment PATCH pins the HTTP actor at the actual SQL write',{timeout:30
     alter table storage.objects enable row level security;`);
   for(const entry of chain)await db.query(entry.source);
   const transport=appointmentNativeAdapter(fixture),http=await partnerEntryHttpFixture(transport.adapter,{approved:false,
-    identities:new Map([[`owned.${ids.A}.signature`,ids.A]]),env:{MEDINA_PARTNER_ENTRY_ENABLED:'false'}});
+    identities:new Map([[`owned.${ids.A}.signature`,ids.A],[`owned.${ids.B}.signature`,ids.B]]),env:{MEDINA_PARTNER_ENTRY_ENABLED:'false'}});
   t.after(()=>http.close());
   const server=await appointmentNativeServer(http.handler);t.after(()=>server.close());
-  const patch=async(updates={notes:'Owned edited note'},method='PATCH')=>{
+  let openedEditVersion;
+  const patch=async(updates={notes:'Owned edited note'},method='PATCH',options={})=>{
     const response=await fetch(server.origin+'/api/crm/appointments?workspaceId='+ids.workspace,{method,
-      headers:{authorization:`Bearer owned.${ids.A}.signature`,'Content-Type':'application/json'},
-      body:JSON.stringify({id:ids.appointment,workspaceId:ids.workspace,updates})});
+      headers:{authorization:`Bearer owned.${options.actor??ids.A}.signature`,'Content-Type':'application/json'},
+      body:JSON.stringify({id:ids.appointment,workspaceId:ids.workspace,
+        ...(!options.omitVersion?{expectedEditVersion:Object.hasOwn(options,'expectedEditVersion')?options.expectedEditVersion:openedEditVersion}:{}),updates})});
     return {status:response.status,body:await response.json()};
   };
   async function setup(role='owner'){
@@ -40,12 +42,62 @@ test('appointment PATCH pins the HTTP actor at the actual SQL write',{timeout:30
       [ids.appointment,ids.workspace,ids.client,visit.client,visit.phone,ids.doctor,visit.doctor,visit.startsAt,visit.service,f.staff]);
     f.read=async()=> (await db.query('select notes,status,doctor_id,client_phone from appointments where id=$1',[ids.appointment])).rows[0];
     f.fullRead=async()=> (await db.query('select to_jsonb(a) value from appointments a where id=$1',[ids.appointment])).rows[0].value;
+    openedEditVersion=(await f.fullRead()).edit_version;
     return f;
   }
   for(const role of ['owner','admin','receptionist','manager','doctor'])await t.test(role+' can update an authorized unchanged visit',async()=>{
     const f=await setup(role);try{
       const result=await patch();assert.equal(result.status,200,JSON.stringify(result));
       assert.equal((await f.read()).notes,'Owned edited note');assert.equal(result.body.data.item.id,ids.appointment);
+    }finally{await f.close();}
+  });
+  for(const [name,options,status] of [['missing',{omitVersion:true},428],['null',{expectedEditVersion:null},400],
+    ['malformed',{expectedEditVersion:'not-an-edit-version'},400],['stale',{expectedEditVersion:randomUUID()},409]])
+    await t.test(name+' expected edit version refuses before any writer or audit',async()=>{
+      const f=await setup();try{
+        const count=transport.controls.calls.length,result=await patch({notes:'Owned refused note'},'PATCH',options);
+        assert.equal(result.status,status,JSON.stringify(result));assert.equal(transport.controls.calls.length,count+(name==='stale'?1:0));
+        assert.equal((await f.read()).notes,'Owned original note');assert.equal((await f.counts()).audits,0);
+      }finally{await f.close();}
+    });
+  for(const options of [{},{omitVersion:true}])await t.test('an empty appointment PATCH never returns an invented confirmed row; legacy='+Boolean(options.omitVersion),async()=>{
+    const f=await setup();try{
+      const count=transport.controls.calls.length,result=await patch({},'PATCH',options);assert.equal(result.status,400,JSON.stringify(result));
+      assert.equal(result.body.code,'no_patchable_fields');assert.equal(transport.controls.calls.length,count);
+      assert.equal((await f.read()).notes,'Owned original note');assert.equal((await f.counts()).audits,0);
+    }finally{await f.close();}
+  });
+  await t.test('no version metadata is a 503, never a fallback write',async()=>{
+    const f=await setup();let renamed=false;
+    try{
+      await db.query('alter table appointments rename column edit_version to owned_missing_edit_version');renamed=true;
+      const count=transport.controls.calls.length,result=await patch();assert.equal(result.status,503,JSON.stringify(result));
+      assert.equal(result.body.code,'appointment_edit_version_unavailable');assert.equal(transport.controls.calls.length,count);
+      assert.equal((await f.read()).notes,'Owned original note');assert.equal((await f.counts()).audits,0);
+    }finally{if(renamed)await db.query('alter table appointments rename column owned_missing_edit_version to edit_version');await f.close();}
+  });
+  await t.test('a stale status click and override flags cannot undo another account save',async()=>{
+    const f=await setup();try{
+      const other=await patch({status:'confirmed'},'PATCH',{actor:ids.B});assert.equal(other.status,200,JSON.stringify(other));
+      const count=transport.controls.calls.length,result=await patch({status:'cancelled',allowConflict:true,allowOutsideSchedule:true});
+      assert.equal(result.status,409,JSON.stringify(result));assert.equal(transport.controls.calls.length,count+1);
+      assert.equal((await f.read()).status,'confirmed');assert.equal((await f.counts()).audits,1);
+    }finally{await f.close();}
+  });
+  await t.test('the opened version catches a prior write even when updated_at is reused',async()=>{
+    const f=await setup();try{
+      const before=await f.fullRead();await db.query("update appointments set notes='Owned earlier concurrent note' where id=$1",[ids.appointment]);
+      const after=await f.fullRead();assert.equal(after.updated_at,before.updated_at);assert.notEqual(after.edit_version,before.edit_version);
+      const count=transport.controls.calls.length,result=await patch();assert.equal(result.status,409,JSON.stringify(result));
+      assert.equal(transport.controls.calls.length,count+1);assert.equal((await f.read()).notes,'Owned earlier concurrent note');
+    }finally{await f.close();}
+  });
+  await t.test('offered edit-version fields cannot choose or reset the server token',async()=>{
+    const f=await setup();try{
+      const offered=randomUUID(),result=await patch({notes:'Owned safe note',edit_version:offered,editVersion:offered});
+      assert.equal(result.status,200,JSON.stringify(result));const after=await f.fullRead();
+      assert.notEqual(after.edit_version,offered);assert.notEqual(after.edit_version,openedEditVersion);
+      assert.equal(result.body.data.item.editVersion,after.edit_version);
     }finally{await f.close();}
   });
   for(const change of ['role','allowed-role','auth','status'])await t.test('a concurrent '+change+' replacement must deny before any appointment or audit change',async()=>{
@@ -87,6 +139,61 @@ test('appointment PATCH pins the HTTP actor at the actual SQL write',{timeout:30
     finally{await f.close();}
   });
   const script=await recoveryBundle({jwtLikeTokens:true});
+  for(const refreshed of [false,true])await t.test('a form opened before another account saves cannot overwrite it; background refresh='+refreshed,async()=>{
+    const f=await setup(),ui=await appointmentNativeServer(http.handler,script);let browser;
+    try{
+      browser=await ownedRecoveryBrowser(ui.origin);const run=browser.evaluate,wait=browser.waitFor;
+      await run(`f.edit(${JSON.stringify(await f.fullRead())});f.view.setForm(current=>({...current,notes:'Owned unsaved A draft'}));await f.tick();`);
+      const other=await patch({notes:'Owned B committed note'},'PATCH',{actor:ids.B});
+      assert.equal(other.status,200,JSON.stringify(other));
+      if(refreshed)await run(`f.refreshItems(${JSON.stringify(other.body.data.item)});await f.tick();`);
+      await run('f.start();');await wait('f.tasks[0]?.done');const result=await run('return f.snapshot();');
+      assert.equal(ui.controls.responses[0]?.status,409,JSON.stringify(ui.controls.responses));
+      assert.equal((await f.read()).notes,'Owned B committed note');assert.equal((await f.counts()).audits,1);
+      assert.equal(result.modalOpen,true);assert.equal(result.form.notes,'Owned unsaved A draft');assert.deepEqual(result.successes,[]);
+      assert.ok(result.errors.some(message=>message.includes('Запись уже изменилась')),'A confirmed conflict is not mislabeled as a lost connection');
+      assert.equal(ui.controls.responses[0].request.expectedEditVersion,openedEditVersion,'An item refresh cannot replace the open form baseline');
+      await run(`f.edit(${JSON.stringify(other.body.data.item)});f.view.setForm(current=>({...current,notes:'Owned A reviewed fresh edit'}));await f.tick();f.start();`);
+      await wait('f.tasks[1]?.done');
+      assert.equal(ui.controls.responses[1]?.status,200,JSON.stringify(ui.controls.responses));
+      assert.equal((await f.read()).notes,'Owned A reviewed fresh edit');
+      assert.deepEqual(ui.controls.errors,[]);assert.deepEqual(browser.exceptions,[]);
+      assert.ok(browser.requests.every(url=>new URL(url).origin===ui.origin));
+    }finally{await browser?.close();await ui.close();await f.close();}
+  });
+  await t.test('a committed edit with a lost ACK is not attributed to another user or blindly repeated',async()=>{
+    const f=await setup(),ui=await appointmentNativeServer(http.handler,script);let browser;
+    try{
+      browser=await ownedRecoveryBrowser(ui.origin);const run=browser.evaluate,wait=browser.waitFor;
+      await run(`f.edit(${JSON.stringify(await f.fullRead())});f.view.setForm(current=>({...current,notes:'Owned saved without ACK'}));await f.tick();`);
+      const count=transport.controls.calls.length;ui.controls.mode='drop';await run('f.start();');await wait('f.tasks[0]?.done');
+      assert.equal((await f.read()).notes,'Owned saved without ACK');const unknown=await run('return f.snapshot();');
+      assert.deepEqual(unknown.successes,[]);assert.equal(unknown.modalOpen,true);
+      await run('f.start();');await wait('f.tasks[1]?.done');const state=await run('return f.snapshot();');
+      assert.equal(ui.controls.responses[1]?.status,409,JSON.stringify(ui.controls.responses));
+      assert.equal(transport.controls.calls.length,count+2);assert.equal((await f.counts()).audits,1);
+      assert.equal(state.form.notes,'Owned saved without ACK');assert.deepEqual(state.successes,[]);
+      assert.ok(state.errors.some(message=>message.includes('Запись уже изменилась')));
+      assert.ok(state.errors.every(message=>!message.includes('другой сотрудник')&&!message.includes('пока не сохранён')));
+      assert.deepEqual(ui.controls.errors,[]);assert.deepEqual(browser.exceptions,[]);
+    }finally{await browser?.close();await ui.close();await f.close();}
+  });
+  for(const role of ['owner','doctor'])await t.test('live '+role+' revocation wins over an already stale opening token and hides the private form',async()=>{
+    const f=await setup(role),ui=await appointmentNativeServer(http.handler,script);let browser,changed=false;
+    try{
+      browser=await ownedRecoveryBrowser(ui.origin);const run=browser.evaluate,wait=browser.waitFor;
+      if(role==='doctor')await run("f.role('doctor');");
+      await run(`f.edit(${JSON.stringify(await f.fullRead())});f.view.setForm(current=>({...current,notes:'Owned refused stale draft'}));await f.tick();`);
+      transport.controls.beforeAppointmentRead=async()=>{if(changed)return;changed=true;
+        await db.query("update staff_users set status='inactive' where id=$1",[f.staff]);
+        await db.query("update appointments set notes='Owned newer note' where id=$1",[ids.appointment]);};
+      await run('f.start();');await wait('f.tasks[0]?.done');const state=await run('return f.snapshot();');
+      assert.equal(changed,true);assert.equal(ui.controls.responses[0]?.status,403,JSON.stringify(ui.controls.responses));
+      assert.equal((await f.read()).notes,'Owned newer note');assert.equal((await f.counts()).audits,0);
+      assert.equal(state.modalOpen,false);assert.equal(state.form.phone,'');assert.equal(state.form.notes,'');
+      assert.deepEqual(state.items,[]);assert.deepEqual(state.successes,[]);assert.deepEqual(ui.controls.errors,[]);assert.deepEqual(browser.exceptions,[]);
+    }finally{transport.controls.beforeAppointmentRead=null;await browser?.close();await ui.close();await f.close();}
+  });
   for(const scenario of ['allowed','revoked','reassigned'])await t.test('actual React edit + HTTP + SQL: '+scenario,async()=>{
     const f=await setup(scenario==='allowed'?'owner':'doctor'),ui=await appointmentNativeServer(http.handler,script);let browser;
     try{

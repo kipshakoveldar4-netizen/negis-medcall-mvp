@@ -27,8 +27,9 @@ import { exercisePartnerEntryHttp } from './partner-entry-native-http-cases.mjs'
 import { exercisePartnerTerms } from './partner-terms-cases.mjs';
 import { exercisePartnerTermsHttp } from './partner-terms-native-http-cases.mjs';
 import { exerciseAppointmentActor,exerciseAppointmentActorDependencies } from './appointment-actor-cases.mjs';
-import { exerciseAppointmentReadiness,exerciseAppointmentReadinessBeforeCutover,exerciseAppointmentPatchReadinessBeforeCutover } from './appointment-actor-readiness-cases.mjs';
+import { exerciseAppointmentReadiness,exerciseAppointmentReadinessBeforeCutover,exerciseAppointmentPatchReadinessBeforeCutover,exerciseAppointmentVersionReadinessBeforeCutover } from './appointment-actor-readiness-cases.mjs';
 import { exerciseAppointmentPatch,exerciseAppointmentPatchDependencies } from './appointment-patch-cases.mjs';
+import { prepareAppointmentEditVersion,exerciseAppointmentEditVersion } from './appointment-edit-version-cases.mjs';
 
 // Native application-chain acceptance, NOT an authority to release migrations.
 // 001-008 require an undocumented legacy baseline; data/*.sql is deliberately
@@ -167,7 +168,12 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
   let legacyBefore;
   await exerciseVideoQuotaMissing(db,chain.find(entry=>entry.file==='106_generated_video_quota_dispatch.sql').source,t);
   let legacyRlsBefore;
+  let verifyOldAppointmentVersion;
   for (const entry of chain) {
+    if(entry.file==='117_appointment_edit_version.sql'){
+      await exerciseAppointmentVersionReadinessBeforeCutover(db,t);
+      verifyOldAppointmentVersion=await prepareAppointmentEditVersion(db,entry.source,t);
+    }
     if(entry.file==='116_appointment_patch_actor.sql'){
       await exerciseAppointmentPatchReadinessBeforeCutover(db,t);await exerciseAppointmentPatchDependencies(db,entry.source,t);
     }
@@ -258,7 +264,10 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     if(entry.file==='115_appointment_request_actor.sql'){
       await exerciseAppointmentActor(db,fixture,t);
     }
-    if(entry.file==='116_appointment_patch_actor.sql'){await exerciseAppointmentPatch(db,fixture,t);await exerciseAppointmentReadiness(db,t);}
+    if(entry.file==='116_appointment_patch_actor.sql')await exerciseAppointmentPatch(db,fixture,t);
+    if(entry.file==='117_appointment_edit_version.sql'){
+      await verifyOldAppointmentVersion();await exerciseAppointmentEditVersion(db,entry.source,t);await exerciseAppointmentReadiness(db,t);
+    }
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
       await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{

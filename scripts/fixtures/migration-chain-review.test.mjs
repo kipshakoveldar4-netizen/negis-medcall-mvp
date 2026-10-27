@@ -8,9 +8,9 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-116, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 108);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 108 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-117, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 109);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 109 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
@@ -226,6 +226,16 @@ test('116 admits only a source-reviewed tenant/actor patch with bound values and
   assert.ok(entry.source.includes('using next_row,p_workspace_id,p_appointment_id'));
   assert.ok(entry.source.includes('jsonb_object_keys(p_patch) k where k<>all'));
   assert.doesNotMatch(entry.source,/grant\s+(?:select|insert|update|delete)|alter\s+table|create\s+policy/i);
+});
+
+test('117 adds only a local edit token and a private invoker trigger, without backfill or grants',()=>{
+  const entry=chain.find(item=>item.file.startsWith('117_'));
+  assert.deepEqual(entry.evidence.tables,[]);assert.deepEqual(entry.evidence.rls,[]);
+  assert.deepEqual(entry.evidence.dynamicSqlLines,[]);assert.deepEqual(entry.evidence.storageCatalogueLines,[]);
+  assert.deepEqual(entry.evidence.functions.map(fn=>fn.name),['public.stamp_appointment_edit_version']);
+  assert.match(entry.source,/security invoker set search_path=''/);
+  assert.match(entry.source,/before update on public.appointments/);
+  assert.doesNotMatch(entry.source,/\b(?:insert into|update public\.|delete from|grant |create policy)/i);
 });
 
 for (const sql of [

@@ -1,4 +1,17 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+
+export const APPOINTMENT_SPY_VERSION = "00000000-0000-0000-0000-000000000000";
+// Explicit static metadata for query spies, not version/concurrency or SQL
+// proof. Native HTTP/browser suites freeze and race actual stored UUIDs.
+export function appointmentSpyRows(rows: Record<string, unknown[]>): Record<string, unknown[]> {
+  if (Array.isArray(rows.appointments)) rows.appointments = rows.appointments.map(row => ({ edit_version: APPOINTMENT_SPY_VERSION, ...(row as object) }));
+  return rows;
+}
+export function appointmentSpyBody(resource: string, method: string | undefined, body: unknown): unknown {
+  return resource === "appointments" && method === "PATCH" && body && typeof body === "object" && !Array.isArray(body)
+    ? { expectedEditVersion: APPOINTMENT_SPY_VERSION, ...body } : body;
+}
 
 type Result = { data: unknown; error: unknown };
 type Insert = PromiseLike<Result> & { select(columns: string): { single(): PromiseLike<Result> } };
@@ -21,7 +34,7 @@ export function withAppointmentCreateRpcSpy<T extends { from(table: string): unk
         if (saved.error) return saved;
         const row = Array.isArray(saved.data) ? saved.data[0] : saved.data;
         return { data: row ? { ...(args.p_before as Record<string, unknown>), ...(row as Record<string, unknown>),
-          id: args.p_appointment_id, workspace_id: args.p_workspace_id } : null, error: null };
+          id: args.p_appointment_id, workspace_id: args.p_workspace_id, edit_version: randomUUID() } : null, error: null };
       }
       const card = args.p_new_client as Record<string, unknown> | null;
       const visit = args.p_appointment as Record<string, unknown>;

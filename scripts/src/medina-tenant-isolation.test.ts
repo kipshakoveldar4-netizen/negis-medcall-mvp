@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { withAppointmentCreateRpcSpy } from "./appointment-create-rpc-spy.js";
+import { withAppointmentCreateRpcSpy, appointmentSpyRows, appointmentSpyBody } from "./appointment-create-rpc-spy.js";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -153,7 +153,7 @@ async function loadRouter(options: LoadOptions) {
   let crmClientCreations = 0;
   supabaseModule.setSupabaseServerClientFactoryForTests(() => {
     crmClientCreations += 1;
-    const client = withAppointmentCreateRpcSpy(spyClient(clientRows, log, options.staffDirectory, options.writeFailure));
+    const client = withAppointmentCreateRpcSpy(spyClient(appointmentSpyRows(clientRows), log, options.staffDirectory, options.writeFailure));
     if (!options.assignedLeads && !options.mortgageOutcomes) return client;
     const fixture = options.assignedLeads;
     return Object.assign(client, { async rpc(name: string, args: Record<string, unknown>) {
@@ -198,7 +198,7 @@ async function loadRouter(options: LoadOptions) {
         method: input.method ?? "GET",
         headers,
         query: { path: input.segments, ...(input.query ?? {}) },
-        body: input.body,
+        body: appointmentSpyBody(input.segments[0], input.method, input.body),
       },
       res,
     );

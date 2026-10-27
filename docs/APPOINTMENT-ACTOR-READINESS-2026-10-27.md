@@ -11,6 +11,8 @@ The later [actor PATCH candidate](APPOINTMENT-PATCH-AUTHORITY-2026-10-27.md)
 adds coordinated 116, closes direct service appointment writes and supersedes
 the 93-check metadata gate with 100 checks. The old generated SQL below is
 retained as evidence, not the current API's rollout checklist.
+The subsequent [open-form version candidate](APPOINTMENT-OPEN-VERSION-2026-10-27.md)
+also requires 117 and supersedes that 100-check gate with 108 conditions.
 
 ## Reproduced Failure
 

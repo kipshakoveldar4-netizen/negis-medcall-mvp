@@ -42,6 +42,7 @@ type CalendarView = "grid" | "day" | "week" | "month" | "list";
 
 type Appointment = {
   id: string;
+  editVersion?: string;
   /** Ссылка на карточку клиента. Пустая строка — визит без привязки. */
   clientId: string;
   client: string;
@@ -65,6 +66,7 @@ type Appointment = {
 };
 
 type AppointmentForm = {
+  editVersion: string;
   clientId: string;
   client: string;
   phone: string;
@@ -546,6 +548,7 @@ function appointmentFromApi(value: unknown): Appointment {
 
   return {
     id: readString(record.id) || `appointment-${Date.now()}`,
+    ...(readString(record.editVersion ?? record.edit_version) ? { editVersion: readString(record.editVersion ?? record.edit_version) } : {}),
     clientId: readString(record.clientId) || readString(record.client_id),
     client: readString(record.client) || readString(record.client_name) || readString(record.clientName) || "Клиент",
     phone,
@@ -634,6 +637,7 @@ function formatVisitDay(startsAt: string, timeZone = ""): string {
 
 function defaultForm(date: string, time = "09:00"): AppointmentForm {
   return {
+    editVersion: "",
     clientId: "",
     client: "",
     phone: "",
@@ -658,6 +662,7 @@ function defaultForm(date: string, time = "09:00"): AppointmentForm {
 function formFromAppointment(appointment: Appointment, timeZone = ""): AppointmentForm {
   const first = appointment.serviceItems?.[0];
   return {
+    editVersion: appointment.editVersion || "",
     clientId: appointment.clientId || "",
     client: appointment.client,
     phone: appointment.phone,
@@ -686,6 +691,7 @@ function appointmentFromForm(form: AppointmentForm, existingId?: string, timeZon
   const total = summarizeAppointmentServices(serviceItems);
   return {
     id: existingId || `appointment-${Date.now()}`,
+    ...(existingId && form.editVersion ? { editVersion: form.editVersion } : {}),
     clientId: form.clientId || "",
     client: form.client.trim(),
     phone: form.phone.trim(),
@@ -748,6 +754,10 @@ const APPOINTMENT_ERROR_TEXTS: Record<string, string> = {
   unavailable: "База не ответила. Попробуйте ещё раз через минуту.",
   validation_error: "Проверьте поля формы: что-то заполнено не так.",
   permission_denied: "Вашей роли это действие недоступно.",
+  appointment_edit_conflict: "Запись уже изменилась. Обновите список и заново откройте запись перед повтором.",
+  appointment_edit_version_required: "Обновите список и заново откройте запись перед сохранением.",
+  appointment_edit_version_unavailable: "Не удалось подтвердить версию записи. Сохранение временно недоступно.",
+  appointment_patch_conflict: "Запись уже изменилась. Обновите список и заново откройте запись перед повтором.",
 };
 
 function refusalText(error: unknown): string {
@@ -2047,6 +2057,7 @@ export function AppointmentsPage() {
       body: JSON.stringify({
         id: appointment.id,
         workspaceId: mutationScope.workspaceId,
+        expectedEditVersion: appointment.editVersion,
         updates: {
           ...updates,
           ...(allowConflict ? { allowConflict: true } : {}),
@@ -2080,8 +2091,8 @@ export function AppointmentsPage() {
         error.name = "ArrivalPaymentError";
         throw error;
       }
-      const details = body?.success === false ? body.details?.join(", ") : "";
-      throw new Error(details || (body?.success === false ? body.error : "Не удалось обновить запись на сервере"));
+      if (body?.success === false) throw new ServerRefusalError(body.code || "unavailable", body.error, body.details ?? []);
+      throw new Error("Не удалось обновить запись на сервере");
     }
 
     // Сервер называет поля, которые до базы не доехали (база клиники отстала
@@ -2252,7 +2263,8 @@ export function AppointmentsPage() {
       // Keep the last confirmed row; a lost reply proves neither save nor rollback.
       console.warn("appointments: status patch refused", error instanceof Error ? error.message : error);
       toast.error(error instanceof Error && error.name === "ArrivalPaymentError"
-        ? error.message : "Не удалось подтвердить изменение статуса. Обновите список перед повтором.");
+        ? error.message : error instanceof ServerRefusalError ? refusalText(error).replace("создать запись", "изменить статус записи")
+          : "Не удалось подтвердить изменение статуса. Обновите список перед повтором.");
     }
   };
 

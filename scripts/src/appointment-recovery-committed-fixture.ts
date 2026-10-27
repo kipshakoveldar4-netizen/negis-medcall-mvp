@@ -69,7 +69,7 @@ async function actualSlice(clinicTimeZone: "UTC" | "Asia/Almaty") {
   assert.ok(start >= 0 && end > start);
   const scope = page.body.statements.slice(start, end + 1).map(node => node.getText(ast)).join("\n");
   const actions = select(page.body.statements, ["unsavedFromBody", "warnAboutUnsaved", "patchAppointment", "updateAppointmentStatus",
-    "findConflict", "submitForm", "createAppointment"]);
+    "findConflict", "submitForm", "createAppointment", "openEdit"]);
   const imports = ast.statements.filter(ts.isImportDeclaration).filter(node => {
     const module = (node.moduleSpecifier as import("typescript").StringLiteral).text;
     return ["react", "@/lib/api", "@/lib/appointmentCreateAttempt", "@/lib/appointmentClient", "@/lib/clinicDay", "@/lib/clinicDateTime",
@@ -91,7 +91,7 @@ function RecoverySlice(){
  ${actions}
  useLayoutEffect(()=>{fixture.view={items,form,selectedDate,modalOpen,saving,unconfirmedCreate,createRecoveryError,createRecoveryRead,
     createAttempt,mutationScope,submitLock,isCurrentMutationScope,submitForm,createAppointment,setForm,setModalOpen,setEditingId,
-    setCreateRecoveryRead,setItems,prefillLeadRef};});
+    setCreateRecoveryRead,setItems,prefillLeadRef,openEdit};});
  return <main><output id="rows">{JSON.stringify(items)}</output>{modalOpen?<form onSubmit={e=>{e.preventDefault();void submitForm();}}>
    <input aria-label="Client" value={form.client} readOnly/><input aria-label="Phone" value={form.phone} readOnly/>
    <textarea aria-label="Notes" value={form.notes} readOnly/><button type="submit">Reconcile</button></form>:null}
@@ -101,7 +101,8 @@ let app;
 fixture.mount=()=>{app=createRoot(document.getElementById('root'));flushSync(()=>app.render(<RecoverySlice/>));};
 fixture.unmount=()=>flushSync(()=>app.unmount());
 fixture.draft=()=>flushSync(()=>{fixture.view.setForm(formFromAppointment(${JSON.stringify(visit)},clinicTimeZone));fixture.view.setEditingId(null);fixture.view.setModalOpen(true);});
-fixture.edit=item=>flushSync(()=>{const current=appointmentFromApi(item);fixture.view.setItems([current]);fixture.view.setForm(formFromAppointment(current,clinicTimeZone));fixture.view.setEditingId(current.id);fixture.view.setModalOpen(true);});
+fixture.edit=item=>{const current=appointmentFromApi(item);flushSync(()=>fixture.view.setItems([current]));flushSync(()=>fixture.view.openEdit(current));};
+fixture.refreshItems=item=>flushSync(()=>fixture.view.setItems([appointmentFromApi(item)]));
 fixture.start=()=>{const task={done:false,error:null};fixture.tasks.push(task);task.promise=fixture.view.submitForm().then(()=>{task.done=true;},e=>{task.error=e.message;task.done=true;});};
 fixture.capture=()=>{const action=fixture.view.submitForm;return()=>{const task={done:false,error:null};fixture.tasks.push(task);task.promise=action().then(()=>{task.done=true;},e=>{task.error=e.message;task.done=true;});};};
 fixture.snapshot=()=>({items:fixture.view.items,form:fixture.view.form,selectedDate:fixture.view.selectedDate,modalOpen:fixture.view.modalOpen,saving:fixture.view.saving,

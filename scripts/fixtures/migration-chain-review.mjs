@@ -114,6 +114,7 @@ ca00557aafe4bab78a8e7643ad45ab4bea3d292ebd0f0ad2010f13f18e425a7f 111_creator_com
 b1aa8d89b58dc7a0a56f444524b3fe66e42a8c85abf52180dacbfb7cdc88db3a 114_partner_terms_activation.sql
 3a8f70cd9878ecad79e48acb9f4c847b37ff7589f3e0981398fa95170675cffb 115_appointment_request_actor.sql
 567eb91556edeb94d74f76b3fe32115e5347164203f3cffa6d4fc9a49ef9ec75 116_appointment_patch_actor.sql
+6ddda2adbaddb36f64d959127dd2bd005e52d116724dee840cf31c62bc362fdf 117_appointment_edit_version.sql
 `.trim().split('\n').map(line => line.split(' '));
 
 export const migrationReview = Object.freeze(Object.fromEntries(reviewed.map(([sha256, file]) => [file, sha256])));

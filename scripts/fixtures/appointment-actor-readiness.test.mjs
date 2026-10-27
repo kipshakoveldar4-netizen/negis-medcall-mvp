@@ -7,7 +7,7 @@ import test from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 import { appointmentActorReadinessQuery,buildAppointmentActorReadiness } from './appointment-actor-readiness.mjs';
 import { appointmentReadinessQuery,buildAppointmentPreviewReadiness } from './appointment-preview-readiness.mjs';
-import { exerciseAppointmentReadiness,exerciseAppointmentReadinessBeforeCutover,exerciseAppointmentPatchReadinessBeforeCutover } from './appointment-actor-readiness-cases.mjs';
+import { exerciseAppointmentReadiness,exerciseAppointmentReadinessBeforeCutover,exerciseAppointmentPatchReadinessBeforeCutover,exerciseAppointmentVersionReadinessBeforeCutover } from './appointment-actor-readiness-cases.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
 test('CLI writes only the current read-only gate and never replaces an existing output',async t=>{
@@ -29,7 +29,7 @@ test('current appointment Preview metadata gate, synthetic WASM schema only',{ti
     assert.doesNotMatch(sql,/select\s+\*|\bfrom\s+public\./i);assert.doesNotMatch(sql,/\b(?:http|dblink|pg_read_file|pg_sleep)\s*[.(]/i);
   });
   await t.test('an empty database returns blockers, not errors or a ready result',async()=>{
-    const result=(await db.query(appointmentActorReadinessQuery)).rows;assert.equal(result.length,100);assert.ok(result.some(r=>!r.ready));
+    const result=(await db.query(appointmentActorReadinessQuery)).rows;assert.equal(result.length,108);assert.ok(result.some(r=>!r.ready));
     assert.ok(result.some(r=>r.check_name==='receipt:shape:crm_appointment_request_actors'&&!r.ready));
   });
   await db.exec('create role anon;create role authenticated;create role service_role bypassrls;');
@@ -44,5 +44,7 @@ test('current appointment Preview metadata gate, synthetic WASM schema only',{ti
   await db.exec(await readFile(path.join(root,'migrations/115_appointment_request_actor.sql'),'utf8'));
   await exerciseAppointmentPatchReadinessBeforeCutover(adapter,t);
   await db.exec(await readFile(path.join(root,'migrations/116_appointment_patch_actor.sql'),'utf8'));
+  await exerciseAppointmentVersionReadinessBeforeCutover(adapter,t);
+  await db.exec(await readFile(path.join(root,'migrations/117_appointment_edit_version.sql'),'utf8'));
   await exerciseAppointmentReadiness(adapter,t);
 });
