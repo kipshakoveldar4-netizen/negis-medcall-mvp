@@ -19,7 +19,8 @@ export async function partnerEntryHttpFixture(adapter, options = {}) {
   if (!codeCache.has(approval)) codeCache.set(approval, (await esbuild.build({ stdin: {
     contents: `export {default as handler} from ${JSON.stringify(path.join(root, 'api/crm/[...path].ts'))};
       export {setSupabaseServerClientFactoryForTests as install} from ${JSON.stringify(path.join(root, 'lib/supabase/server.ts'))};
-      export * as cookies from ${JSON.stringify(path.join(root, 'lib/crm/partner-entry-cookie.ts'))};`, loader: 'ts', resolveDir: root },
+      export * as cookies from ${JSON.stringify(path.join(root, 'lib/crm/partner-entry-cookie.ts'))};
+      export * as terms from ${JSON.stringify(path.join(root, 'lib/crm/partner-terms-contracts.ts'))};`, loader: 'ts', resolveDir: root },
     bundle: true, write: false, platform: 'node', format: 'cjs', packages: 'external', target: 'node22', logLevel: 'silent',
     plugins: [{ name: 'synthetic-approved-notice-data-only', setup(build) {
       if (approval) build.onLoad({ filter: /consent-registry\.cjs$/ }, async args => {

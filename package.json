@@ -29,6 +29,8 @@
     "test:partner-source-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-source-postgres",
     "test:partner-entry-http": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-entry-http",
     "test:partner-entry-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-entry-postgres",
+    "test:partner-terms-http": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-terms-http",
+    "test:partner-terms-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-terms-postgres",
     "test:partner-ledger": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-ledger",
     "test:creator-jobs": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:creator-jobs",
     "test:creator-jobs-browser": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:creator-jobs-browser",

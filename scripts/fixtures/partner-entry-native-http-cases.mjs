@@ -5,15 +5,15 @@ import { partnerEntryHttpFixture, stopPartnerEntryBuilds, ENTRY_ORIGIN, ENTRY_AC
 const one=async(db,sql,args=[])=>(await db.query(sql,args)).rows[0];
 async function until(check){for(let n=0;n<200;n++){if(check())return;await new Promise(r=>setTimeout(r,10));}assert.fail('Owned entry condition did not settle');}
 
-async function nativeServer(handler){
-  const state={dropCapture:false,requests:[],errors:[]};let origin;
+export async function startOwnedPartnerHttp(handler,paths=['/api/crm/partner-entry']){
+  const state={dropCapture:false,dropNextPost:false,requests:[],errors:[]};let origin;
   const server=createServer(async(req,out)=>{
     if(!origin||req.headers.host!==new URL(origin).host){out.writeHead(403).end();return;}
-    const url=new URL(req.url,origin);if(url.pathname!=='/api/crm/partner-entry'){out.writeHead(404).end();return;}
-    const query={path:['partner-entry']};for(const[k,v]of url.searchParams)query[k]=query[k]===undefined?v:Array.isArray(query[k])?[...query[k],v]:[query[k],v];req.query=query;
+    const url=new URL(req.url,origin);if(!paths.includes(url.pathname)){out.writeHead(404).end();return;}
+    const query={path:[url.pathname.slice('/api/crm/'.length)]};for(const[k,v]of url.searchParams)query[k]=query[k]===undefined?v:Array.isArray(query[k])?[...query[k],v]:[query[k],v];req.query=query;
     const res={setHeader(k,v){out.setHeader(k,v);return res;},status(v){out.statusCode=v;return res;},end(v){out.end(v);return res;},json(v){
       state.requests.push({op:query.op,status:out.statusCode});const raw=JSON.stringify(v);out.setHeader('Content-Type','application/json; charset=utf-8');
-      if(state.dropCapture&&query.op==='capture'&&out.statusCode===200){state.dropCapture=false;out.setHeader('Content-Length',Buffer.byteLength(raw)+1);out.flushHeaders();out.write('{"success":');setTimeout(()=>out.destroy(),10).unref();}
+      if(((state.dropCapture&&query.op==='capture')||(state.dropNextPost&&req.method==='POST'))&&out.statusCode===200){state.dropCapture=false;state.dropNextPost=false;out.setHeader('Content-Length',Buffer.byteLength(raw)+1);out.flushHeaders();out.write('{"success":');setTimeout(()=>out.destroy(),10).unref();}
       else out.end(raw);return res;
     }};
     try{await handler(req,res);}catch(error){state.errors.push(error.message);if(!out.destroyed)out.writeHead(500).end('{"success":false}');}
@@ -33,7 +33,7 @@ async function setup(db,fixture){
       if(controls.malformed&&name==='capture_growth_partner_source_v2'){controls.malformed=false;return{data:{prepared:true},error:null};}return{data,error:null};
     }catch(error){return{data:null,error:{code:error.code}};}finally{await client.end();}
   }};
-  const f=await partnerEntryHttpFixture(adapter),server=await nativeServer(f.handler);
+  const f=await partnerEntryHttpFixture(adapter),server=await startOwnedPartnerHttp(f.handler);
   const release=()=>{controls.held?.();controls.held=null;};
   async function call(op,{cookie,token,body={},expectJson=true}={}){
     const response=await fetch(server.origin+'/api/crm/partner-entry?op='+op,{method:'POST',redirect:'error',signal:AbortSignal.timeout(10000),

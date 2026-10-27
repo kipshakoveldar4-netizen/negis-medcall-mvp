@@ -82,6 +82,10 @@ try {
       await check('contributor-account', 401, 'Bearer invalid-test-token');
       await check('contributor-account', 401, undefined, 'POST');
       await check('partner-ledger', 401, 'Bearer invalid-test-token');
+      for(const route of ['partner-terms','platform-partner-terms']){
+        await check(route,route.startsWith('platform-')?404:401,'Bearer invalid-test-token');
+        await check(route,route.startsWith('platform-')?404:401,undefined,'POST');
+      }
       await check('partner-entry',503,undefined,'POST');
       await check('partner-entry',503,'Bearer invalid-test-token','POST');
       for (const route of ['creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command',

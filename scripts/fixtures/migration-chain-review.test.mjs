@@ -8,9 +8,9 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-113, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 105);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 105 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-114, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 106);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 106 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
@@ -83,6 +83,15 @@ test('113 anchors first-entry time, closes the old capture and adds only a bound
   assert.match(e.source,/has_any_column_privilege\(role_name,'public\.growth_partner_sources','SELECT,INSERT,UPDATE,REFERENCES'\)/);
   assert.match(e.source,/has_function_privilege\(role_name,dependency\.signature,'EXECUTE'\)/);
   assert.match(e.source,/revoke all on function public\.capture_growth_partner_source\(uuid,text,text,text\) from public,anon,authenticated,service_role/);
+  assert.doesNotMatch(e.source,/(?:insert into|update|delete from) public\.(?:staff_users|workspaces|growth_referrals|platform_subscription|growth_partner_commissions|growth_partner_payouts)/i);
+});
+
+test('114 initial commercial activation requires explicit offer/accept, private commands and no financial/workspace writes',()=>{
+  const e=chain.find(v=>v.file.startsWith('114_'));
+  assert.deepEqual(e.evidence.tables,['public.growth_partner_terms','public.growth_partner_term_commands']);
+  assert.deepEqual(e.evidence.rls,e.evidence.tables);assert.equal(e.evidence.functions.length,4);
+  assert.deepEqual(e.evidence.dynamicSqlLines,[]);assert.deepEqual(e.evidence.storageCatalogueLines,[]);assert.deepEqual(e.evidence.extensions,[]);
+  assert.match(e.source,/revoke insert,update,delete,truncate,references,trigger on public\.growth_partners from service_role/);
   assert.doesNotMatch(e.source,/(?:insert into|update|delete from) public\.(?:staff_users|workspaces|growth_referrals|platform_subscription|growth_partner_commissions|growth_partner_payouts)/i);
 });
 
