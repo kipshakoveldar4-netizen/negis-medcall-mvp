@@ -54,3 +54,81 @@ redeploy, domain/protection/credential/account/role change, SQL, installation,
 provider request or expense occurred. The temporary audit tab was closed;
 user-owned tabs were left alone. Production, Baspana, salons and WhatsApp
 were not changed.
+
+## Later Read-Only Recheck
+
+Local base a0c71eb, same day, G7-C59. This supplements the earlier receipt;
+it is not a new deployment, target-schema write or approval to ship the branch.
+
+The authenticated Vercel Overview still shows Production at de97fb6 on
+codex/postponed-production-20261023 and the same two public CRM domains. Only
+project metadata was viewed; neither customer domain nor its CRM was opened.
+The active Preview listing still points to 6c11l89kr / site-blog-release, not
+the current local candidate. The local branch is listed with an older
+September deployment. No push/redeploy/rollback/domain change took place.
+
+Preview + SUPABASE still shows the five old-branch overrides and the same
+common Production and Preview rows. Shared + Preview + SUPABASE returns no
+results. Before filtering, old-branch Config rows also included sender/worker
+names for Meta/TikTok, WhatsApp/Wazzup, Telegram, VAPID and Insights. Several
+token/secret-named Config rows display Needs Attention. Values remained
+masked; no Reveal, copy, export, rotation, edit or permission change occurred.
+Their presence/type does not establish whether they are empty, valid, live
+or test-only. Neither the current database binding nor disabled senders is
+proved by this view. Do not push the local branch into inherited common values.
+
+The separate Supabase project was independently identified in its dashboard:
+medina-os-site-test, ref ukiobbwsdoblooynzlnx, Healthy, FREE/NANO. Its
+main/PRODUCTION label denotes the main branch of this test project, not a
+visit to medcall-negis-crm or a working salon. Only this project was queried.
+
+The exact generated 112-check metadata query was transferred with matching
+SHA-256 8f16cfe53e02a51450623a2d2d10dbe48b0efeb784053b25e27317aadc20e5bd,
+including BEGIN READ ONLY and the ten-second statement limit. It returned
+112 distinct boolean rows: **69 true / 43 false**. This is a schema gate,
+not a project-completion percentage or 43 demonstrated vulnerabilities.
+The full JSON result was exported from the visible Results menu; no domain
+row, contact, auth user, business setting, secret or payment was read.
+
+A second READ ONLY catalog query explains the refusals. Its SHA-256 is
+f8ef0799cae557593e66502068cd6ff7cbb157acff0abf3f7b2dbe61a9b4e03e.
+Seven newer routines, the Auth-origin relation and the edit-version column
+are absent. An execute check for a missing routine is false by design; it
+does not mean the browser has been granted that routine. The three exact
+legacy 063/064 bodies still have service EXECUTE. Capacity uses the reviewed
+073 body 37ff4acb..., private to browser/service roles; the sole BEFORE UPDATE
+trigger is its enabled type-31 guard. This distinguishes missing coordinated
+updates from an unexplained function-body replacement.
+
+The scoped source candidate is therefore **102, then 115/116/117/118**, not
+raw 009-118 replay. A disposable native source baseline reproduces all 112
+observed booleans and the exact 11-routine/trigger inventory. Applying only
+those five original files makes its gate 112/112 while preserving an owned
+legacy appointment tuple, contact, staff role and receipt. Legacy provenance
+is not backfilled: v2 recovery returns the explicit unavailable outcome;
+new create/replay/PATCH works. This is not a target DDL/data dump, proof about
+unknown target objects/data/pending outcomes, real Auth or a Preview release.
+It does not cover the rest of the accumulated G1-G8 schema or API/UI delta.
+
+Local audit artifacts, only under node_modules/.cache:
+
+- preview-112-gate-8588fc18.json and matching .png screenshot.
+- preview-dependency-reasons-60968558.json.
+- appointment-preview-cutover-first.log (12/12 native source cases).
+- preview-source-ready-cutover.log (12/12 after pinning both source-query
+  hashes and the test-project identity in the offline fixture).
+
+The sanitized catalog observation used by that offline test is tracked in
+scripts/fixtures/appointment-preview-catalog-20261027.json. It contains
+metadata only, no customer/auth rows or keys. Two private SQL-editor query
+snippets were created for this audit; no migration, table data, role, grant,
+account, provider or commercial setting was changed. Both transactions
+completed. Save was not clicked; the editor/history may retain these private
+metadata-only queries. The temporary audit browser tabs were closed; existing local
+demo tabs were not changed or closed.
+
+Remaining: exact selected API/UI/SQL delta, verified test-only build/runtime
+credentials and sender/worker isolation, legacy-outcome reconciliation and
+coordinated writer drain. Execute the current 112-check gate again after any
+approved cutover. No cloud migration or candidate deployment is approved by
+these local tests or metadata observations alone.

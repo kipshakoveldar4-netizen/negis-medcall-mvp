@@ -242,3 +242,13 @@ the backend must still authenticate the caller and supply its original identity.
 Real Auth/current Preview bindings, selected SQL delta and existing outcomes,
 durable PATCH/task recovery, crash-atomic secondary audit and remaining G1-G8
 acceptance gates are unchanged and remain required.
+
+Later G7-C59 pins the original raw format of each reviewed migration in
+.gitattributes, without SQL edits or receipt repinning. Actual Git checkouts
+reproduce all 110 SQL files under four autocrlf/eol modes. This closes the
+scoped SQL-byte portability gap above, not a whole-repository clean build.
+The current target was also checked read-only: 69/112 true, with explicit
+missing-protocol/legacy-body reasons. The five-file appointment source delta
+102 + 115-118 is compatible with a disposable baseline matching that catalog
+slice; it is not applied remotely or approval to release all accumulated code.
+See [the later preflight receipt](PREVIEW-PREFLIGHT-2026-10-27.md#later-read-only-recheck).

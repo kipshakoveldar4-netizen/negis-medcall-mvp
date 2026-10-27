@@ -16,6 +16,7 @@
     "test:crm-appointment-native-http": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:crm-appointment-native-http",
     "test:legacy-server-access": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:legacy-server-access",
     "test:migration-chain-review": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:migration-chain-review",
+    "test:appointment-preview-cutover": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:appointment-preview-cutover",
     "test:profile-session": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:profile-session",
     "test:video-worker-process": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:video-worker-process",
     "test:telegram-delivery-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:telegram-delivery-postgres",

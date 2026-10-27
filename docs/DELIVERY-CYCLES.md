@@ -57,7 +57,14 @@ O1–O3, A1–A3, Q1 и P1/P-S1, не создавая второй проект
 | G6 · P1/P-S1/O3 | Завершить партнёрский путь и подключить только согласованный платёжный sandbox после получения условий и доступа провайдера | Явные условия и первый источник новой компании; проверенные подписи/суммы/получатель, атомарность/повторы/возвраты, отдельный security review; статус страницы не подтверждает оплату | C1/C2: ручные подписки/receipt/replay/abandon, C3: свой read-only отчёт 109, C4/C5: first-source 112 и защищённый HTTP/очистка 113 готовы локально. C6: начальные условия/активация 114 и HTTP; C7: реальные формы/восстановление с Auth/API doubles. C8: формы обоих кабинетов через настоящие transports/router и одноразовый SQL, 11/11, включая две независимые роли; вымышленна лишь Auth-личность. Эти срезы не в облаке; остаются onboarding компании, публичные согласия, настоящие Auth/Preview, платёжный sandbox и выплаты |
 | G7 · выпуск | Собрать точный проверенный кандидат без чужих незавершённых изменений; принять его только в изолированном Preview | Список изменений/миграций, полный отчёт проверок, фактическая тестовая база в сборке, сохранность защиты и уборка фикстур | G7-C7/C8/C9 приняты в site-test с уборкой фикстур/ролей. Узкий G7-C10 опубликован для назначения себе; отдельный ec69a64 календаря/сводки опубликован в G4-C14. G7-C11: e58a0b5 READY только Preview, 078 только site-test, выбранные сценарии владельца/admin/менеджеров А/Б приняты; контрольная смена сессии отложена, все фикстуры убраны. G7-C14 отдельно выпустил 6d86281 и 156a6a2 в два READY Preview: точные исходники, тестовая база в JS, оба входа и ограниченный smoke приняты. G7-C15 принял отдельные switch/recovery сценарии, удалил временные данные/+5 со сверкой 20 таблиц; 845 файлов Preview и отпечатки Production/доменов/защиты сохранены. C53: API+115 только локально. C54: текущий read-only metadata gate проверен на raw 009–115, но в облаке не запускался. Фактические build/runtime bindings, выбранный SQL delta, настоящий Auth и облачная конкурентная матрица остаются |
 
-Актуальное дополнение G2-C23/G7-C58: после bdaad3e подготовлен version-bound
+Актуальное дополнение G7-C59: после a0c71eb закреплены исходные byte formats
+110 SQL-файлов без изменения SQL/hash. Реальные Git checkouts проходят четыре
+autocrlf/eol режима. В отдельной medina-os-site-test выполнен нынешний read-only
+gate: **69/112 true, 43 false**, не процент готовности проекта. Причины уточнены
+метаданными; 102 + 115–118 проверены только на одноразовом source baseline,
+совпадающем с наблюдённым срезом. Cloud schema, рабочие данные и выпуски не менялись.
+
+Предыдущее дополнение G2-C23/G7-C58: после bdaad3e подготовлен version-bound
 серверный вход 118 с закрытием прежнего service PATCH. Новый metadata gate
 требует 112 условий, включая закрытие legacy entry; итоговые квитанции ниже.
 Это только локально, не облачный выпуск; остальные критерии G1–G8 сохраняются.
@@ -1333,6 +1340,91 @@ node_modules/.cache/calendar-working-hours-20261020/. Чужие 059/065 сох�
 
 Связанный runtime Telegram C37 сохранён отдельным локальным **d3a77ed**.
 Его выпуск и оставшиеся облачные сценарии ещё не выполнены.
+
+### Цикл G7-C59: воспроизводимый SQL-пакет и фактический тестовый каталог, 27 октября
+
+Продолжение a0c71eb в существующем G1–G8. Сначала read-only сравнение HEAD и
+рабочих байтов выявило 45 SQL-файлов с отличием только CRLF/LF. Без правил
+чистый Git checkout при autocrlf=false не воспроизводил 45 receipts, а при
+autocrlf=true — 65 других. Это реальная воспроизводимость, не изменение SQL.
+
+Новая .gitattributes задаёт точные paths всех 110 reviewed SQL: 45 сохраняют
+CRLF, 65 LF; сама .gitattributes закреплена как LF. Нет общего wildcard для
+непроверенных файлов, renormalize, новых SQL, repinning raw hash, изменения
+protected 059/065. Тестовые Git-команды не переписывают основной index/config.
+Git fixture использует
+настоящие clean/checkout-index/check-attr в собственном временном repository,
+без remotes, глобальных config/attributes, hooks и сетевых протоколов.
+Четыре autocrlf/eol режима воспроизводят исходные SQL byte-for-byte; даже
+одна ending-only правка после checkout по-прежнему отказывается raw gate.
+Исходные protected bytes и timestamps не меняются, fixture убирается.
+Это проверка SQL/attributes checkout, не полного fresh clone/dependency build.
+
+Первый review run **60/62** не принят: SQL в четырёх modes уже совпадал, но
+сам файл attributes при autocrlf=true менял endings. Исправлено его собственным
+LF rule, не снятием assertion или нормализацией SQL. **62/62** прошли через
+обновлённый штатный test:migration-chain-review, без skips.
+
+Далее Vercel проверен только по UI metadata: Production по-прежнему de97fb6,
+Preview 6c11l89kr остаётся другим старым source. Пять SUPABASE overrides
+по-прежнему только для site-blog-release плюс общие Production and Preview;
+Shared/SUPABASE пуст. Sender/worker-named Config rows старой ветки видимы,
+некоторые с Needs Attention, но все значения masked. Ничего не раскрывалось,
+не копировалось, не менялось и не выпускалось; значения не объявлены dummy/off.
+
+В Supabase отдельно подтверждены имя medina-os-site-test и ref
+ukiobbwsdoblooynzlnx. Только там исполнены две READ ONLY транзакции системного
+каталога с 10-second timeout. SHA текущего 112-check query совпал до вставки
+8f16cfe5...; полный JSON результата дал **69 true / 43 false**. Это не процент
+готовности G1–G8 и не 43 доказанных уязвимости: отсутствующая routine тоже
+даёт false для своих execute checks. Reason query f8ef0799... подтвердил семь
+отсутствующих routines, отсутствие origin relation/version column, три старых
+063/064 body с service EXECUTE и исходный capacity 073 body 37ff4acb...;
+BEFORE UPDATE inventory содержит только его enabled type-31 trigger.
+Никакие domain/auth rows, контакты, ключи, настройки компаний и деньги не читались.
+
+Подготовлена offline catalog-only fixture и отдельный native cutover test.
+Его source baseline из 30 неизменённых SQL совпадает со всеми 112 наблюдёнными
+booleans и полным 11-routine/trigger inventory. Применяются лишь **102, затем
+115/116/117/118**, все пять исходников source-pinned без compensating SQL.
+После них metadata gate 112/112, старые appointment fields/ctid/xmin, client,
+staff role и legacy receipt не переписаны. Старые outcomes не усыновлены:
+v2 возвращает явный P6403 без backfill/новой записи. Новый create/replay/PATCH
+работает, stale opening token отказан, дублей/продаж нет, owned rows убраны.
+Первый native source cutover **12/12**; окончательные квитанции ниже.
+
+Это не target DDL/data dump или доказательство о неизвестных target objects,
+реальных старых outcomes, Auth/Preview, других G1–G8 таблицах. Пять файлов —
+scoped appointment candidate, не разрешение применять весь 009–118 или выпускать
+всю накопленную ветку. Нужны действительные test-only build/runtime/sender/
+worker bindings, точный API/UI/SQL delta, reconciliation/drain и согласованный
+cloud cutover. Схемы операторов/авторов/партнёров и остальные gates не закрыты
+этим сравнением. Никаких миграций или пользовательских данных в облаке не меняли.
+В UI появились только две private audit snippets; временные браузерные вкладки
+закрыты, пользовательские demo tabs и пять серверов оставлены.
+
+Полная metadata квитанция и локальные JSON/PNG artifacts:
+[PREVIEW-PREFLIGHT-2026-10-27](PREVIEW-PREFLIGHT-2026-10-27.md#later-read-only-recheck).
+
+Окончательные квитанции, node_modules/.cache/preview-source-ready-*:
+
+- review-final: **62/62**, штатный PM command, exact checkout formats,
+  полный raw review и сохранность protected bytes/timestamps. Helper создаёт
+  свой cache parent при необходимости, не требует заранее готовой .cache.
+- cutover: **12/12**, после фиксации project ref и обеих query SHA в offline
+  catalog fixture. Все пять исходников применены лишь в disposable native PG;
+  данные убраны, helper завершён. Это scoped compatibility, не cloud acceptance.
+- isolation: **931/931**, тот же no-network/IPC lane, прежний 41-reader keyset
+  и digest d7d52202... без изменений runtime/env читателей.
+- build: полный **production-mode build exit 0**, оба API compiler modes,
+  все workspace types, **353 cold-start** и Vite. Runtime/API/SQL не менялись;
+  новые package scripts и тестовые артефакты не являются выпуском приложения.
+
+Source/raw hashes не переопределены, protected 059/065 и пять исходных demo
+listeners сверены отдельно. Эти пересекающиеся счётчики не являются числом
+уникальных требований или общей готовностью платформы.
+Production, Baspana, салоны, WhatsApp, аккаунты, роли, реальные подключения,
+реклама, генерации, платежи и расходы не затронуты. Общая цель остаётся активной.
 
 ### Цикл G2-C23/G7-C58: закрытие прежнего service writer, 27 октября
 
