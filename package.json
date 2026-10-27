@@ -33,6 +33,7 @@
     "test:partner-terms-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-terms-postgres",
     "test:partner-terms-ui": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-terms-ui",
     "test:partner-terms-browser": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-terms-browser",
+    "test:partner-terms-native-ui": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-terms-native-ui",
     "test:partner-ledger": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-ledger",
     "test:creator-jobs": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:creator-jobs",
     "test:creator-jobs-browser": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:creator-jobs-browser",

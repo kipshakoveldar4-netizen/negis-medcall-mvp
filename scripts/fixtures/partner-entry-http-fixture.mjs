@@ -39,7 +39,8 @@ export async function partnerEntryHttpFixture(adapter, options = {}) {
     if (url === env.SUPABASE_URL + '/auth/v1/user') {
       state.auth.push(init.headers.Authorization); assert.equal(init.redirect, 'error');
       if (state.authUnavailable) throw Error('PRIVATE_AUTH_FIXTURE_DIAGNOSTIC');
-      const actor = { 'Bearer owned.owner.signature': ENTRY_ACTOR, 'Bearer owned.other.signature': ENTRY_OTHER }[init.headers.Authorization];
+      const identities = options.identities ?? new Map([['owned.owner.signature', ENTRY_ACTOR], ['owned.other.signature', ENTRY_OTHER]]);
+      const actor = identities.get(init.headers.Authorization?.replace(/^Bearer /, ''));
       return new Response(JSON.stringify(actor ? { id: actor } : { message: 'PRIVATE_AUTH_FIXTURE_DIAGNOSTIC' }), { status: actor ? 200 : 401 });
     }
     if (url === 'https://challenges.cloudflare.com/turnstile/v0/siteverify') {
