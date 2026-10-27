@@ -309,12 +309,10 @@ export function diffForJournal(
 /**
  * Read the row as it stands, so the journal can say what it was.
  *
- * There is no transaction here and there cannot be one: every Supabase call in
- * this project is an independent PostgREST request. That is acceptable for a
- * journal — a concurrent edit between this read and the update would attribute
- * one field to the wrong previous value, and the alternative (a database
- * trigger) would move the journal out of reach of the handler-level tests that
- * are this project's actual safety net. The trade is stated rather than hidden.
+ * This read alone is not transactional: generic callers can observe an earlier
+ * version than the eventual update. Appointment PATCH is stricter: 116 compares
+ * this entire typed row under a lock before mutating, so its journal preimage
+ * must match the admitted write. Other callers do not inherit that guarantee.
  */
 export async function readRowBeforeChange(
   supabase: SupabaseServerClient,

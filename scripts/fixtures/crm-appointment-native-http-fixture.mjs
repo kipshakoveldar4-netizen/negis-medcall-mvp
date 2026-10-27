@@ -9,11 +9,12 @@ import { ids, visit } from '../src/appointment-recovery-committed-fixture.ts';
 const rpcArgs = {
   read_crm_appointment_request_v2: ['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_request_key','p_request_fingerprint'],
   create_crm_appointment_v2: ['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_request_key','p_request_fingerprint','p_new_client','p_appointment','p_client_match'],
+  patch_crm_appointment_as_actor: ['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_appointment_id','p_before','p_patch'],
 };
 const allowed = new Set(['staff_users','workspace_settings','clients','clinic_doctors','clinic_services','appointments','clinic_doctor_shifts','audit_logs']);
 const identifier = value => { assert.match(value,/^[a-z_][a-z0-9_]*$/); return '"'+value+'"'; };
 export function appointmentNativeAdapter(fixture) {
-  const controls = { calls:[], reads:[], writes:[], beforeRpc:null, errors:[] };
+  const controls = { calls:[], reads:[], writes:[], beforeRpc:null, beforePatch:null, errors:[] };
   async function query(sql,args) {
     const db=await fixture.connect();
     try { await db.query('set role service_role'); return await db.query(sql,args); }
@@ -25,12 +26,13 @@ export function appointmentNativeAdapter(fixture) {
       const keys=rpcArgs[name];assert.deepEqual(Object.keys(args).sort(),[...keys].sort());
       controls.calls.push({name,args:structuredClone(args)});
       if(controls.beforeRpc)await controls.beforeRpc(name,args);
+      if(name==='patch_crm_appointment_as_actor'&&controls.beforePatch)await controls.beforePatch();
       try {return {data:(await query(`select public.${name}(${keys.map((_,i)=>'$'+(i+1)).join(',')}) value`,keys.map(key=>args[key]))).rows[0].value,error:null};}
       catch(e){controls.errors.push({name,code:e.code});return {data:null,error:{code:e.code,message:e.code==='23P01'?'appointment_capacity_exceeded':'PRIVATE_NATIVE_APPOINTMENT_SQL'}};}
     },
     from(table) {
       assert.ok(allowed.has(table),'Only bounded CRM appointment dependencies: '+table);
-      let fields='*',filters=[],values=[],orders=[],limit=null,insert=null;
+      let fields='*',filters=[],values=[],orders=[],limit=null,insert=null,update=null;
       const q={
         select(columns){fields=columns;assert.ok(fields==='*'||fields.split(',').every(v=>/^[a-z_][a-z0-9_]*$/.test(v.trim())));return q;},
         eq(k,v){return add(k,'=',v);},gte(k,v){return add(k,'>=',v);},lt(k,v){return add(k,'<',v);},lte(k,v){return add(k,'<=',v);},
@@ -39,6 +41,7 @@ export function appointmentNativeAdapter(fixture) {
         order(k,options){orders.push(identifier(k)+(options?.ascending===false?' desc':' asc'));return q;},
         limit(n){assert.ok(Number.isInteger(n)&&n>0&&n<=500);limit=n;return q;},
         insert(value){assert.equal(table,'audit_logs','No direct domain writes');assert.equal(insert,null);insert=value;return q;},
+        update(value){assert.equal(table,'appointments','Only legacy diagnostic appointment PATCH');assert.equal(update,null);update=value;return q;},
         maybeSingle(){return run(true);},single(){return run(true);},then(resolve,reject){return run(false).then(resolve,reject);},
       };
       function bind(v){values.push(Array.isArray(v)?JSON.stringify(v):v);return '$'+values.length;}
@@ -48,8 +51,14 @@ export function appointmentNativeAdapter(fixture) {
         const projection=fields==='*'?'*':fields.split(',').map(v=>identifier(v.trim())).join(',');
         let sql;
         if(insert){const columns=Object.keys(insert);sql=`insert into public.${identifier(table)} (${columns.map(identifier).join(',')}) values (${columns.map(k=>bind(insert[k])).join(',')}) returning ${projection}`;controls.writes.push({table,columns});}
+        else if(update){assert.ok(filters.length);const columns=Object.keys(update);sql=`update public.${identifier(table)} set ${columns.map(k=>identifier(k)+'='+bind(update[k])).join(',')} where ${filters.join(' and ')} returning ${projection}`;
+          controls.writes.push({table,columns});if(controls.beforePatch)await controls.beforePatch();}
         else {sql=`select ${projection} from public.${identifier(table)} where ${filters.join(' and ')}${orders.length?' order by '+orders.join(','):''}${limit?' limit '+limit:''}`;controls.reads.push({table,fields});}
-        try {const rows=JSON.parse(JSON.stringify((await query(sql,values)).rows));assert.ok(!single||rows.length<=1);return {data:single?rows[0]??null:rows,error:null};}
+        // PostgREST serializes timestamps in PostgreSQL, before a JS Date can
+        // discard microseconds. Preimage comparisons must use that real shape.
+        const serialized=insert||update?`with owned_projection as (${sql}) select row_to_json(owned_projection) value from owned_projection`
+          :`select row_to_json(owned_projection) value from (${sql}) owned_projection`;
+        try {const rows=(await query(serialized,values)).rows.map(row=>row.value);assert.ok(!single||rows.length<=1);return {data:single?rows[0]??null:rows,error:null};}
         catch(e){controls.errors.push({table,code:e.code});return {data:null,error:{code:e.code,message:'PRIVATE_NATIVE_APPOINTMENT_QUERY'}};}
       }
       return q;
@@ -83,7 +92,7 @@ export async function appointmentNativeServer(handler,script='') {
       'Content-Security-Policy':"default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'"})
       .end('<!doctype html><html lang="ru"><meta name="viewport" content="width=device-width,initial-scale=1"><div id="root"></div><script src="/bundle.js"></script></html>');return;}
     if(req.method==='GET'&&url.pathname==='/favicon.ico'){out.writeHead(204).end();return;}
-    if(req.method!=='POST'||url.pathname!=='/api/crm/appointments'){out.writeHead(404).end();return;}
+    if(!['POST','PATCH','DELETE'].includes(req.method)||url.pathname!=='/api/crm/appointments'){out.writeHead(404).end();return;}
     const run=async()=>{
       req.query={path:['appointments'],...Object.fromEntries(url.searchParams)};
       // The real catch-all owns body parsing, Auth and workspace resolution.

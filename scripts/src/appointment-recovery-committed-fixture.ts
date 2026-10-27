@@ -101,6 +101,7 @@ let app;
 fixture.mount=()=>{app=createRoot(document.getElementById('root'));flushSync(()=>app.render(<RecoverySlice/>));};
 fixture.unmount=()=>flushSync(()=>app.unmount());
 fixture.draft=()=>flushSync(()=>{fixture.view.setForm(formFromAppointment(${JSON.stringify(visit)},clinicTimeZone));fixture.view.setEditingId(null);fixture.view.setModalOpen(true);});
+fixture.edit=item=>flushSync(()=>{const current=appointmentFromApi(item);fixture.view.setItems([current]);fixture.view.setForm(formFromAppointment(current,clinicTimeZone));fixture.view.setEditingId(current.id);fixture.view.setModalOpen(true);});
 fixture.start=()=>{const task={done:false,error:null};fixture.tasks.push(task);task.promise=fixture.view.submitForm().then(()=>{task.done=true;},e=>{task.error=e.message;task.done=true;});};
 fixture.capture=()=>{const action=fixture.view.submitForm;return()=>{const task={done:false,error:null};fixture.tasks.push(task);task.promise=action().then(()=>{task.done=true;},e=>{task.error=e.message;task.done=true;});};};
 fixture.snapshot=()=>({items:fixture.view.items,form:fixture.view.form,selectedDate:fixture.view.selectedDate,modalOpen:fixture.view.modalOpen,saving:fixture.view.saving,

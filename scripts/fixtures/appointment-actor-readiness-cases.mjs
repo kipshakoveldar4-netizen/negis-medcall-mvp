@@ -4,6 +4,7 @@ import { legacyAppointmentReadinessQuery } from './appointment-preview-readiness
 
 const read='public.read_crm_appointment_request_v2(uuid,uuid,uuid,text,uuid,text)';
 const create='public.create_crm_appointment_v2(uuid,uuid,uuid,text,uuid,text,jsonb,jsonb,text)';
+const patch='public.patch_crm_appointment_as_actor(uuid,uuid,uuid,text,uuid,jsonb,jsonb)';
 const routine='routine:'+read;
 const blockers=async db=>(await db.query(appointmentActorReadinessQuery)).rows.filter(r=>!r.ready).map(r=>r.check_name);
 
@@ -18,18 +19,25 @@ export async function exerciseAppointmentReadinessBeforeCutover(db,t){
 export async function exerciseAppointmentReadiness(db,t){
   await t.test('current metadata gate passes the selected schema and is unique, boolean and bounded',async()=>{
     const result=(await db.query(appointmentActorReadinessQuery)).rows;
-    assert.equal(result.length,93);assert.equal(new Set(result.map(r=>r.check_name)).size,result.length);
+    assert.equal(result.length,100);assert.equal(new Set(result.map(r=>r.check_name)).size,result.length);
     assert.ok(result.every(r=>typeof r.ready==='boolean'));assert.deepEqual(result.filter(r=>!r.ready),[]);
   });
   for(const [sql,failure] of [
     ['alter table staff_users rename column auth_user_id to owned_missing_auth','column:staff_users.auth_user_id'],
     ['alter table appointments alter column price_minor type numeric','column:appointments.price_minor'],
+    ['grant update on appointments to service_role','appointments:server_access'],
+    ['grant update(notes) on appointments to service_role','appointments:server_access'],
+    ['revoke select on appointments from service_role','appointments:server_access'],
     [`alter function ${read} rename to owned_missing_v2_reader`,routine],
     [`alter function ${read} owner to service_role`,routine],
     [`alter function ${read} security invoker`,routine],
     [`alter function ${read} set search_path=public`,routine],
     [`grant execute on function ${read} to service_role with grant option`,routine],
     [`revoke execute on function ${create} from service_role`,'execute:service_role:'+create],
+    [`alter function ${patch} rename to owned_missing_patch`,'routine:'+patch],
+    [`alter function ${patch} security invoker`,'routine:'+patch],
+    [`revoke execute on function ${patch} from service_role`,'execute:service_role:'+patch],
+    [`grant execute on function ${patch} to public`,'execute:anon:'+patch],
     [`grant execute on function ${read} to public`,'execute:anon:'+read],
     ['grant execute on function public.create_crm_appointment_once(uuid,uuid,uuid,text,jsonb,jsonb,text) to service_role','execute:service_role:public.create_crm_appointment_once(uuid,uuid,uuid,text,jsonb,jsonb,text)'],
     ['alter table crm_appointment_request_actors disable row level security','receipt:shape:crm_appointment_request_actors'],
@@ -77,5 +85,11 @@ export async function exerciseAppointmentReadiness(db,t){
       (select jsonb_agg(p.proacl order by p.oid) from pg_catalog.pg_proc p where p.pronamespace='public'::regnamespace) acl`)).rows[0];
     const before=await snapshot();await db.query(buildAppointmentActorReadiness());assert.deepEqual(await snapshot(),before);
     assert.deepEqual(await blockers(db),[]);
+  });
+}
+
+export async function exerciseAppointmentPatchReadinessBeforeCutover(db,t){
+  await t.test('a complete create/replay schema is not ready for current API PATCH before 116',async()=>{
+    assert.deepEqual((await blockers(db)).sort(),['appointments:server_access','routine:'+patch,...['anon','authenticated','service_role'].map(role=>'execute:'+role+':'+patch)].sort());
   });
 }

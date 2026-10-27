@@ -4842,6 +4842,18 @@ function checkAppointmentRequestError(error: { code?: unknown } | null) {
   if (code === "P6406") throw new AppointmentRequestError(404, "appointment_request_access_denied", "Запись недоступна");
 }
 
+function checkAppointmentPatchError(error: { code?: unknown } | null) {
+  if (!error) return;
+  const code = readString(error.code);
+  if (["PGRST202", "42883", "42703", "PGRST204", "42P01", "PGRST205", "P1165", "P6405"].includes(code)) {
+    throw new AppointmentRequestError(503, "appointment_patch_unavailable", "Не удалось подтвердить правку: администратору нужно проверить миграцию 116");
+  }
+  if (["P1162", "P6404"].includes(code)) throw new AppointmentRequestError(403, "appointment_patch_access_denied", "Нет доступа к изменению записи");
+  if (code === "P1163") throw new AppointmentRequestError(404, "appointment_patch_access_denied", "Запись недоступна");
+  if (["P1164", "40P01", "40001"].includes(code)) throw new AppointmentRequestError(409, "appointment_patch_conflict", "Запись изменилась. Обновите список перед повторным сохранением.");
+  if (["P1161", "22P02", "22007", "22008"].includes(code)) throw new AppointmentRequestError(400, "appointment_patch_invalid", "Проверьте данные правки записи");
+}
+
 function appointmentRequestFingerprint(body: JsonRecord, workspaceId: string): string {
   // Hash the original intent, before resolving clients/catalogues or filling in
   // the current staff identity. Generated IDs and timestamps are not intent.
@@ -5488,6 +5500,7 @@ function staffPatchRejection(
 }
 
 async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelResponse) {
+  if (resource === "appointments") res.setHeader("Cache-Control", "private, no-store");
   const config = configs[resource];
   const body = asRecord(req.body);
   const updates = asRecord(body.updates);
@@ -5856,21 +5869,6 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       }
     }
 
-    if (patchedEntity === "appointment" && allowsOutsideSchedule(patchBody)) {
-      // Обход оставляет след. Метка для него уже есть в ленте изменений, и
-      // запись «вне графика», которую никто не может найти потом, — это ровно
-      // то, ради чего журнал и заводили.
-      await recordCrmChange({
-        supabase,
-        workspaceId,
-        entity: "appointment",
-        entityId: id,
-        action: "booked_outside_schedule",
-        changes: [],
-        ...journalActor(req),
-      });
-    }
-
     if (patchedEntity === "appointment" && !allowsOutsideSchedule(patchBody)) {
       // Свой гейт, по своим полям: график зависит от врача и времени начала, а
       // длительность на него не влияет — проверяется только начало визита.
@@ -5898,6 +5896,21 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
 
     const runUpdate = async (candidate: JsonRecord) => {
+      if (resource === "appointments") {
+        const actor = readWorkspaceContext(req);
+        if (!isUuid(actor?.staffUserId) || !isUuid(actor?.userId)) {
+          throw new AppointmentRequestError(403, "appointment_patch_access_denied", "Нет доступа к изменению записи");
+        }
+        const result = await supabase.rpc("patch_crm_appointment_as_actor", {
+          p_workspace_id: workspaceId, p_staff_user_id: actor.staffUserId, p_auth_user_id: actor.userId,
+          p_actor_role: actor.role, p_appointment_id: id, p_before: before, p_patch: candidate,
+        });
+        checkAppointmentPatchError(result.error);
+        if (!result.error && (asRecord(result.data).id !== id || asRecord(result.data).workspace_id !== workspaceId)) {
+          throw new AppointmentRequestError(503, "appointment_patch_unavailable", "Сервер не подтвердил изменённую запись. Обновите список.");
+        }
+        return result;
+      }
       if (creativeMetadataPatch) Object.assign(candidate, creativeMetadataPatch);
       if (resource === "leads" && isMortgageAdminSelfAssignment(req, candidate)) {
         return await saveMortgageAdminSelfLead(supabase, req, candidate, id);
@@ -5956,7 +5969,7 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       ({ data, error } = await runUpdate(fallback.row));
     }
 
-    if (error && (resource === "appointments" || resource === "deals")) {
+    if (error && resource === "deals") {
       const retried = await retryWithoutMissingColumns(resource, row, "saving", { data, error }, runUpdate);
       data = retried.data as typeof data;
       error = retried.error as typeof error;
@@ -6014,11 +6027,6 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       throw new Error(error.message);
     }
 
-    if (resource === "appointments" && asRecord(data).status === "arrived") {
-      const refreshed = await supabase.from("appointments").select("*")
-        .eq("workspace_id", workspaceId).eq("id", id).single();
-      if (!refreshed.error && refreshed.data) data = refreshed.data;
-    }
     const item = redactContacts(
       config.fromRow(asRecord(data)),
       readWorkspaceContext(req)?.role,
@@ -6026,6 +6034,11 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     );
 
     if (patchedEntity) {
+      if (patchedEntity === "appointment" && allowsOutsideSchedule(patchBody)) {
+        // A refused atomic write must not leave a fabricated override event.
+        await recordCrmChange({ supabase, workspaceId, entity: "appointment", entityId: id,
+          action: "booked_outside_schedule", changes: [], ...journalActor(req) });
+      }
       // Сравнивается с `row`, а не с сохранённой строкой: в `row` лежит ровно
       // то, чего коснулась правка, поэтому поле, которого патч не касался, не
       // попадёт в ленту даже как «не изменилось».
@@ -6096,6 +6109,9 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       ...(unsaved.length > 0 ? { unsaved: unsavedFieldsFor(unsaved) } : {}),
     }));
   } catch (error) {
+    if (error instanceof AppointmentRequestError) {
+      return sendJson(res, error.statusCode, { ...errorBody(error.message), code: error.code });
+    }
     if (error instanceof MortgageSelfLeadError) {
       return sendJson(res, error.statusCode, { ...errorBody(error.message), code: error.code });
     }

@@ -31,7 +31,7 @@ async function rejects(sql: string, code: string) {
 }
 before(async () => {
   await db.exec("create role anon; create role authenticated; create role service_role bypassrls;");
-  const numbers = new Set([9, 10, 11, 12, 13, 14, 19, 20, 29, 30, 32, 33, 34, 36, 40, 43, 45, 55, 61, 63, 64]);
+  const numbers = new Set([9, 10, 11, 12, 13, 14, 19, 20, 29, 30, 32, 33, 34, 35, 36, 40, 43, 45, 52, 53, 54, 55, 56, 57, 61, 63, 64, 72, 73, 102]);
   for (const file of (await readdir(path.join(root, "migrations"))).sort()) {
     if (!numbers.has(Number(file.slice(0, 3)))) continue;
     try {
@@ -45,6 +45,7 @@ before(async () => {
   // snapshot or a synthetic receipt implementation. 059/065 remain excluded.
   await db.exec(await readFile(path.join(root, "migrations/076_crm_sale_create_requests.sql"), "utf8"));
   await db.exec(await readFile(path.join(root, "migrations/115_appointment_request_actor.sql"), "utf8"));
+  await db.exec(await readFile(path.join(root, "migrations/116_appointment_patch_actor.sql"), "utf8"));
 });
 after(() => db.close());
 beforeEach(async () => {
@@ -69,6 +70,8 @@ function apiDatabase(rpcRole: "postgres" | "service_role" | "anon" | "authentica
   };
   return {
     async rpc(name: string, args: Record<string, unknown>) {
+      if (name === "patch_crm_appointment_as_actor") queries.push({ table: "appointments", operation: "rpc:patch_crm_appointment_as_actor",
+        columns: "*", filters: [["id", "=", args.p_appointment_id], ["workspace_id", "=", args.p_workspace_id]] });
       const calls: Record<string, { sql: string; params: unknown[] }> = {
         create_crm_appointment_with_new_client: {
           sql: "select public.create_crm_appointment_with_new_client($1::uuid, $2::jsonb, $3::jsonb) as item",
@@ -82,6 +85,11 @@ function apiDatabase(rpcRole: "postgres" | "service_role" | "anon" | "authentica
           sql: "select public.create_crm_appointment_v2($1::uuid,$2::uuid,$3::uuid,$4,$5::uuid,$6,$7::jsonb,$8::jsonb,$9) as item",
           params: [args.p_workspace_id, args.p_staff_user_id, args.p_auth_user_id, args.p_actor_role, args.p_request_key, args.p_request_fingerprint,
             args.p_new_client === null ? null : JSON.stringify(args.p_new_client), JSON.stringify(args.p_appointment), args.p_client_match],
+        },
+        patch_crm_appointment_as_actor: {
+          sql: "select public.patch_crm_appointment_as_actor($1::uuid,$2::uuid,$3::uuid,$4,$5::uuid,$6::jsonb,$7::jsonb) as item",
+          params: [args.p_workspace_id, args.p_staff_user_id, args.p_auth_user_id, args.p_actor_role, args.p_appointment_id,
+            JSON.stringify(args.p_before), JSON.stringify(args.p_patch)],
         },
         read_crm_sale_create_request: {
           sql: "select public.read_crm_sale_create_request($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::text) as item",
@@ -149,13 +157,15 @@ function apiDatabase(rpcRole: "postgres" | "service_role" | "anon" | "authentica
       const savepoint = operation !== "select" ? "api_write" : table === "workspace_settings" ? "api_settings" : null;
       if (savepoint) await database.exec(`savepoint ${savepoint}`);
       try {
-        const result = await database.query(sql, params);
+        const serialized = operation === "select" ? `select row_to_json(owned_row) value from (${sql}) owned_row`
+          : `with owned_row as (${sql}) select row_to_json(owned_row) value from owned_row`;
+        const result = await database.query<{ value: Record<string, unknown> }>(serialized, params);
         if (savepoint) await database.exec(`release savepoint ${savepoint}`);
         // PostgREST returns SQL DATE as YYYY-MM-DD, not a JS Date timestamp.
-        if (table === "clinic_doctor_shifts") for (const row of result.rows as Record<string, unknown>[]) {
+        if (table === "clinic_doctor_shifts") for (const row of result.rows.map(row => row.value)) {
           for (const key of ["on_date", "on_date_end"]) if (row[key] instanceof Date) row[key] = row[key].toISOString().slice(0, 10);
         }
-        const rows = JSON.parse(JSON.stringify(result.rows));
+        const rows = result.rows.map(row => row.value);
         return { data: single ? rows[0] ?? null : rows, error: null };
       } catch (error) {
         if (savepoint) await database.exec(`rollback to savepoint ${savepoint}; release savepoint ${savepoint}`);
@@ -1119,6 +1129,7 @@ for (const { label, author } of [
       if (method === "PATCH") {
         const writes = reply.queries.filter(query => query.operation !== "select");
         assert.deepEqual(writes.map(query => query.table), ["appointments", "audit_logs"]);
+        assert.equal(writes[0].operation, "rpc:patch_crm_appointment_as_actor", "No direct service UPDATE fallback");
         assert.deepEqual(writes[0].filters, [["id", "=", visit.id], ["workspace_id", "=", id(1)]]);
       } else {
         assert.deepEqual(reply.queries.filter(query => query.operation !== "select"), []);
@@ -1714,8 +1725,11 @@ for (const role of ["receptionist", "admin", "manager"] as const) {
     assert.equal(receipt.appointment_id, appointmentId);
     const listed = await call("appointments", "GET");
     assert.equal(listed.status, 200, JSON.stringify(listed.body));
-    assert.deepEqual((listed.body.data as { items: Record<string, unknown>[] }).items.find(item => item.id === appointmentId),
-      { ...visit, startsAt: "2026-10-03T04:00:00.000Z", time: "2026-10-03T04:00:00.000Z" });
+    const listedVisit = (listed.body.data as { items: Record<string, unknown>[] }).items.find(item => item.id === appointmentId)!;
+    for (const field of ["startsAt", "time"]) assert.equal((await db.query<{ same: boolean }>(
+      "select $1::timestamptz=$2::timestamptz same", [listedVisit[field], "2026-10-03T04:00:00.000Z"],
+    )).rows[0].same, true, "Equivalent PostgREST timestamp forms retain the exact instant");
+    assert.deepEqual({ ...listedVisit, startsAt: visit.startsAt, time: visit.time }, visit);
     const afterCreate = await retryCounts();
     assert.equal(afterCreate.clients, before.clients);
     assert.equal(afterCreate.appointments, Number(before.appointments) + 1);

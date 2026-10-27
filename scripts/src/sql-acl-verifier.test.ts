@@ -18,6 +18,19 @@ const allowed = [
   "create function public.f() returns text language sql as $$ select 'grant execute on function public.f() to anon;'; $$;",
 ];
 
+test("only exact reviewed 116 can use parameter-bound appointment DML, without weakening ACL parsing", async () => {
+  const source = await readFile(new URL("../../migrations/116_appointment_patch_actor.sql", import.meta.url), "utf8");
+  assert.doesNotThrow(() => assertNoBrowserFunctionGrants(source));
+  assert.equal(analyzeSqlAcl(source).acls.filter(acl => acl.action === "grant").length, 1);
+  for (const modified of [source + "\ngrant execute on function public.f() to anon;",
+    source.replace("assignments||", "untrusted_assignment||"),
+    source.replace("where workspace_id=$2 and id=$3", "where id=$3"),
+    source.replace("using next_row,p_workspace_id,p_appointment_id", "using forged_row,p_workspace_id,p_appointment_id")]) {
+    assert.notEqual(modified, source);
+    assert.throws(() => assertNoBrowserFunctionGrants(modified));
+  }
+});
+
 for (const [index, sql] of allowed.entries()) {
   test(`ACL accepts statically established non-browser recipients ${index + 1}`, () => {
     assert.doesNotThrow(() => assertNoBrowserFunctionGrants(sql));

@@ -8,9 +8,9 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-115, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 107);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 107 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-116, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 108);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 108 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
@@ -209,8 +209,23 @@ test('104 preserves both report business statements and adds only a locked autho
 test('all local reload notifications are retained and every dynamic SQL line has its original source location', () => {
   assert.ok(chain.reduce((n, entry) => n + entry.evidence.notifications.length, 0) > 30);
   const dynamic = chain.filter(entry => entry.evidence.dynamicSqlLines.length);
-  assert.deepEqual(dynamic.map(entry => Number(entry.file.slice(0, 3))), [62, 79, 82, 86, 88, 89, 90, 91]);
-  for (const entry of dynamic) for (const line of entry.evidence.dynamicSqlLines) assert.match(entry.source.split('\n')[line - 1], /execute\s+format/i);
+  assert.deepEqual(dynamic.map(entry => Number(entry.file.slice(0, 3))), [62, 79, 82, 86, 88, 89, 90, 91, 116]);
+  for (const entry of dynamic) for (const line of entry.evidence.dynamicSqlLines) {
+    if (entry.file.startsWith('116_')) assert.equal(entry.source.split('\n')[line - 1].trim(),
+      "execute 'update public.appointments set '||assignments||' where workspace_id=$2 and id=$3'");
+    else assert.match(entry.source.split('\n')[line - 1], /execute\s+format/i);
+  }
+});
+
+test('116 admits only a source-reviewed tenant/actor patch with bound values and no new table grants',()=>{
+  const entry=chain.find(item=>item.file.startsWith('116_'));
+  assert.deepEqual(entry.evidence.tables,[]);assert.deepEqual(entry.evidence.rls,[]);
+  assert.deepEqual(entry.evidence.functions.map(fn=>fn.name),['public.patch_crm_appointment_as_actor']);
+  assert.equal(entry.evidence.dynamicSqlLines.length,1);assert.deepEqual(entry.evidence.storageCatalogueLines,[]);
+  assert.ok(entry.source.includes("format('%1$I=($1).%1$I',k)"));
+  assert.ok(entry.source.includes('using next_row,p_workspace_id,p_appointment_id'));
+  assert.ok(entry.source.includes('jsonb_object_keys(p_patch) k where k<>all'));
+  assert.doesNotMatch(entry.source,/grant\s+(?:select|insert|update|delete)|alter\s+table|create\s+policy/i);
 });
 
 for (const sql of [

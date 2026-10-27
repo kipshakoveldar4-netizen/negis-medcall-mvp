@@ -84,7 +84,7 @@
     "test:site-intake-http": "node --import tsx --test ./fixtures/site-intake-browser.test.mjs",
     "test:arrival-payment": "tsx --test ./src/medina-arrival-payment.test.ts",
     "test:appointment-requests": "tsx --test ./src/medina-appointment-requests.test.ts",
-    "test:crm-appointment-native-http": "tsx --test ./fixtures/crm-appointment-native-http.test.mjs",
+    "test:crm-appointment-native-http": "tsx --test --test-concurrency=1 ./fixtures/crm-appointment-native-http.test.mjs ./fixtures/crm-appointment-patch-native-http.test.mjs",
     "test:appointment-preview-readiness": "node --test ./fixtures/appointment-preview-readiness.test.mjs ./fixtures/appointment-actor-readiness.test.mjs",
     "test:appointment-requests-postgres": "node --test ./fixtures/appointment-requests-postgres.test.mjs",
     "test:appointment-capacity-postgres": "node --test ./fixtures/appointment-capacity-postgres.test.mjs",

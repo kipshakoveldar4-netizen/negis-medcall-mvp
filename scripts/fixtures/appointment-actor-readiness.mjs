@@ -1,4 +1,4 @@
-// Current post-115 metadata contract. No environment, network, business reads,
+// Current post-115/116 metadata contract. No environment, network, business reads,
 // domain RPC execution or migration application belongs in this module.
 const functions = [
   ['public.create_crm_appointment_with_new_client(uuid,jsonb,jsonb)','jsonb','v',true,false,'11bb49a22da2ff5367e4769dd67f1c6857434f765a5798d0666508cc8bca7584',['p_workspace_id','p_client','p_appointment']],
@@ -9,6 +9,7 @@ const functions = [
   ['public.crm_appointment_targets_actor(jsonb,jsonb)','boolean','i',false,false,'637235ede2ebb6c740d880ccc9a26a18717ff06d5391e882061655b7ea2438a8',['p_identity','p_appointment']],
   ['public.read_crm_appointment_request_v2(uuid,uuid,uuid,text,uuid,text)','jsonb','v',true,true,'4e51e17f2c895b455fdee7bb761e59dece26c5f3a697a7e918a3a312ec5c1c72',['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_request_key','p_request_fingerprint']],
   ['public.create_crm_appointment_v2(uuid,uuid,uuid,text,uuid,text,jsonb,jsonb,text)','jsonb','v',true,true,'f50bb91918c8675fa94750cff9f8e486166412d5bbf4dcc4dbc23fba00520400',['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_request_key','p_request_fingerprint','p_new_client','p_appointment','p_client_match']],
+  ['public.patch_crm_appointment_as_actor(uuid,uuid,uuid,text,uuid,jsonb,jsonb)','jsonb','v',true,true,'e6f4e113b5e77a8896ae0c72ef7c9b6ae0a7179e015b587bb3a32a8256c26d81',['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_appointment_id','p_before','p_patch']],
 ];
 const columns = {
   workspaces: {id:'uuid'},
@@ -16,7 +17,7 @@ const columns = {
   clinic_doctors: {id:'uuid',workspace_id:'uuid',staff_user_id:'uuid',full_name:'text',capacity:'smallint',is_active:'boolean'},
   clinic_services: {id:'uuid',workspace_id:'uuid',doctor_id:'uuid',is_active:'boolean'},
   clients: {id:'uuid',workspace_id:'uuid',full_name:'text',phone:'text',whatsapp:'text',source:'text',status:'text',notes:'text',last_visit_at:'timestamp with time zone',updated_at:'timestamp with time zone'},
-  appointments: {id:'uuid',workspace_id:'uuid',client_id:'uuid',client_name:'text',client_phone:'text',whatsapp:'text',service:'text',doctor_name:'text',starts_at:'timestamp with time zone',duration_minutes:'integer',price_minor:'bigint',status:'text',notes:'text',source:'text',updated_at:'timestamp with time zone',created_by_staff_user_id:'uuid',doctor_id:'uuid',service_id:'uuid',service_items:'jsonb'},
+  appointments: {id:'uuid',workspace_id:'uuid',client_id:'uuid',client_name:'text',client_phone:'text',whatsapp:'text',service:'text',doctor_name:'text',starts_at:'timestamp with time zone',duration_minutes:'integer',price_minor:'bigint',status:'text',notes:'text',source:'text',updated_at:'timestamp with time zone',created_at:'timestamp with time zone',arrival_sale_id:'uuid',created_by_staff_user_id:'uuid',doctor_id:'uuid',service_id:'uuid',service_items:'jsonb'},
 };
 const receiptColumns = {
   crm_appointment_create_requests: [['workspace_id','uuid',true],['staff_user_id','uuid',true],['request_key','uuid',true],['request_fingerprint','text',true],['appointment_id','uuid',false],['client_created','boolean',true],['client_match','text',true],['created_at','timestamp with time zone',true]],
@@ -36,6 +37,11 @@ receipts(relation,shape) as (values
 ${Object.entries(receiptColumns).map(([table,shape])=>'('+literal(table)+','+literal(JSON.stringify(shape))+'::jsonb)').join(',\n')}
 ), checks as (
   select 'inspector:postgres' check_name,current_user='postgres' ready
+  union all select 'appointments:server_access',case when pg_catalog.to_regclass('public.appointments') is null
+    or pg_catalog.to_regrole('service_role') is null then false else
+      pg_catalog.has_table_privilege('service_role','public.appointments','SELECT')
+      and not pg_catalog.has_table_privilege('service_role','public.appointments','INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER')
+      and not pg_catalog.has_any_column_privilege('service_role','public.appointments','INSERT,UPDATE') end
   union all select 'roles:service_boundary',exists(select 1 from pg_catalog.pg_roles where rolname='service_role' and rolbypassrls and not rolsuper)
   union all select 'roles:browser_boundary',(select count(*)=2 from pg_catalog.pg_roles where rolname in ('anon','authenticated'))
     and not exists(select 1 from pg_catalog.pg_roles b cross join pg_catalog.pg_roles p where b.rolname in ('anon','authenticated')
@@ -87,9 +93,9 @@ ${Object.entries(receiptColumns).map(([table,shape])=>'('+literal(table)+','+lit
 select check_name,coalesce(ready,false) ready from checks order by check_name;`;
 
 export function buildAppointmentActorReadiness() {
-  return `-- Current appointment API v2: read-only post-115 metadata gate.
+  return `-- Current appointment API: v2 create/replay + actor PATCH, post-115/116 read-only gate.
 -- Run only in the approved test database after verifying its separate identity.
--- All checks must be true; legacy RPCs must be closed, only v2 entries open.
+-- All checks must be true; legacy RPCs closed, only current server entries open.
 -- NOT end-to-end, concurrency or payment acceptance. No business rows are read.
 -- This does not attest API/build binding, real Auth or legacy receipt recovery.
 begin read only;

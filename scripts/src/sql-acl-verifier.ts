@@ -1,5 +1,6 @@
 // A deliberately bounded migration verifier, not a general PostgreSQL parser.
 // Unsupported ACL syntax must be reviewed, never silently treated as no grant.
+import { digest, migrationReview } from "../fixtures/migration-chain-review.mjs";
 type Token = { kind: "word" | "quoted" | "string" | "body" | "symbol"; value: string };
 export type SqlObject = { schema: string; name: string; args?: string[] };
 export type SqlAcl = {
@@ -267,6 +268,7 @@ function catalogFunctionGrant(tokens: Token[], at: number, expression: Token[], 
 
 export function analyzeSqlAcl(source: string): SqlAclAnalysis {
   const analysis: SqlAclAnalysis = { acls: [], functions: [], rls: [], policies: [], triggers: [], triggerEdits: [] };
+  const reviewedAppointmentPatch = digest(source) === migrationReview["116_appointment_patch_actor.sql"];
   function visit(tokens: Token[]): void {
     for (let i = 0; i < tokens.length; i++) {
       const token = tokens[i];
@@ -278,6 +280,11 @@ export function analyzeSqlAcl(source: string): SqlAclAnalysis {
         && !keyword(tokens[i - 1], "grant") && !keyword(tokens[i - 1], "revoke")) {
         const end = tokens.findIndex((part, j) => j > i && part.value === ";");
         const expression = tokens.slice(i + 1, end < 0 ? tokens.length : end);
+        // This source-pinned DML binds all values and admits only fixed column
+        // names. Every altered/extended source still hits the strict rejection.
+        if (reviewedAppointmentPatch && JSON.stringify(expression) === JSON.stringify(lex(
+          "'update public.appointments set '||assignments||' where workspace_id=$2 and id=$3' using next_row,p_workspace_id,p_appointment_id",
+        ))) { i = end; continue; }
         const literal = expression[0]?.kind === "string" ? expression[0]
           : keyword(expression[0], "format") && expression[1]?.value === "(" && expression[2]?.kind === "string" ? expression[2] : null;
         if (!literal) throw new Error("Unverifiable dynamic EXECUTE may grant privileges");

@@ -355,37 +355,22 @@ test("DS5 скрытый врач не попадает в новую запис
   assert.equal(writtenTo(allowed.log, "appointments")?.doctor_id, HIDDEN_DOCTOR_ID);
 });
 
-test("DS6 запись существующего клиента до миграции теряет только связь", async () => {
+test("DS6 атомарная запись отказывает без нужной колонки, не отбрасывая связь", async () => {
   const call = await loadRouter({
     rows: { clinic_doctors: [activeDoctor], clients: [{ id: CLIENT_ID, workspace_id: WORKSPACE_A }] },
     missingColumns: ["doctor_id"],
   });
-  const { res, log, warnings: warned } = await call({
+  const { res, log } = await call({
     resource: "appointments",
     method: "POST",
     body: { client: "Пациент", clientId: CLIENT_ID, doctorId: DOCTOR_ID, startsAt: MONDAY_INSIDE },
   });
 
-  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  assert.equal(res.statusCode, 503, JSON.stringify(res.body));
+  assert.equal(res.body.code, "appointment_create_unavailable");
   const inserts = log.filter((entry) => entry.table === "appointments" && entry.op === "insert");
-  // Заходов три, и это осознанно. Отказ PostgREST про кэш схемы (PGRST204) не
-  // отличим от «колонки нет вовсе», а кэш отстаёт от базы на секунды после
-  // ALTER TABLE. Поэтому вторая попытка — ДОСЛОВНАЯ: если колонка уже
-  // появилась, связь сохраняется целой, а не срезается молча. И только третья
-  // идёт без колонки. Ожидание «ровно две» здесь стояло до того, как это окно
-  // разобрали, — см. набор test:column-lag, CL9.
-  assert.equal(inserts.length, 3, "отказ, дословный повтор на случай устаревшего кэша, и заход без колонки");
-  assert.equal((inserts[1].filters.__row as Record<string, unknown>).doctor_id, DOCTOR_ID, "повтор идёт целым");
-  assert.equal((inserts[2].filters.__row as Record<string, unknown>).doctor_id, undefined);
-  assert.ok(warned.some((line) => line.includes("033") && line.includes("doctor_id")));
-  // Снимается ровно та колонка, которой нет, и называется её миграция. Снимать
-  // разом все связи значило бы терять связь с услугой в окне, когда не хватает
-  // только связи с врачом: одна применённая миграция молча отменялась бы
-  // другой, ещё не применённой.
-  assert.ok(
-    !warned.some((line) => line.includes("032")),
-    "миграция 032 применена — её колонку снимать не за что",
-  );
+  assert.equal(inserts.length, 1, "No legacy retry after the atomic writer refuses");
+  assert.equal((inserts[0].filters.__row as Record<string, unknown>).doctor_id, DOCTOR_ID);
 });
 
 /* ── Правило графика ── */
@@ -1006,7 +991,7 @@ test("DS34 ночная смена доживает до утра следующ
   assert.equal(outside.res.statusCode, 409, "после конца смены — отказ");
 });
 
-test("DS35 запись существующего клиента теряет только отсутствующую колонку", async () => {
+test("DS35 отказ атомарной записи не снимает ни врача, ни существующую услугу", async () => {
   const call = await loadRouter({
     rows: { clinic_doctors: [activeDoctor], clinic_services: [{ id: SHIFT_ID, workspace_id: WORKSPACE_A, name: "Ботокс", is_active: true }], clients: [{ id: CLIENT_ID, workspace_id: WORKSPACE_A }] },
     missingColumns: ["doctor_id"],
@@ -1017,11 +1002,13 @@ test("DS35 запись существующего клиента теряет �
     body: { client: "Пациент", clientId: CLIENT_ID, doctorId: DOCTOR_ID, serviceId: SHIFT_ID, startsAt: MONDAY_INSIDE },
   });
 
-  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  assert.equal(res.statusCode, 503, JSON.stringify(res.body));
+  assert.equal(res.body.code, "appointment_create_unavailable");
   const inserts = log.filter((entry) => entry.table === "appointments" && entry.op === "insert");
-  const second = inserts[inserts.length - 1].filters.__row as Record<string, unknown>;
-  assert.equal(second.doctor_id, undefined, "отсутствующая колонка снята");
-  assert.equal(second.service_id, SHIFT_ID, "применённая миграция не отменяется ещё не применённой");
+  assert.equal(inserts.length, 1);
+  const first = inserts[0].filters.__row as Record<string, unknown>;
+  assert.equal(first.doctor_id, DOCTOR_ID);
+  assert.equal(first.service_id, SHIFT_ID);
 });
 
 test("DS36 обход графика оставляет след в журнале", async () => {

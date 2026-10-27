@@ -6,6 +6,12 @@ No deployment or cloud migration was performed. Production, Baspana, salons,
 WhatsApp, advertising, providers, financial settings and real payments were not
 accessed or changed. This is not completion of G1-G8 or cloud acceptance.
 
+This records the earlier create/replay candidate and its historical receipts.
+The later [actor PATCH candidate](APPOINTMENT-PATCH-AUTHORITY-2026-10-27.md)
+adds coordinated 116, closes direct service appointment writes and supersedes
+the 93-check metadata gate with 100 checks. The old generated SQL below is
+retained as evidence, not the current API's rollout checklist.
+
 ## Reproduced Failure
 
 The actual compiled CRM catch-all, real Auth/workspace resolution code and
@@ -101,7 +107,7 @@ confirmed-visit day selection defect and extends the actual React/HTTP/native
 lane to +5/two services/zero price/revoked recovery and distinct-key group
 capacity. It does not change 115, attest cloud bindings or close PATCH/delete.
 
-### Current Read-Only Metadata Gate (G7-C54)
+### Historical Read-Only Metadata Gate (G7-C54)
 
 Follow-up base 0dd8d22. The default `appointment-preview-readiness.mjs` CLI and
 exports now generate the post-115 contract, not the historical 063/064 service
