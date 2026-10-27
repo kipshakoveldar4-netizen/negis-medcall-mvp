@@ -26,6 +26,7 @@ import { exercisePartnerEntryAnchor } from './partner-entry-cases.mjs';
 import { exercisePartnerEntryHttp } from './partner-entry-native-http-cases.mjs';
 import { exercisePartnerTerms } from './partner-terms-cases.mjs';
 import { exercisePartnerTermsHttp } from './partner-terms-native-http-cases.mjs';
+import { exerciseAppointmentActor,exerciseAppointmentActorDependencies } from './appointment-actor-cases.mjs';
 
 // Native application-chain acceptance, NOT an authority to release migrations.
 // 001-008 require an undocumented legacy baseline; data/*.sql is deliberately
@@ -165,6 +166,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
   await exerciseVideoQuotaMissing(db,chain.find(entry=>entry.file==='106_generated_video_quota_dispatch.sql').source,t);
   let legacyRlsBefore;
   for (const entry of chain) {
+    if(entry.file==='115_appointment_request_actor.sql')await exerciseAppointmentActorDependencies(db,entry.source,t);
     if(entry.file==='111_creator_command_closure.sql'){
       await reproduceUnfencedCreatorCommand(db,t);await exerciseCreatorClosureRefusals(db,entry.source,t);
     }
@@ -246,6 +248,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     if(entry.file==='112_partner_first_source.sql') await exercisePartnerSources(db,fixture,entry.source,t);
     if(entry.file==='113_partner_entry_anchor.sql'){await exercisePartnerEntryAnchor(db,fixture,entry.source,t);await exercisePartnerEntryHttp(db,fixture,t);}
     if(entry.file==='114_partner_terms_activation.sql'){await exercisePartnerTerms(db,fixture,entry.source,t);await exercisePartnerTermsHttp(db,fixture,t);}
+    if(entry.file==='115_appointment_request_actor.sql')await exerciseAppointmentActor(db,fixture,t);
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
       await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{
@@ -338,7 +341,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
 
   await t.test('RPC-only and read-only server boundaries survive later migrations', async () => {
     for (const table of ['platform_subscription_operations', 'content_telegram_deliveries', 'content_telegram_delivery_guards', 'site_deletion_operations','growth_operator_request_commands','growth_operator_command_fences',
-      'growth_creator_jobs','growth_creator_submissions','growth_creator_commands','growth_creator_events','growth_creator_command_fences','growth_partner_sources']) {
+      'growth_creator_jobs','growth_creator_submissions','growth_creator_commands','growth_creator_events','growth_creator_command_fences','growth_partner_sources','crm_appointment_request_actors']) {
       const result = await one(db, `select has_table_privilege('service_role',$1,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') as tab,
         has_any_column_privilege('service_role',$1,'SELECT,INSERT,UPDATE,REFERENCES') as col`, [`public.${table}`]);
       assert.deepEqual(result, { tab: false, col: false }, `${table}: no direct service access may be restored`);
@@ -359,6 +362,9 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'public.operator_request_command_receipt(public.growth_operator_request_commands)', 'public.confirm_operator_request_command(uuid,uuid,text,uuid,uuid,text)',
       ...operatorLegacySignatures,...partnerSourceHelpers,'public.bind_growth_referral(uuid,text,text)','public.capture_growth_partner_source(uuid,text,text,text)',
       'public.partner_terms_actor(uuid,text,uuid)','public.partner_terms_snapshot(public.growth_contributor_profiles)','public.lock_operator_command_reader(uuid,text,uuid,uuid)',
+      'public.lock_crm_appointment_actor(uuid,uuid,uuid,text)','public.crm_appointment_targets_actor(jsonb,jsonb)',
+      'public.read_crm_appointment_create_request(uuid,uuid,uuid,text)','public.create_crm_appointment_once(uuid,uuid,uuid,text,jsonb,jsonb,text)',
+      'public.create_crm_appointment_with_new_client(uuid,jsonb,jsonb)',
       'public.operator_command_result_v2(uuid,uuid,text,uuid,uuid,text,uuid)',
       'public.site_deletion_operation_receipt(public.site_deletion_operations,boolean)']) {
       assert.equal((await one(db, "select has_function_privilege('service_role',$1,'EXECUTE') as allowed", [signature])).allowed, false, signature);
@@ -371,7 +377,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'read_growth_creator_jobs','execute_growth_creator_job_v2','read_growth_creator_command_v2','close_growth_creator_command_v2',
       'read_growth_creator_directory','read_growth_creator_job_detail',
       'capture_growth_partner_source_v2','purge_growth_partner_sources','claim_growth_partner_source','read_growth_partner_source','bind_growth_partner_source',
-      'execute_growth_partner_terms','read_growth_partner_terms']) {
+      'execute_growth_partner_terms','read_growth_partner_terms','read_crm_appointment_request_v2','create_crm_appointment_v2']) {
       const functions = (await db.query(`select p.oid::regprocedure::text as signature,has_function_privilege('service_role',p.oid,'EXECUTE') as allowed
         from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname=$1`, [name])).rows;
       assert.equal(functions.length, 1, name); assert.equal(functions[0].allowed, true, name);

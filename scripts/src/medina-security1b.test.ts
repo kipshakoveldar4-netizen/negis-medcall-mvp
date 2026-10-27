@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { analyzeSqlAcl, assertNoBrowserFunctionGrants, sameSqlObject, type SqlObject } from "./sql-acl-verifier";
+import { preflightChain } from "../fixtures/migration-chain-review.mjs";
 
 // Medina OS Security-1B — the public schema must expose nothing to the browser
 // roles, and future migrations must not silently reintroduce exposure.
@@ -474,6 +475,62 @@ const RPC_ONLY_TABLES = new Map<string, ReceiptReview>([
   }],
 ]);
 
+// Later command protocols retire legacy service entries. A historical single-
+// migration grant check is no longer their contract. Pin the reviewed *raw*
+// chain and verify final ACLs as well as the native cumulative suite, rather
+// than granting the service role direct access just to satisfy this old test.
+const appointmentEntries = ["read_crm_appointment_request_v2", "create_crm_appointment_v2"];
+const operatorEntries = ["execute_clinic_operator_command_v2", "execute_growth_operator_command_v2", "read_operator_request_command_v2", "close_operator_request_command_v2"];
+const creatorEntries = ["read_growth_creator_jobs", "execute_growth_creator_job_v2", "read_growth_creator_command_v2", "close_growth_creator_command_v2", "read_growth_creator_directory", "read_growth_creator_job_detail"];
+const NATIVE_PRIVATE_TABLES = new Map<string, { creation: string; entries: readonly string[] }>([
+  ["crm_appointment_create_requests", { creation: "064_appointment_create_requests.sql", entries: appointmentEntries }],
+  ["crm_appointment_request_actors", { creation: "115_appointment_request_actor.sql", entries: appointmentEntries }],
+  ["growth_operator_request_commands", { creation: "107_operator_request_commands.sql", entries: operatorEntries }],
+  ["growth_operator_command_fences", { creation: "108_operator_command_closure.sql", entries: operatorEntries }],
+  ...["growth_creator_jobs", "growth_creator_submissions", "growth_creator_commands", "growth_creator_events"].map(table =>
+    [table, { creation: "110_creator_job_workflow.sql", entries: creatorEntries }] as const),
+  ["growth_creator_command_fences", { creation: "111_creator_command_closure.sql", entries: creatorEntries }],
+  ["growth_partner_sources", { creation: "112_partner_first_source.sql", entries: ["capture_growth_partner_source_v2", "purge_growth_partner_sources", "claim_growth_partner_source", "read_growth_partner_source", "bind_growth_partner_source"] }],
+  ...["growth_partner_terms", "growth_partner_term_commands"].map(table =>
+    [table, { creation: "114_partner_terms_activation.sql", entries: ["execute_growth_partner_terms", "read_growth_partner_terms"] }] as const),
+]);
+function assertNativePrivateReceipt(chain: Map<string, string>, table: string) {
+  const review = NATIVE_PRIVATE_TABLES.get(table); assert.ok(review);
+  preflightChain([...chain].filter(([file]) => Number(file.slice(0, 3)) >= 9).map(([file, source]) => ({ file, source })));
+  const relation = { schema: "public", name: table }, creation = inspectAcl(chain.get(review.creation)!);
+  assert.ok(createdTables(normalize(chain.get(review.creation)!)).includes(table));
+  assert.ok(creation.rls.some(r => sameSqlObject(r.object, relation) && r.enabled));
+  for (const role of ["public", "anon", "authenticated", "service_role"]) assert.ok(creation.acls.some(a => a.action === "revoke"
+    && a.kind === "table" && !a.optionOnly && a.privileges.includes("all") && a.roles.includes(role)
+    && a.objects.some(o => sameSqlObject(o, relation))));
+  const analyses = [...chain.values()].map(inspectAcl), declarations = analyses.flatMap(a => a.functions);
+  for (const analysis of analyses) {
+    assert.ok(!analysis.rls.some(r => sameSqlObject(r.object, relation) && !r.enabled));
+    assert.ok(!analysis.policies.some(o => sameSqlObject(o, relation)));
+    assert.ok(!analysis.acls.some(a => a.kind === "table" && a.action === "grant" && a.objects.some(o => sameSqlObject(o, relation))), "No direct or column grants, even temporarily");
+  }
+  const executable = (object: SqlObject, role: string) => {
+    let value = false;
+    for (const analysis of analyses) for (const acl of analysis.acls) if (acl.kind === "function" && !acl.optionOnly
+      && acl.roles.includes(role) && acl.privileges.some(p => p === "all" || p === "execute")
+      && acl.objects.some(o => sameSqlObject(o, object))) {
+      assert.ok(!acl.grantOption); value = acl.action === "grant";
+    }
+    return value;
+  };
+  for (const fn of declarations.filter(f => f.references.some(r => sameSqlObject(r, relation)))) {
+    assert.ok(fn.emptySearchPath && fn.definer, "Private table access needs the reviewed owner boundary");
+    for (const role of ["public", "anon", "authenticated"]) assert.equal(executable(fn.object, role), false);
+    assert.equal(executable(fn.object, "service_role"), review.entries.includes(fn.object.name), "Legacy helpers cannot remain service-callable");
+  }
+  for (const name of review.entries) {
+    const entries = declarations.filter(f => f.object.name === name && f.object.schema === "public");
+    assert.equal(entries.length, 1, "Exactly one reviewed overload for " + name);
+    assert.ok(entries[0].definer && entries[0].emptySearchPath); assert.equal(executable(entries[0].object, "service_role"), true);
+    for (const role of ["public", "anon", "authenticated"]) assert.equal(executable(entries[0].object, role), false);
+  }
+}
+
 test("26a grant checks recognize table lists without accepting similarly named tables or roles", () => {
   const chain = new Map([["local.sql", 'grant select on public.first, public.second to service_role; grant select on table public.third to "service_role" with grant option;']]);
   for (const table of ["first", "second", "third"]) assert.equal(grantsToServiceRole(chain, table), true);
@@ -484,6 +541,7 @@ test("26a grant checks recognize table lists without accepting similarly named t
 });
 
 function assertPrivateReceipt(chain: Map<string, string>, table: string) {
+  if (NATIVE_PRIVATE_TABLES.has(table)) return assertNativePrivateReceipt(chain, table);
   const review = RPC_ONLY_TABLES.get(table);
   assert.ok(review, "an RPC-only exception needs an explicit reviewed migration and exact function signatures");
   const source = chain.get(review.migration) ?? "";
@@ -609,6 +667,15 @@ function assertPrivateReceipt(chain: Map<string, string>, table: string) {
   }
 }
 
+for (const table of NATIVE_PRIVATE_TABLES.keys()) test(`26d current native protocol ${table}: pinned source, closed relation and exact final service entries`, () => {
+  assertNativePrivateReceipt(migrations, table);
+  for (const suffix of [`grant select on public.${table} to service_role;`, `alter table public.${table} disable row level security;`,
+    `create function public.unreviewed_native_reader() returns jsonb language sql security definer set search_path='' as $$select to_jsonb(t) from public.${table} t$$;`]) {
+    const changed = new Map(migrations); changed.set("999_unreviewed_native_change.sql", suffix);
+    assert.throws(() => assertNativePrivateReceipt(changed, table));
+  }
+});
+
 for (const [table, review] of RPC_ONLY_TABLES) {
   test(`26b RPC-only ${table} stays private and reachable through its reviewed functions`, () => {
     assertPrivateReceipt(migrations, table);
@@ -705,7 +772,7 @@ test("26 every new application table is reachable by the server that owns it", (
   for (const [file, source] of migrations) {
     if (PRE_EXPLICIT_GRANT_ALLOWLIST.has(file)) continue;
     for (const table of createdTables(normalize(source))) {
-      if (!grantsToServiceRole(migrations, table) && !RPC_ONLY_TABLES.has(table)) {
+      if (!grantsToServiceRole(migrations, table) && !RPC_ONLY_TABLES.has(table) && !NATIVE_PRIVATE_TABLES.has(table)) {
         offenders.push(`${file}: ${table} is never granted to service_role`);
       }
     }

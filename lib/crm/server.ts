@@ -4832,12 +4832,14 @@ function checkAppointmentRequestError(error: { code?: unknown } | null) {
   if (!error) return;
   const code = readString(error.code);
   if (["PGRST202", "42883", "42703", "PGRST204", "42P01", "PGRST205"].includes(code)) {
-    throw new AppointmentRequestError(503, "appointment_create_unavailable", "Не удалось сохранить запись: администратору нужно проверить миграции 063 и 064");
+    throw new AppointmentRequestError(503, "appointment_create_unavailable", "Не удалось сохранить запись: администратору нужно проверить миграции 063, 064 и 115");
   }
   if (code === "P6402") throw new AppointmentRequestError(409, "appointment_request_conflict", "Этот запрос уже использован для другой записи. Проверьте сохранённую запись перед повтором.");
   if (code === "P6403") throw new AppointmentRequestError(409, "appointment_request_unavailable", "Ранее сохранённая запись больше недоступна. Повторное создание остановлено.");
   if (code === "P6404") throw new AppointmentRequestError(403, "appointment_request_access_denied", "Нет доступа к сохранению записи");
   if (code === "P6401") throw new AppointmentRequestError(400, "appointment_request_invalid", "Проверьте данные запроса записи");
+  if (code === "P6405") throw new AppointmentRequestError(503, "appointment_create_unavailable", "Не удалось подтвердить текущие права. Обновите страницу и повторите проверку записи.");
+  if (code === "P6406") throw new AppointmentRequestError(404, "appointment_request_access_denied", "Запись недоступна");
 }
 
 function appointmentRequestFingerprint(body: JsonRecord, workspaceId: string): string {
@@ -4919,6 +4921,12 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
 
   const config = configs[resource];
   const body = { ...asRecord(req.body) };
+  // Even legacy browsers must use the atomic authority boundary. A generated
+  // server key preserves their previous non-recoverable single-attempt behavior.
+  if (resource === "appointments") {
+    res.setHeader("Cache-Control", "private, no-store");
+    if (!("requestKey" in body)) body.requestKey = randomUUID();
+  }
   const details = [...validationDetails(body, config.requiredPost), ...resourceValidationDetails(resource, body), ...appointmentServicesValidationDetails(resource, body)];
   const keyedAppointment = resource === "appointments" && "requestKey" in body;
   const keyedSale = resource === "deals" && "requestKey" in body;
@@ -4982,7 +4990,7 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
   }));
   const readReplay = async () => {
     if (!appointmentRequest) return null;
-    const result = await supabase.rpc("read_crm_appointment_create_request", appointmentRequest);
+    const result = await supabase.rpc("read_crm_appointment_request_v2", appointmentRequest);
     checkAppointmentRequestError(result.error);
     if (result.error) throw new Error("Appointment receipt read failed");
     return result.data === null ? null : appointmentRequestReceipt(result.data, workspaceId);
@@ -5011,9 +5019,10 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       if (replay) return sendSaleReplay(replay);
     }
     if (keyedAppointment) {
-      const staffUserId = readString(readWorkspaceContext(req)?.staffUserId);
-      if (!isUuid(staffUserId)) throw new AppointmentRequestError(403, "appointment_request_access_denied", "Нет доступа к сохранению записи");
-      appointmentRequest = { p_workspace_id: workspaceId, p_staff_user_id: staffUserId,
+      const actor = readWorkspaceContext(req);
+      if (!isUuid(actor?.staffUserId) || !isUuid(actor?.userId)) throw new AppointmentRequestError(403, "appointment_request_access_denied", "Нет доступа к сохранению записи");
+      appointmentRequest = { p_workspace_id: workspaceId, p_staff_user_id: actor.staffUserId,
+        p_auth_user_id: actor.userId, p_actor_role: actor.role,
         p_request_key: body.requestKey, p_request_fingerprint: appointmentRequestFingerprint(body, workspaceId) };
     }
     // Мастер записывает клиента к СЕБЕ.
@@ -5161,7 +5170,7 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
         return await supabase.rpc("create_crm_sale_once", { ...saleRequest, p_sale: candidate });
       }
       if (appointmentRequest) {
-        return await supabase.rpc("create_crm_appointment_once", { ...appointmentRequest,
+        return await supabase.rpc("create_crm_appointment_v2", { ...appointmentRequest,
           p_new_client: newAppointmentClient ?? null, p_appointment: candidate,
           p_client_match: appointmentClientResolution?.match,
         });

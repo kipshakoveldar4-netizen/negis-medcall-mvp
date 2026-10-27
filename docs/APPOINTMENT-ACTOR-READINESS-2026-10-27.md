@@ -1,0 +1,111 @@
+# Appointment Creation Authority: Local Candidate
+
+Date: 27 October 2026. Base: 2e6150b. Scope: G2-C19 / G7-C53.
+
+No deployment or cloud migration was performed. Production, Baspana, salons,
+WhatsApp, advertising, providers, financial settings and real payments were not
+accessed or changed. This is not completion of G1-G8 or cloud acceptance.
+
+## Reproduced Failure
+
+The actual compiled CRM catch-all, real Auth/workspace resolution code and
+service-role SQL ran against an owned, disposable PostgreSQL 17.11 cluster.
+Only the Auth identity response and SDK transport were synthetic.
+
+After HTTP authorization, replacing either the staff role with `marketer` or
+its `auth_user_id` immediately before the old receipt-reader or writer still
+produced HTTP 201 and a persisted appointment. The four denial assertions
+failed before the fix. Existing `inactive` checks already refused these cases.
+No production incident or customer-data exposure is inferred from this test.
+
+## Candidate
+
+- 115 pins live workspace/staff/Auth identity and the exact role used by HTTP.
+  The staff row remains locked through the domain transaction. Unsupported
+  stronger transaction snapshots fail closed rather than using stale authority.
+- Doctor creation/recovery rechecks the linked card and own-work target under
+  the current identity. Explicit conflicting IDs never become a name fallback.
+  Existing name-only legacy behavior remains; this is not a migration of it.
+- New receipts receive private immutable Auth-origin metadata in the same
+  transaction. The current account on a reused staff row cannot adopt the
+  previous account's result. Old receipts without origin metadata are not
+  backfilled: return a safe conflict for manual reconciliation.
+- Only two v2 RPCs are service-callable. Old 063/064 entries and new internal
+  helpers are explicitly closed. Both receipt relations have RLS and no direct
+  table or column grants, including to the service role.
+- All appointment POSTs use v2, including browsers without a request key. For
+  those legacy requests a server-generated key preserves single-attempt
+  behavior; it does not promise recoverability to that old browser. Missing
+  v2/schema support cannot fall back to a separate client/appointment INSERT.
+- Appointment POST responses explicitly use `private, no-store`.
+- Replay reads one current MVCC appointment row without taking a row lock after
+  the doctor lock. This avoids inverting the editor/capacity-trigger lock order.
+  The transaction still pins the actor and doctor-card authority.
+
+115 verifies owners, private receipt access, exact reviewed dependency bodies
+and the unique staff/doctor identity index before creating anything. It is a
+one-time coordinated candidate, not an instruction to rerun earlier migrations.
+Its raw SHA-256 is
+`3a8f70cd9878ecad79e48acb9f4c847b37ff7589f3e0981398fa95170675cffb`.
+
+## Verification Boundaries
+
+`crm-appointment-native-http` composes actual appointment React actions,
+`crmFetch`/session guards, the compiled catch-all and native SQL. Its frontend
+is an exact bounded action slice, not the complete calendar. SDK/context and
+collection delivery are fictional. It does not prove real Supabase Auth,
+cloud credentials, the full visible calendar or physical mobile devices.
+
+The native cases cover real backend lock waits in both authority orders,
+same-key concurrent HTTP requests, current account/role replacement, private
+origin metadata, legacy non-adoption, old stronger snapshots, doctor-card
+reassignment and replay versus an uncommitted appointment editor. Lost HTTP
+replies and pending A-B-A callbacks do not create a second row or revive an
+obsolete frontend result. Changed catalogues do not replace the stored quote.
+
+Historical query spies now recognize v2 and retain their original query/role/
+advisory assertions. They do not simulate atomicity or database authorization.
+The WASM SQL suite discards cached plans after rolling back DDL-refusal cases;
+native PostgreSQL remains the source for real lock/concurrency acceptance.
+
+The old static receipt checker also needed reconciliation with the 107-115
+command protocols. Their explicit relation inventory now requires the exact
+raw reviewed chain, closed table/column access and final service entry ACLs.
+Unknown source changes, grant injections and unreviewed readers are rejected;
+no direct service grants or test skips were added to make it pass. Native
+cumulative tests independently verify actual final privileges.
+
+The isolated no-network inventory retains 41 readers and the same 931 tests,
+environment key set, network and IPC prohibitions. Only the reviewed CRM
+server source fingerprint changed, from `5b01ce65...` to `26bf696b...`.
+The diff adds no environment reader, new import or external destination.
+
+Final exact runs passed: composed React/HTTP/native suite 33/33; cumulative raw
+009-115 chain, 107 files, 502/502; eight-file regression 495/495; unchanged
+no-network test set 931/931. The two native suites share SQL cases; their counts
+are not independent unique proofs. Both API compiler modes, all workspace
+types, 353 cold-start checks and the root Vite build passed. No new skips.
+The existing tooltip sourcemap and mixed static/dynamic serverAuth warnings
+remain. Protected 059/065 hashes and all five local demo servers are unchanged.
+
+The final native log is `node_modules/.cache/appointment-v2-final-native-verified.log`;
+regression log is `appointment-v2-final-regression-verified.log` in the same
+ignored directory. The first build attempt after the new checker found missing
+TypeScript declarations and readonly collection types; these were repaired,
+and `appointment-v2-root-build-verified.log` records the successful root build.
+
+## Before Any Cloud Acceptance
+
+1. Inventory the approved test database's actual schema, owner, RLS, function
+   ACLs and legacy pending receipts. The local raw chain is not a cloud plan.
+2. Drain old appointment writers and release the v2 API together with 115.
+   Applying only the SQL closes old entries; deploying only the API refuses
+   creation where v2 is absent. Do not reopen v1 as a fallback.
+3. Confirm the exact isolated Preview and test database in the built artifact.
+   Repeat real authenticated role/account switching and committed recovery.
+4. Reconcile any pending legacy receipts explicitly, without guessing their
+   original Auth account or creating duplicate appointments.
+
+PATCH/delete authority, general calendar concurrency, external operator flows,
+provider delivery, physical devices, legal/commercial approval and all remaining
+G1-G8 gates are not completed by this appointment-create candidate.

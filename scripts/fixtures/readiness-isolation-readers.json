@@ -14,7 +14,7 @@
   "lib/auth/application-origin.ts": "bedb4db1ccc23aa89101de066a5841e6ddcb6371430debd6db27adb91b9430b9",
   "lib/auth/worker.ts": "acb6d6a0468848c52ff6c20a310949e8ec16c2419036008bdc7f55418230a111",
   "lib/crm/web-push.ts": "0f47352b5fe8091a0e82c2ea8d5645a421e27b6b87d60c0a1a79cb85deebc020",
-  "lib/crm/server.ts": "5b01ce6561fb6eac4d32b2d193dabb57d5aaa5d7e64f768ce4603c59039e48fa",
+  "lib/crm/server.ts": "26bf696b70ea3840e9721e14eac8c35c2459be2fe4df96f7684e396a5f07ac4c",
   "artifacts/meta-insights-worker/src/index.ts": "a087d7cff99a382c11e7a4c93852d5adad474cdacf01439b826218a891e7f811",
   "artifacts/video-worker/src/config.ts": "48a5c2d773356789597da83162e2a781b3324e45632fbca75f54574297787110",
   "artifacts/video-worker/src/index.ts": "2ffa2ecca132f555b2964a0d73b00e201d203e629be145857983b0dcec2c598f",

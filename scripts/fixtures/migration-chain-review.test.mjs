@@ -8,9 +8,9 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-114, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 106);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 106 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-115, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 107);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 107 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
@@ -93,6 +93,15 @@ test('114 initial commercial activation requires explicit offer/accept, private 
   assert.deepEqual(e.evidence.dynamicSqlLines,[]);assert.deepEqual(e.evidence.storageCatalogueLines,[]);assert.deepEqual(e.evidence.extensions,[]);
   assert.match(e.source,/revoke insert,update,delete,truncate,references,trigger on public\.growth_partners from service_role/);
   assert.doesNotMatch(e.source,/(?:insert into|update|delete from) public\.(?:staff_users|workspaces|growth_referrals|platform_subscription|growth_partner_commissions|growth_partner_payouts)/i);
+});
+
+test('115 pins exact actor and private provenance without changing legacy bodies or writing business rows during migration',()=>{
+  const e=chain.find(v=>v.file.startsWith('115_'));
+  assert.deepEqual(e.evidence.tables,['public.crm_appointment_request_actors']);assert.deepEqual(e.evidence.rls,e.evidence.tables);
+  assert.equal(e.evidence.functions.length,4);assert.deepEqual(e.evidence.dynamicSqlLines,[]);assert.deepEqual(e.evidence.storageCatalogueLines,[]);assert.deepEqual(e.evidence.extensions,[]);
+  for(const f of chain.filter(v=>['063','064'].includes(v.file.slice(0,3))).flatMap(v=>v.evidence.functions))assert.ok(e.source.includes(digest(f.body.replaceAll('\r\n','\n'))));
+  assert.doesNotMatch(e.source,/grant\s+(?:select|insert|update|delete)|(?:insert into|update|delete from) public\.(?:staff_users|appointments|clients|deals|workspaces)/i);
+  assert.match(e.source,/staff\.auth_user_id is distinct from p_actor/);assert.match(e.source,/staff\.role is distinct from p_role/);
 });
 
 for (const kind of ['missing', 'unknown', 'duplicate', 'reordered', 'renamed']) test(`preflight rejects ${kind} chain membership before any native startup`, () => {

@@ -142,13 +142,18 @@ export const markLeadBooked=id=>fixture.handoffs.push(id);
 export const toast={success:message=>fixture.successes.push(message),error:message=>fixture.errors.push(message),warning:message=>fixture.warnings.push(message)};
 `;
 
-export async function recoveryBundle() {
+export async function recoveryBundle(options: { jwtLikeTokens?: boolean } = {}) {
   const result = await esbuild.build({ stdin: { contents: await actualSlice(), resolveDir: path.join(frontend, "src/pages"),
     sourcefile: "appointment-committed-slice.tsx", loader: "tsx" }, bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic",
     define: { "process.env.NODE_ENV": '"production"', "import.meta.env.BASE_URL": '"/"', "import.meta.env.VITE_API_BASE_URL": '""' },
     plugins: [{ name: "owned-appointment-recovery", setup(build: any) {
       build.onResolve({ filter: /^(appointment-committed-fake|@\/lib\/supabase|@\/lib\/authSignOut)$/ }, () => ({ path: "mocks", namespace: "fixture" }));
-      build.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({ contents: mocks, loader: "tsx", resolveDir: frontend }));
+      build.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
+        // Only synthetic transport data changes; real server authentication still
+        // validates the token against the owned Auth boundary in native tests.
+        contents: options.jwtLikeTokens ? mocks.replace("'synthetic-'+captured", "'owned.'+captured+'.signature'") : mocks,
+        loader: "tsx", resolveDir: frontend,
+      }));
       build.onResolve({ filter: /^@\// }, async (args: { path: string }) => {
         const base = path.join(frontend, "src", args.path.slice(2));
         const file = [base + ".ts", base + ".tsx"].find(existsSync); assert.ok(file, args.path); return { path: file };

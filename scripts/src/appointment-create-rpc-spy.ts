@@ -10,15 +10,26 @@ export function withAppointmentCreateRpcSpy<T extends { from(table: string): unk
   const writer = client as { from(table: string): { insert(row: unknown): Insert } };
   return Object.assign(client, {
     async rpc(name: string, args: Record<string, unknown>): Promise<Result> {
-      assert.equal(name, "create_crm_appointment_with_new_client");
-      const card = args.p_client as Record<string, unknown>;
+      assert.ok(["read_crm_appointment_request_v2", "create_crm_appointment_v2"].includes(name));
+      assert.equal(typeof args.p_auth_user_id, "string");
+      assert.ok(["owner", "admin", "receptionist", "manager", "doctor"].includes(String(args.p_actor_role)));
+      if (name === "read_crm_appointment_request_v2") return { data: null, error: null };
+      const card = args.p_new_client as Record<string, unknown> | null;
       const visit = args.p_appointment as Record<string, unknown>;
-      assert.equal(card.workspace_id, args.p_workspace_id);
       assert.equal(visit.workspace_id, args.p_workspace_id);
-      assert.equal(visit.client_id, card.id);
-      const created = await writer.from("clients").insert(card);
-      if (created.error) return created;
-      return await writer.from("appointments").insert(visit).select("*").single();
+      assert.equal(visit.created_by_staff_user_id, args.p_staff_user_id);
+      if (card) {
+        assert.equal(card.workspace_id, args.p_workspace_id);
+        assert.equal(visit.client_id, card.id);
+        const created = await writer.from("clients").insert(card);
+        if (created.error) return created;
+      }
+      const saved = await writer.from("appointments").insert(visit).select("*").single();
+      if (saved.error) return saved;
+      // Deliberately not idempotence, authority, transaction or SQL proof.
+      // These spy suites exercise only their original query/role/advisory paths.
+      return { data: { appointment: Array.isArray(saved.data) ? { ...visit, id: args.p_request_key } : saved.data,
+        replayed: false, clientCreated: Boolean(card), clientMatch: args.p_client_match }, error: null };
     },
   });
 }

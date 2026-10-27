@@ -44,6 +44,7 @@ before(async () => {
   // 076 is being developed locally: execute its actual source, never a Git-only
   // snapshot or a synthetic receipt implementation. 059/065 remain excluded.
   await db.exec(await readFile(path.join(root, "migrations/076_crm_sale_create_requests.sql"), "utf8"));
+  await db.exec(await readFile(path.join(root, "migrations/115_appointment_request_actor.sql"), "utf8"));
 });
 after(() => db.close());
 beforeEach(async () => {
@@ -54,13 +55,14 @@ beforeEach(async () => {
     insert into appointments(id,workspace_id,client_id,service,price_minor,status) values
       ('${id(10)}','${id(1)}','${id(3)}','Two services',1500000,'confirmed');`);
 });
-afterEach(() => db.exec("rollback"));
+// DDL-refusal cases must not leave cached WASM plans using a rolled-back row type.
+afterEach(() => db.exec("rollback; discard plans"));
 
 // Execute real route queries and trigger writes, rather than returning canned
 // successful API responses. This adapter is intentionally test-local/read-write.
 type ApiFilter = [string, "=" | ">=" | "<" | "<=" | "in" | "ilike", unknown];
 type ApiQuery = { table: string; operation: string; columns: string; filters: ApiFilter[] };
-function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "service_role", queries: ApiQuery[] = [], database = db, failConflictRead = false) {
+function apiDatabase(rpcRole: "postgres" | "service_role" | "anon" | "authenticated" = "service_role", queries: ApiQuery[] = [], database = db, failConflictRead = false) {
   const ident = (value: string) => {
     assert.match(value, /^[a-z_][a-z0-9_]*$/);
     return `"${value}"`;
@@ -72,13 +74,13 @@ function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "servi
           sql: "select public.create_crm_appointment_with_new_client($1::uuid, $2::jsonb, $3::jsonb) as item",
           params: [args.p_workspace_id, JSON.stringify(args.p_client), JSON.stringify(args.p_appointment)],
         },
-        read_crm_appointment_create_request: {
-          sql: "select public.read_crm_appointment_create_request($1::uuid,$2::uuid,$3::uuid,$4) as item",
-          params: [args.p_workspace_id, args.p_staff_user_id, args.p_request_key, args.p_request_fingerprint],
+        read_crm_appointment_request_v2: {
+          sql: "select public.read_crm_appointment_request_v2($1::uuid,$2::uuid,$3::uuid,$4,$5::uuid,$6) as item",
+          params: [args.p_workspace_id, args.p_staff_user_id, args.p_auth_user_id, args.p_actor_role, args.p_request_key, args.p_request_fingerprint],
         },
-        create_crm_appointment_once: {
-          sql: "select public.create_crm_appointment_once($1::uuid,$2::uuid,$3::uuid,$4,$5::jsonb,$6::jsonb,$7) as item",
-          params: [args.p_workspace_id, args.p_staff_user_id, args.p_request_key, args.p_request_fingerprint,
+        create_crm_appointment_v2: {
+          sql: "select public.create_crm_appointment_v2($1::uuid,$2::uuid,$3::uuid,$4,$5::uuid,$6,$7::jsonb,$8::jsonb,$9) as item",
+          params: [args.p_workspace_id, args.p_staff_user_id, args.p_auth_user_id, args.p_actor_role, args.p_request_key, args.p_request_fingerprint,
             args.p_new_client === null ? null : JSON.stringify(args.p_new_client), JSON.stringify(args.p_appointment), args.p_client_match],
         },
         read_crm_sale_create_request: {
@@ -347,7 +349,7 @@ test("G2 actual router + 063/064/072/073/076/102 separates identities and replay
   const composed = new PGlite();
   try {
     await composed.exec("create role anon; create role authenticated; create role service_role bypassrls;");
-    const numbers = new Set([9,10,11,12,13,14,19,20,29,30,32,33,34,36,40,43,45,52,53,54,55,56,57,61,63,64,72,73,76,102]);
+    const numbers = new Set([9,10,11,12,13,14,19,20,29,30,32,33,34,36,40,43,45,52,53,54,55,56,57,61,63,64,72,73,76,102,115]);
     for (const file of (await readdir(path.join(root, "migrations"))).sort()) if (numbers.has(Number(file.slice(0, 3)))) {
       // PGlite has built-in UUID support, not native pgcrypto extension files.
       const source = await readFile(path.join(root, "migrations", file), "utf8");
@@ -1269,7 +1271,7 @@ for (const scope of ["other doctor", "foreign workspace"]) {
         assert.deepEqual(rpcCalls, [], "workspace denial precedes receipt/contact reads or writes");
         assert.deepEqual(observedQueries.filter(query => !["staff_users", "workspace_settings"].includes(query.table)), []);
       } else {
-        assert.deepEqual(rpcCalls, method === "replay" ? ["read_crm_appointment_create_request"] : []);
+        assert.deepEqual(rpcCalls, method === "replay" ? ["read_crm_appointment_request_v2"] : []);
       }
     });
   }
@@ -1349,7 +1351,7 @@ test("API retry after loss of membership is refused before returning any receipt
   assert.deepEqual(await retryCounts(), before);
 });
 
-for (const rpcName of ["read_crm_appointment_create_request", "create_crm_appointment_once"]) {
+for (const rpcName of ["read_crm_appointment_request_v2", "create_crm_appointment_v2"]) {
   test(`API missing ${rpcName} fails closed without legacy INSERT or unsaved success`, async () => {
     const call = await bundleApiFixture();
     const base = apiDatabase();
@@ -1388,7 +1390,7 @@ test("API lost RPC response after commit is recovered without a second transacti
   let creates = 0;
   serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) => {
     const result = await base.rpc(name, args);
-    if (name !== "create_crm_appointment_once") return result;
+    if (name !== "create_crm_appointment_v2") return result;
     creates++;
     assert.equal(result.error, null);
     return { data: null, error: { code: "08006", message: "Reply lost after isolated commit" } };
@@ -1410,7 +1412,7 @@ test("API existing-client keyed insert cannot fall back by discarding schema fie
   const base = apiDatabase();
   let creates = 0;
   serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) => {
-    if (name !== "create_crm_appointment_once") return base.rpc(name, args);
+    if (name !== "create_crm_appointment_v2") return base.rpc(name, args);
     creates++;
     return { data: null, error: { code: "PGRST204", message: "Could not find the doctor_id column" } };
   } }));
@@ -1434,7 +1436,7 @@ for (const keyed of [true, false]) {
       test(`API capacity ${keyed ? "keyed" : "legacy"} ${existingClient ? "existing" : "new"}-client create classifies ${code}/${message}`, async () => {
         const call = await bundleApiFixture();
         const base = apiDatabase();
-        const rpcName = keyed ? "create_crm_appointment_once" : "create_crm_appointment_with_new_client";
+        const rpcName = "create_crm_appointment_v2";
         let creates = 0;
         serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) => {
           if (name !== rpcName) return base.rpc(name, args);
@@ -1498,15 +1500,15 @@ for (const capacity of [1, 2]) {
     let injected = false, reads = 0, creates = 0;
     let winner: Record<string, unknown> = {};
     serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) => {
-      if (name === "read_crm_appointment_create_request") reads++;
-      if (name === "create_crm_appointment_once") creates++;
+      if (name === "read_crm_appointment_request_v2") reads++;
+      if (name === "create_crm_appointment_v2") creates++;
       const result = await base.rpc(name, args);
-      if (name === "read_crm_appointment_create_request" && !injected) {
+      if (name === "read_crm_appointment_request_v2" && !injected) {
         assert.equal(result.data, null);
         injected = true;
         // Deterministic interleaving with real SQL writes, not a canned success.
         // Native two-connection lock contention remains a separate PostgreSQL test.
-        const committed = await base.rpc("create_crm_appointment_once", { ...args,
+        const committed = await base.rpc("create_crm_appointment_v2", { ...args,
           p_new_client: { id: id(80), workspace_id: id(1), full_name: "Concurrent fixture", status: "new" },
           p_appointment: { workspace_id: id(1), client_id: id(80), created_by_staff_user_id: id(40),
             client_name: "Concurrent fixture", doctor_id: id(42), doctor_name: "Test master",
@@ -2072,7 +2074,7 @@ const atomicRpcArgs = () => ({
   p_client: { id: id(70), workspace_id: id(1), full_name: "Isolated atomic client", status: "new" },
   p_appointment: { workspace_id: id(1), client_id: id(70), client_name: "Isolated atomic client", status: "scheduled", duration_minutes: 60 },
 });
-for (const role of ["anon", "authenticated"] as const) {
+for (const role of ["anon", "authenticated", "service_role"] as const) {
   test(`atomic creation RPC refuses direct ${role} execution`, async () => {
     const response = await apiDatabase(role).rpc("create_crm_appointment_with_new_client", atomicRpcArgs());
     assert.equal(response.error?.code, "42501");
@@ -2089,7 +2091,7 @@ test("atomic creation RPC rejects mixed workspaces, mismatched links and receipt
     { p_appointment: { ...base.p_appointment, client_id: id(3) } },
     { p_appointment: { ...base.p_appointment, arrival_sale_id: id(99) } },
   ]) {
-    const response = await apiDatabase().rpc("create_crm_appointment_with_new_client", { ...base, ...changes });
+    const response = await apiDatabase("postgres").rpc("create_crm_appointment_with_new_client", { ...base, ...changes });
     assert.equal(response.error?.code, "22023");
     assert.deepEqual(await bookingCounts(), { clients: 1, appointments: 1, deals: 0 });
   }
@@ -2099,13 +2101,13 @@ test("atomic creation RPC cannot overwrite an existing client or accept a foreig
   await bundleApiFixture();
   const original = await row(`select * from clients where id='${id(3)}'`);
   const base = atomicRpcArgs();
-  const collision = await apiDatabase().rpc("create_crm_appointment_with_new_client", {
+  const collision = await apiDatabase("postgres").rpc("create_crm_appointment_with_new_client", {
     ...base, p_client: { ...base.p_client, id: id(3) }, p_appointment: { ...base.p_appointment, client_id: id(3) },
   });
   assert.equal(collision.error?.code, "23505");
   assert.deepEqual(await row(`select * from clients where id='${id(3)}'`), original);
   await db.exec(`insert into clinic_doctors(id,workspace_id,full_name) values('${id(80)}','${id(2)}','Foreign doctor')`);
-  const foreign = await apiDatabase().rpc("create_crm_appointment_with_new_client", {
+  const foreign = await apiDatabase("postgres").rpc("create_crm_appointment_with_new_client", {
     ...base, p_appointment: { ...base.p_appointment, doctor_id: id(80) },
   });
   assert.equal(foreign.error?.code, "22023");
