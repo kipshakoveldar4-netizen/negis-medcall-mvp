@@ -6,18 +6,19 @@ import { isolatedPwaResolve } from './pwa-update-browser.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const frontend = path.join(root, 'artifacts/negis');
 const require = createRequire(path.join(frontend, 'package.json'));
-export async function createContributorFixture(port = 0) {
+export async function createContributorFixture(port = 0, variant = 'contributor') {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw Error('Invalid port');
+  if (!['contributor','partner-terms'].includes(variant)) throw Error('Invalid owned fixture');
   const { createServer } = await import(pathToFileURL(require.resolve('vite')).href);
   const { default: react } = await import(pathToFileURL(require.resolve('@vitejs/plugin-react')).href);
   const { default: tailwind } = await import(pathToFileURL(require.resolve('@tailwindcss/vite')).href);
-  const mocks = path.join(root, 'scripts/fixtures/contributor-browser-mocks.ts');
+  const mocks = path.join(root, `scripts/fixtures/${variant}-browser-mocks.ts`);
   const resolver = isolatedPwaResolve();
   resolver.alias.unshift(...['@/lib/supabase', '@/lib/operatorApi', '../lib/api', './lib/api', '../lib/supabase', './lib/supabase'].map(find => ({ find, replacement: mocks })));
-  const entry = path.join(root, 'scripts/fixtures/contributor-browser.tsx').replaceAll('\\', '/');
+  const entry = path.join(root, `scripts/fixtures/${variant}-browser.tsx`).replaceAll('\\', '/');
   let origin;
   const server = await createServer({ configFile: false, envDir: false, root: frontend, appType: 'custom',
-    cacheDir: path.join(tmpdir(), `medina-contributor-${process.pid}-${port}`), optimizeDeps: { entries: [entry] },
+    cacheDir: path.join(tmpdir(), `medina-${variant}-${process.pid}-${port}`), optimizeDeps: { entries: [entry] },
     resolve: resolver, plugins: [react(), tailwind(), { name: 'contributor-fixture', configureServer(vite) {
       vite.middlewares.use(async (req, res, next) => {
         if (!origin || req.headers.host !== new URL(origin).host) { res.writeHead(403); res.end(); return; }

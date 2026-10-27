@@ -30,6 +30,8 @@
     "test:partner-entry-postgres": "node --test ./fixtures/partner-entry-postgres.test.mjs",
     "test:partner-terms-http": "node --test ./fixtures/partner-terms-http.test.mjs",
     "test:partner-terms-postgres": "node --test ./fixtures/partner-terms-postgres.test.mjs",
+    "test:partner-terms-ui": "node --import tsx --test ./src/medina-partner-terms-attempt.test.ts",
+    "test:partner-terms-browser": "node --test ./fixtures/partner-terms-browser.test.mjs",
     "test:partner-ledger": "tsx --test ./src/medina-partner-ledger.test.ts",
     "test:creator-jobs": "tsx --test ./src/medina-creator-jobs.test.ts ./src/medina-creator-jobs-api.test.ts ./src/medina-creator-command-attempt.test.ts",
     "test:creator-jobs-browser": "node --test ./fixtures/creator-jobs-browser.test.mjs",

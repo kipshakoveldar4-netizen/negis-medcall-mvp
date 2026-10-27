@@ -7,6 +7,7 @@ import { validatePasswordRules } from "../../../../lib/auth/password-rules";
 import { isSyntheticEmail, loginOrEmailToAuthEmail } from "../../../../lib/auth/staff-logins";
 import { contributorStatusLabels, parseContributorApplication, parseContributorProfile, type ContributorProfile } from "../../../../lib/crm/contributor-contracts";
 import { PartnerLedger } from "@/components/contributors/PartnerLedger";
+import { PartnerTerms } from "@/components/contributors/PartnerTerms";
 import { CreatorJobs } from "@/components/contributors/CreatorJobs";
 
 export default function ContributorPortal() {
@@ -87,6 +88,7 @@ function Application({ userId, isActorCurrent }: { userId: string; isActorCurren
   const [partner, setPartner] = useState(true);
   const [creator, setCreator] = useState(true);
   const [revision, setRevision] = useState(0);
+  const [partnerLedgerRevision, setPartnerLedgerRevision] = useState(0);
   const [busy, setBusy] = useState(false);
   const generation = useRef(0);
   const mounted = useRef(true);
@@ -156,7 +158,14 @@ function Application({ userId, isActorCurrent }: { userId: string; isActorCurren
         const Icon = role === "partner" ? Users : Video;
         return <article key={role} className="min-w-0 rounded-lg border p-4"><div className="flex items-center gap-2 font-medium"><Icon size={18} />{role === "partner" ? "Партнёр" : "Автор контента"}</div><p className="mt-3 text-sm">{status ? contributorStatusLabels[status] : "Заявка не подана"}</p></article>;
       })}</div>
-      {profile.partnerStatus === "approved" && <PartnerLedger userId={userId} isActorCurrent={current} onAccessDenied={() => denyAccess("Доступ партнёра изменился. Обновите профиль.")} />}
+      {profile.partnerStatus === "approved" && <><PartnerTerms actorId={userId} profileId={profile.id} side="partner" isSessionCurrent={current}
+        onResolved={() => { if (current()) setPartnerLedgerRevision(n => n + 1); }}
+        onAccessDenied={() => denyAccess("Доступ партнёра изменился. Обновите профиль.")}
+        request={options => {
+          const query = options.method === "GET" ? "?" + new URLSearchParams({ profileId: profile.id, ...(options.requestId ? { requestId: options.requestId } : {}) }) : "";
+          return operatorApi<unknown>("partner-terms" + query, options.body, options.method, options.signal, userId, () => current() && options.isCurrent());
+        }} />
+        <PartnerLedger key={partnerLedgerRevision} userId={userId} isActorCurrent={current} onAccessDenied={() => denyAccess("Доступ партнёра изменился. Обновите профиль.")} /></>}
       {profile.creatorStatus === "approved" && <CreatorJobs actorId={userId} isSessionCurrent={current} onAccessDenied={() => denyAccess("Доступ автора изменился. Обновите профиль.")} />}
       {profile.portfolioUrls.length > 0 && <section className="space-y-3"><h3 className="font-medium">Портфолио</h3>{profile.portfolioUrls.map(url => <a className="flex min-w-0 items-start gap-2 text-sm" key={url} href={url} rel="noopener noreferrer" target="_blank"><ExternalLink className="shrink-0" size={16} /><span className="break-all">{url}</span></a>)}</section>}
     </>}

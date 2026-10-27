@@ -39,6 +39,10 @@ async function request(path: string, body: unknown, method: string, valid: () =>
         : { id: id(), revision: id(), displayName: application.displayName, portfolioUrls: application.portfolioUrls, partnerStatus: application.partner ? "pending" : null, creatorStatus: application.creator ? "pending" : null };
       profiles.set(origin, result as ContributorProfile);
     } else throw Error("Method denied");
+  } else if (path.startsWith("partner-terms?") && origin && method === "GET") {
+    const p = profiles.get(origin);
+    if (p?.partnerStatus !== "approved") throw Object.assign(Error("Partner access changed"), { status: 403 });
+    result = { state: "not_offered", profileId: p.id, profileRevision: p.revision, agreement: null };
   } else if (path === "partner-ledger" && origin && method === "GET") {
     if (profiles.get(origin)?.partnerStatus !== "approved") throw Object.assign(Error("Partner access changed"), { status: 403 });
     const value = ledgers.get(origin) ?? { state: "not_activated" };
