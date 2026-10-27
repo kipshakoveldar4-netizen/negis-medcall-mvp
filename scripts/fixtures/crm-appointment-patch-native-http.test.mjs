@@ -76,6 +76,19 @@ test('appointment PATCH pins the HTTP actor at the actual SQL write',{timeout:30
       assert.equal((await f.read()).notes,'Owned original note');assert.equal((await f.counts()).audits,0);
     }finally{if(renamed)await db.query('alter table appointments rename column owned_missing_edit_version to edit_version');await f.close();}
   });
+  await t.test('a missing version-bound writer refuses instead of calling the legacy entry or direct UPDATE',async()=>{
+    const f=await setup();let renamed=false;
+    try{
+      await db.query('alter function public.patch_crm_appointment_v2(uuid,uuid,uuid,text,uuid,uuid,jsonb,jsonb) rename to owned_missing_version_writer');renamed=true;
+      const count=transport.controls.calls.length,result=await patch();assert.equal(result.status,503,JSON.stringify(result));
+      assert.equal(result.body.code,'appointment_patch_unavailable');assert.equal(transport.controls.calls.length,count+1);
+      assert.equal(transport.controls.calls.at(-1).name,'patch_crm_appointment_v2');
+      assert.equal((await f.read()).notes,'Owned original note');assert.equal((await f.counts()).audits,0);
+    }finally{
+      if(renamed)await db.query('alter function public.owned_missing_version_writer(uuid,uuid,uuid,text,uuid,uuid,jsonb,jsonb) rename to patch_crm_appointment_v2');
+      await f.close();
+    }
+  });
   await t.test('a stale status click and override flags cannot undo another account save',async()=>{
     const f=await setup();try{
       const other=await patch({status:'confirmed'},'PATCH',{actor:ids.B});assert.equal(other.status,200,JSON.stringify(other));
@@ -219,7 +232,7 @@ test('appointment PATCH pins the HTTP actor at the actual SQL write',{timeout:30
     }finally{transport.controls.beforePatch=null;await browser?.close();await ui.close();await f.close();}
   });
   assert.deepEqual(http.state.unexpected,[]);assert.deepEqual(server.controls.errors,[]);
-  assert.ok(transport.controls.calls.length>0&&transport.controls.calls.every(call=>call.name==='patch_crm_appointment_as_actor'));
+  assert.ok(transport.controls.calls.length>0&&transport.controls.calls.every(call=>call.name==='patch_crm_appointment_v2'));
   assert.ok(transport.controls.writes.every(write=>write.table==='audit_logs'),'No direct appointment UPDATE fallback');
-  await exerciseAppointmentPatch(db,fixture,t);
+  await exerciseAppointmentPatch(db,fixture,t,{versioned:true});
 });

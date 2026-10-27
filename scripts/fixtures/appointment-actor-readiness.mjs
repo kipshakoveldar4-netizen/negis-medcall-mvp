@@ -1,4 +1,4 @@
-// Current post-115/116/117 metadata contract. No environment, network, business reads,
+// Current post-115/116/117/118 metadata contract. No environment, network, business reads,
 // domain RPC execution or migration application belongs in this module.
 const functions = [
   ['public.create_crm_appointment_with_new_client(uuid,jsonb,jsonb)','jsonb','v',true,false,'11bb49a22da2ff5367e4769dd67f1c6857434f765a5798d0666508cc8bca7584',['p_workspace_id','p_client','p_appointment']],
@@ -9,8 +9,9 @@ const functions = [
   ['public.crm_appointment_targets_actor(jsonb,jsonb)','boolean','i',false,false,'637235ede2ebb6c740d880ccc9a26a18717ff06d5391e882061655b7ea2438a8',['p_identity','p_appointment']],
   ['public.read_crm_appointment_request_v2(uuid,uuid,uuid,text,uuid,text)','jsonb','v',true,true,'4e51e17f2c895b455fdee7bb761e59dece26c5f3a697a7e918a3a312ec5c1c72',['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_request_key','p_request_fingerprint']],
   ['public.create_crm_appointment_v2(uuid,uuid,uuid,text,uuid,text,jsonb,jsonb,text)','jsonb','v',true,true,'f50bb91918c8675fa94750cff9f8e486166412d5bbf4dcc4dbc23fba00520400',['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_request_key','p_request_fingerprint','p_new_client','p_appointment','p_client_match']],
-  ['public.patch_crm_appointment_as_actor(uuid,uuid,uuid,text,uuid,jsonb,jsonb)','jsonb','v',true,true,'e6f4e113b5e77a8896ae0c72ef7c9b6ae0a7179e015b587bb3a32a8256c26d81',['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_appointment_id','p_before','p_patch']],
+  ['public.patch_crm_appointment_as_actor(uuid,uuid,uuid,text,uuid,jsonb,jsonb)','jsonb','v',true,false,'e6f4e113b5e77a8896ae0c72ef7c9b6ae0a7179e015b587bb3a32a8256c26d81',['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_appointment_id','p_before','p_patch']],
   ['public.stamp_appointment_edit_version()','trigger','v',false,false,'33b58671e0af76e5a11b6654ab305a78c0baefebf8dda29a61f7db9dcc380e6b',[]],
+  ['public.patch_crm_appointment_v2(uuid,uuid,uuid,text,uuid,uuid,jsonb,jsonb)','jsonb','v',true,true,'d5f8355441890ab3bb910adcb34a0cd9e3211685431ffee7826e0eb283bb11a8',['p_workspace_id','p_staff_user_id','p_auth_user_id','p_actor_role','p_appointment_id','p_expected_edit_version','p_before','p_patch']],
 ];
 const columns = {
   workspaces: {id:'uuid'},
@@ -108,7 +109,7 @@ ${Object.entries(receiptColumns).map(([table,shape])=>'('+literal(table)+','+lit
 select check_name,coalesce(ready,false) ready from checks order by check_name;`;
 
 export function buildAppointmentActorReadiness() {
-  return `-- Current appointment API: v2 create/replay + actor PATCH/edit version, post-115/116/117 read-only gate.
+  return `-- Current appointment API: v2 create/replay + version-bound PATCH, post-115/116/117/118 read-only gate.
 -- Run only in the approved test database after verifying its separate identity.
 -- All checks must be true; legacy RPCs closed, only current server entries open.
 -- NOT end-to-end, concurrency or payment acceptance. No business rows are read.

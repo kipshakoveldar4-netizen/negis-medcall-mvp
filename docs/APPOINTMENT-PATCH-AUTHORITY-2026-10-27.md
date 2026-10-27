@@ -7,6 +7,8 @@ SQL, deployment, real Auth account, tenant session or external provider is used.
 Later G2-C22 / G7-C57 adds the [open-form version](APPOINTMENT-OPEN-VERSION-2026-10-27.md)
 and coordinated 117. The current metadata gate has 108 conditions; the 100-check
 receipt below remains historical evidence for this earlier actor-only candidate.
+Later C23 in that document adds 118 and a separate version-bound service facade;
+its 112-condition gate supersedes the 108/100-condition receipts.
 
 ## Defect
 

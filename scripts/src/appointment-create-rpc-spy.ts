@@ -24,11 +24,12 @@ export function withAppointmentCreateRpcSpy<T extends { from(table: string): unk
   const writer = client as { from(table: string): { insert(row: unknown): Insert; update(row: unknown): Update } };
   return Object.assign(client, {
     async rpc(name: string, args: Record<string, unknown>): Promise<Result> {
-      assert.ok(["read_crm_appointment_request_v2", "create_crm_appointment_v2", "patch_crm_appointment_as_actor"].includes(name));
+      assert.ok(["read_crm_appointment_request_v2", "create_crm_appointment_v2", "patch_crm_appointment_v2"].includes(name));
       assert.equal(typeof args.p_auth_user_id, "string");
       assert.ok(["owner", "admin", "receptionist", "manager", "doctor"].includes(String(args.p_actor_role)));
       if (name === "read_crm_appointment_request_v2") return { data: null, error: null };
-      if (name === "patch_crm_appointment_as_actor") {
+      if (name === "patch_crm_appointment_v2") {
+        assert.equal(typeof args.p_expected_edit_version, "string");
         const saved = await writer.from("appointments").update(args.p_patch).eq("id", args.p_appointment_id)
           .eq("workspace_id", args.p_workspace_id).select("*").single();
         if (saved.error) return saved;

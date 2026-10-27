@@ -27,7 +27,8 @@ import { exercisePartnerEntryHttp } from './partner-entry-native-http-cases.mjs'
 import { exercisePartnerTerms } from './partner-terms-cases.mjs';
 import { exercisePartnerTermsHttp } from './partner-terms-native-http-cases.mjs';
 import { exerciseAppointmentActor,exerciseAppointmentActorDependencies } from './appointment-actor-cases.mjs';
-import { exerciseAppointmentReadiness,exerciseAppointmentReadinessBeforeCutover,exerciseAppointmentPatchReadinessBeforeCutover,exerciseAppointmentVersionReadinessBeforeCutover } from './appointment-actor-readiness-cases.mjs';
+import { exerciseAppointmentReadiness,exerciseAppointmentReadinessBeforeCutover,exerciseAppointmentPatchReadinessBeforeCutover,exerciseAppointmentVersionReadinessBeforeCutover,exerciseAppointmentEntryReadinessBeforeCutover } from './appointment-actor-readiness-cases.mjs';
+import { exerciseAppointmentVersionEntryBefore,exerciseAppointmentVersionEntry } from './appointment-version-entry-cases.mjs';
 import { exerciseAppointmentPatch,exerciseAppointmentPatchDependencies } from './appointment-patch-cases.mjs';
 import { prepareAppointmentEditVersion,exerciseAppointmentEditVersion } from './appointment-edit-version-cases.mjs';
 
@@ -170,6 +171,10 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
   let legacyRlsBefore;
   let verifyOldAppointmentVersion;
   for (const entry of chain) {
+    if(entry.file==='118_appointment_version_entry.sql'){
+      await exerciseAppointmentEntryReadinessBeforeCutover(db,t);
+      await exerciseAppointmentVersionEntryBefore(db,entry.source,t);
+    }
     if(entry.file==='117_appointment_edit_version.sql'){
       await exerciseAppointmentVersionReadinessBeforeCutover(db,t);
       verifyOldAppointmentVersion=await prepareAppointmentEditVersion(db,entry.source,t);
@@ -266,7 +271,10 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     }
     if(entry.file==='116_appointment_patch_actor.sql')await exerciseAppointmentPatch(db,fixture,t);
     if(entry.file==='117_appointment_edit_version.sql'){
-      await verifyOldAppointmentVersion();await exerciseAppointmentEditVersion(db,entry.source,t);await exerciseAppointmentReadiness(db,t);
+      await verifyOldAppointmentVersion();await exerciseAppointmentEditVersion(db,entry.source,t);
+    }
+    if(entry.file==='118_appointment_version_entry.sql'){
+      await exerciseAppointmentVersionEntry(db,entry.source,t);await exerciseAppointmentPatch(db,fixture,t,{versioned:true});await exerciseAppointmentReadiness(db,t);
     }
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
@@ -383,6 +391,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'public.partner_terms_actor(uuid,text,uuid)','public.partner_terms_snapshot(public.growth_contributor_profiles)','public.lock_operator_command_reader(uuid,text,uuid,uuid)',
       'public.lock_crm_appointment_actor(uuid,uuid,uuid,text)','public.crm_appointment_targets_actor(jsonb,jsonb)',
       'public.read_crm_appointment_create_request(uuid,uuid,uuid,text)','public.create_crm_appointment_once(uuid,uuid,uuid,text,jsonb,jsonb,text)',
+      'public.patch_crm_appointment_as_actor(uuid,uuid,uuid,text,uuid,jsonb,jsonb)','public.stamp_appointment_edit_version()',
       'public.create_crm_appointment_with_new_client(uuid,jsonb,jsonb)',
       'public.operator_command_result_v2(uuid,uuid,text,uuid,uuid,text,uuid)',
       'public.site_deletion_operation_receipt(public.site_deletion_operations,boolean)']) {
@@ -396,7 +405,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'read_growth_creator_jobs','execute_growth_creator_job_v2','read_growth_creator_command_v2','close_growth_creator_command_v2',
       'read_growth_creator_directory','read_growth_creator_job_detail',
       'capture_growth_partner_source_v2','purge_growth_partner_sources','claim_growth_partner_source','read_growth_partner_source','bind_growth_partner_source',
-      'execute_growth_partner_terms','read_growth_partner_terms','read_crm_appointment_request_v2','create_crm_appointment_v2','patch_crm_appointment_as_actor']) {
+      'execute_growth_partner_terms','read_growth_partner_terms','read_crm_appointment_request_v2','create_crm_appointment_v2','patch_crm_appointment_v2']) {
       const functions = (await db.query(`select p.oid::regprocedure::text as signature,has_function_privilege('service_role',p.oid,'EXECUTE') as allowed
         from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname=$1`, [name])).rows;
       assert.equal(functions.length, 1, name); assert.equal(functions[0].allowed, true, name);

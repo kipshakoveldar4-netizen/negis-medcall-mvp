@@ -5917,10 +5917,10 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
         if (!isUuid(actor?.staffUserId) || !isUuid(actor?.userId)) {
           throw new AppointmentRequestError(403, "appointment_patch_access_denied", "Нет доступа к изменению записи");
         }
-        const result = await supabase.rpc("patch_crm_appointment_as_actor", {
+        const result = await supabase.rpc("patch_crm_appointment_v2", {
           p_workspace_id: workspaceId, p_staff_user_id: actor.staffUserId, p_auth_user_id: actor.userId,
           p_actor_role: actor.role, p_appointment_id: id,
-          p_before: { ...before, edit_version: appointmentEditVersion(body.expectedEditVersion) }, p_patch: candidate,
+          p_expected_edit_version: appointmentEditVersion(body.expectedEditVersion), p_before: before, p_patch: candidate,
         });
         checkAppointmentPatchError(result.error);
         if (!result.error && (asRecord(result.data).id !== id || asRecord(result.data).workspace_id !== workspaceId

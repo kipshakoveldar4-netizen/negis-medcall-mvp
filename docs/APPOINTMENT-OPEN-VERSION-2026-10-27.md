@@ -4,6 +4,11 @@
 not a new platform or completion of all acceptance gates. No cloud database,
 deployment, real Auth account, customer workspace or external provider is used.
 
+This first records C22 (`bdaad3e`) and its 108-check gate. The subsequent
+[C23 version-bound entry](#c23-version-bound-service-entry) below also requires
+118 and a 112-check gate; it supersedes the legacy-entry cutover gap recorded
+under Still Required. Neither candidate has been released or applied remotely.
+
 ## Reproduction
 
 116 compares the server-read preimage under a row lock, protecting a change
@@ -169,3 +174,71 @@ commercial/legal approval and other unaccepted G1-G8 gates remain open.
 Production, Baspana, salons, WhatsApp, roles, passwords, commercial settings,
 protected 059/065, advertising, generations, external sends and expenses are
 unchanged. Existing user demo servers are retained.
+
+## C23 Version-Bound Service Entry
+
+G2-C23 / G7-C58, local base bdaad3e. The prior service writer could accept a
+freshly fetched preimage, bypassing the new browser's opening-version intent.
+118 introduces patch_crm_appointment_v2 with an independent required UUID
+argument. The API forwards the frozen client token separately from the fresh
+server preimage. SQL replaces only its edit_version and delegates to the
+source-pinned 116 owner-only implementation. Live original-actor/own-work
+authorization still precedes typed-row CAS; no extra read or DML path is added.
+
+118 revokes the legacy service entry and checks effective privileges, including
+inherited grants. If any legacy EXECUTE remains, the entire migration refuses.
+Browser roles cannot call either entry; service_role keeps only the new facade.
+The raw migration checks original function bodies, the enabled version trigger,
+non-null UUID column and closed direct table writes. It is one-time, has bounded
+timeouts and changes no business rows, table grants, accounts or commercial rules.
+The full 112-condition metadata gate is still mandatory; this migration alone
+does not attest every dependency or authorize a remote cutover.
+
+New SQL cases reproduce the legacy overwrite before cutover and then exercise
+real role denials, null/stale independent tokens, a fresh token with stale other
+fields, correct save/token rotation, inherited-grant refusal and exact-rerun
+refusal. The complete live-authority/lock-wait suite is also exercised through
+the new facade after 118, not only directly through historical 116. The full
+HTTP fixture checks that a missing new writer yields 503 with no legacy call,
+direct UPDATE or audit. SDK spies explicitly name the new protocol, not SQL proof.
+
+Current gate: 112 conditions, exact facade body/argument names/owner/ACL and
+legacy closure. A complete 117 schema has five blockers, not a ready result.
+Raw 118 SHA-256: aaa99158d91016da7fc358962a31f499fb26d6bf86d50a9ecbc52d1f5b2edf75.
+Facade body SHA-256: d5f8355441890ab3bb910adcb34a0cd9e3211685431ffee7826e0eb283bb11a8.
+Generated local read-only query: node_modules/.cache/appointment-version-entry-118-readiness.sql,
+SHA-256 8f16cfe53e02a51450623a2d2d10dbe48b0efeb784053b25e27317aadc20e5bd.
+It was not executed remotely and never reads domain rows or invokes a writer.
+
+Verification receipts (local logs only, prefix appointment-version-entry-):
+
+- preflight: 310/310, review/metadata/SQL ACL/WASM API.
+- native-rest: 643/643, actual creation/recovery and exact raw 009-118 chain
+  (110 SQL files), including before/after legacy entry proof and real privilege,
+  independent-token, inherited-grant and lock-wait assertions. Owned rows are
+  removed/rolled back and owned helpers close; no external facilities exist.
+- native-patch-final: 46/46, actual React/client/router/native SQL, including
+  missing current writer, stale forms and mixed revocation. The earlier
+  45-case run predates the added missing-writer test and is not its receipt.
+- regression-final: 1186/1186, 26 explicit existing modules, no duplicate or
+  silently ignored missing file arguments. Existing companion assertions and
+  the two strengthened neighboring tests remain enabled.
+- isolation-final: 931/931, the same fixed no-network/IPC lane and 41-reader
+  keyset. Only the reviewed server digest changes to
+  d7d52202d5d782a88ff5ffdc8a31f1d92c929c1f7dad450bc1514d0959267167.
+
+- build-final: full production-mode build exit 0, both API compiler modes,
+  all workspace types, 353 cold-start checks and Vite. No runtime/SQL changes
+  after the successful final runs. Protected source hashes and five original
+  demo listeners are unchanged; these are not customer environment fingerprints.
+
+No whole-platform readiness or unique requirement count is inferred from these
+overlapping suites. Fresh-checkout byte portability is a separate G7 gate:
+current reviewed migrations 116-118 have LF bytes, but text/eol attributes are
+unset and Git warns about future CRLF conversion. No automatic normalization,
+raw-hash repinning or protected 059/065 repair is performed by this candidate.
+This closes the known legacy-code entry, not compromise of a trusted service key:
+the backend must still authenticate the caller and supply its original identity.
+Real Auth/current Preview bindings, selected SQL delta and existing outcomes,
+durable PATCH/task recovery, crash-atomic secondary audit and remaining G1-G8
+acceptance gates are unchanged and remain required.

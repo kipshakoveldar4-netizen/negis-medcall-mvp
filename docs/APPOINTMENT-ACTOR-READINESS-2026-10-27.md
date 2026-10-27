@@ -13,6 +13,8 @@ the 93-check metadata gate with 100 checks. The old generated SQL below is
 retained as evidence, not the current API's rollout checklist.
 The subsequent [open-form version candidate](APPOINTMENT-OPEN-VERSION-2026-10-27.md)
 also requires 117 and supersedes that 100-check gate with 108 conditions.
+The later C23 section in that document requires 118, closes the legacy service
+PATCH entry and supersedes the earlier gates with 112 conditions.
 
 ## Reproduced Failure
 
