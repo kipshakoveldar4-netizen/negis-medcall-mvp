@@ -6090,6 +6090,44 @@ provider ID, неизвестного quota commit или весь G5/G1–G8.
 свои HTTP-фикстуры закрыты, пользовательские стенды и защищённые 059/065 сохранены.
 [Точный отчёт и границы](VIDEO-REQUEST-BUDGET-2026-10-26.md).
 
+### Цикл G5-C61: F6 проверяет именно отказ хранилища — локально, 27 октября
+
+Продолжение 2358718, только test fixture, без изменения runtime API/Storage.
+До правки 15/16 failure-honesty tests проходили; F6 ожидал прежний 502, но
+получал 400 creative_upload_request_key_required. Это был устаревший запрос
+без requestKey, а не проверенный отказ хранилища и не реальная поломка Storage.
+Failed receipt: node_modules/.cache/advertising-failure-honesty-red.log.
+
+Теперь настоящий catch-all и staged workflow получают допустимые UUID actor,
+requestKey и вымышленную неизменяемую reservation из явного SDK double. Тест
+требует ровно reserve → private bucket → bounded list → mint refusal, без
+повторного admission и без INSERT/UPDATE/upsert/delete metadata. Он принимает
+только нынешний 503 с creative_staging_ticket_unconfirmed, success=false и
+private/no-store, а не любой ошибочный ответ на ранней валидации. В отказ SDK
+внесены вымышленные secret/token/SQL details; ни они, ни handle, URL, ID операции
+не должны попасть в публичный ответ. Общий fetch double теперь допускает только
+точный synthetic Auth URL; прочие запросы отказаны и провалят проверку. Env
+полностью заменён синтетическим и восстанавливается при teardown вместе с SDK,
+fetch и console. .env и настоящие аккаунты/ключи не читаются.
+
+Четыре модуля, **194/194**: failure-honesty 16 прежних сценариев, staged ticket,
+route security и composed workflow с настоящим Sharp. SQL/reservation, Auth и
+Storage в этом срезе — doubles; он не доказывает настоящие ACL, облачную
+доставку, атомарность provider-процесса или весь G5. Новых skips нет. Полный
+root build в production mode прошёл с exit 0: оба API compiler modes, types,
+353 cold-start и Vite; прежние предупреждения sourcemap/mixed serverAuth
+сохранены. Профильный лог advertising-failure-honesty-regression.log и
+advertising-failure-honesty-build-production.log находятся в node_modules/.cache.
+Первый build тоже завершился с 0, но унаследовал NODE_ENV=test от тестового
+runner; он не принят за обычную production-mode сборку. После обнаружения
+этого различия полный build повторён с чистым окружением и явным production,
+без изменения исходников. Это локальная сборка, не публикация Production.
+
+Закрыт только F6-долг, обнаруженный в G2-C21, без ослабления ранних request-key,
+доступов, private bucket или create-only guards. Остальные общеплатформенные
+регрессионные долги и G1–G8 остаются; Production, Preview, рабочая CRM, Baspana,
+салоны, WhatsApp, внешние провайдеры, генерации и расходы не затронуты.
+
 ### Цикл G5-C60 / G7-C37: потерянный ответ квоты до запуска видео — локально, 26 октября
 
 Воспроизведён дефект: квота могла сохраниться, но ошибка её ответа отменяла

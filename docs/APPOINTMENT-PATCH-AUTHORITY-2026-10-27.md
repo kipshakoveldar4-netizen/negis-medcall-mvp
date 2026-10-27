@@ -142,6 +142,10 @@ silently skipped; it is not part of the accepted scoped G2 regression and
 needs a separate current-workflow fixture before claiming that broader suite
 green. It is not evidence of a live Storage outage. The failed exploratory
 log is `appointment-patch-regression-first.log` in the ignored cache directory.
+Later G5-C61 in DELIVERY-CYCLES reconciles that test-only fixture with the
+current staged workflow and pins the actual Storage refusal. This preserves
+the historical failed receipt above; it does not turn the scoped G2 run into
+acceptance of the entire platform test set or real Storage delivery.
 
 Production, Baspana, salons, WhatsApp, protected 059/065, advertising,
 generations, external sends and expenses are unchanged.

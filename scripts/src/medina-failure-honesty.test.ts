@@ -26,6 +26,12 @@ const negisSrc = path.join(repoRoot, "artifacts", "negis", "src");
 
 const WORKSPACE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const USER_A = "11111111-1111-4111-8111-111111111111";
+const STAFF_A = "22222222-2222-4222-8222-222222222222";
+const UPLOAD_ID = "33333333-3333-4333-8333-333333333333";
+const UPLOAD_REQUEST = "44444444-4444-4444-8444-444444444444";
+const ORIGIN = "https://project.example.test";
+const SECRET = "SYNTHETIC_FAILURE_HONESTY_SERVICE_KEY_NEVER_REAL";
+const STORAGE_TOKEN = "SYNTHETIC_FAILURE_HONESTY_STORAGE_TOKEN";
 const TOKEN = "header.payload.signature";
 
 // The kind of thing PostgREST puts in error.message.
@@ -34,8 +40,9 @@ const POSTGRES_TEXT = 'permission denied for table clients (constraint "clients_
 type MockResponse = {
   statusCode: number;
   body: Record<string, unknown>;
+  headers: Record<string, unknown>;
   status: (code: number) => MockResponse;
-  setHeader: () => MockResponse;
+  setHeader: (name: string, value: unknown) => MockResponse;
   json: (payload: unknown) => MockResponse;
 };
 
@@ -43,37 +50,42 @@ function mockResponse(): MockResponse {
   const res: MockResponse = {
     statusCode: 0,
     body: {},
+    headers: {},
     status(code) { res.statusCode = code; return res; },
-    setHeader() { return res; },
+    setHeader(name, value) { res.headers[name.toLowerCase()] = value; return res; },
     json(payload) { res.body = (payload ?? {}) as Record<string, unknown>; return res; },
   };
   return res;
 }
 
-const membership = { id: "staff-a", workspace_id: WORKSPACE_A, role: "owner", status: "active" };
+const membership = { id: STAFF_A, workspace_id: WORKSPACE_A, auth_user_id: USER_A, role: "owner", status: "active" };
 
 /** Loads the real router with a client that fails on the named tables. */
 async function loadRouter(failing: Record<string, string>) {
-  process.env.SUPABASE_URL = "https://project.example.test";
-  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
-  process.env.VIDEO_OPTIMIZATION_ENABLED = "true";
+  const originalEnv = process.env;
+  process.env = { NODE_ENV: "test", SUPABASE_URL: ORIGIN, SUPABASE_SERVICE_ROLE_KEY: SECRET, VIDEO_OPTIMIZATION_ENABLED: "true" };
 
   const originalFetch = globalThis.fetch;
   const warnings: string[] = [];
+  const events: string[] = [], unexpectedFetches: string[] = [];
   const originalWarn = console.warn;
   console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
 
-  globalThis.fetch = (async () => ({
-    ok: true,
-    status: 200,
-    text: async () => JSON.stringify({ id: USER_A, email: "a@example.test" }),
-  })) as unknown as typeof globalThis.fetch;
+  globalThis.fetch = (async (input: unknown) => {
+    const url = input instanceof URL ? input.href : typeof input === "string" ? input : (input as Request).url;
+    if (url !== `${ORIGIN}/auth/v1/user`) {
+      unexpectedFetches.push(url);
+      return new Response("Synthetic fixture forbids non-Auth fetch", { status: 503 });
+    }
+    return new Response(JSON.stringify({ id: USER_A, email: "a@example.test" }), { headers: { "content-type": "application/json" } });
+  }) as typeof globalThis.fetch;
 
   const supabaseModule = (await import(
     pathToFileURL(path.join(repoRoot, "lib", "supabase", "server.ts")).href
   )) as { setSupabaseServerClientFactoryForTests: (factory: (() => unknown) | null) => void };
 
-  supabaseModule.setSupabaseServerClientFactoryForTests(() => withAppointmentCreateRpcSpy({
+  supabaseModule.setSupabaseServerClientFactoryForTests(() => {
+    const client = withAppointmentCreateRpcSpy({
     from(table: string) {
       const settle = (shape: "one" | "list") => {
         const message = failing[table];
@@ -86,10 +98,10 @@ async function loadRouter(failing: Record<string, string>) {
       const builder: Record<string, unknown> = {};
       Object.assign(builder, {
         select: () => builder,
-        insert: () => builder,
-        update: () => builder,
-        upsert: () => builder,
-        delete: () => builder,
+        insert: () => { events.push(`insert:${table}`); return builder; },
+        update: () => { events.push(`update:${table}`); return builder; },
+        upsert: () => { events.push(`upsert:${table}`); return builder; },
+        delete: () => { events.push(`delete:${table}`); return builder; },
         order: () => builder,
         limit: () => builder,
         eq: () => builder,
@@ -102,16 +114,53 @@ async function loadRouter(failing: Record<string, string>) {
       return builder;
     },
     storage: {
-      from: () => ({
-        createSignedUploadUrl: async () => ({ data: null, error: { message: POSTGRES_TEXT } }),
-        getPublicUrl: () => ({ data: { publicUrl: "https://project.example.test/x" } }),
-      }),
+      async getBucket(bucket: string) {
+        assert.equal(bucket, "ad-creatives-staging"); events.push("bucket:private");
+        return { data: { id: bucket, public: false, file_size_limit: 5 * 1024 * 1024, allowed_mime_types: ["image/jpeg"] }, error: null };
+      },
+      from(bucket: string) {
+        assert.equal(bucket, "ad-creatives-staging");
+        return {
+          async list(folder: string, options: { limit: number; search: string }) {
+            assert.equal(folder, `${WORKSPACE_A}/staged/${UPLOAD_ID}`);
+            assert.deepEqual(options, { limit: 2, search: "original.jpg" }); events.push("list:private");
+            return { data: [], error: null };
+          },
+          async createSignedUploadUrl(key: string, options: { upsert: boolean }) {
+            assert.equal(key, `${WORKSPACE_A}/staged/${UPLOAD_ID}/original.jpg`);
+            assert.deepEqual(options, { upsert: false }); events.push("mint:refused");
+            return { data: null, error: { message: `${POSTGRES_TEXT} ${SECRET} ${STORAGE_TOKEN}` } };
+          },
+        };
+      },
     },
-  }));
+    });
+    const appointmentRpc = client.rpc;
+    client.rpc = async (name, args) => {
+      if (name !== "reserve_creative_upload") return appointmentRpc(name, args);
+      assert.deepEqual(args, { p_workspace_id: WORKSPACE_A, p_staff_user_id: STAFF_A, p_auth_user_id: USER_A,
+        p_request_key: UPLOAD_REQUEST, p_file_name: "creative.jpg", p_mime_type: "image/jpeg", p_file_size: 2048, p_source: "signed" });
+      events.push("reserve:upload");
+      const now = Date.now();
+      return { data: { ticket: { v: 1, id: UPLOAD_ID, workspaceId: WORKSPACE_A, userId: USER_A, staffUserId: STAFF_A,
+        fileName: "creative.jpg", mimeType: "image/jpeg", fileSize: 2048, issuedAt: now, expiresAt: now + 7200000 },
+        requestKey: UPLOAD_REQUEST, status: "reserved" }, error: null };
+    };
+    return client;
+  });
 
-  const routerModule = (await import(pathToFileURL(routerPath).href)) as {
+  const restore = () => {
+    process.env = originalEnv;
+    globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
+    supabaseModule.setSupabaseServerClientFactoryForTests(null);
+    assert.deepEqual(unexpectedFetches, [], "Only the owned synthetic Auth response may be requested");
+  };
+  let routerModule: {
     default: (req: unknown, res: MockResponse) => Promise<unknown>;
   };
+  try { routerModule = await import(pathToFileURL(routerPath).href); }
+  catch (error) { restore(); throw error; }
 
   const call = async (input: { segments: string[]; method?: string; body?: unknown; query?: Record<string, unknown> }) => {
     const res = mockResponse();
@@ -124,16 +173,12 @@ async function loadRouter(failing: Record<string, string>) {
       },
       res,
     );
-    return { res, warnings: [...warnings] };
+    return { res, warnings: [...warnings], events: [...events] };
   };
 
   return {
     call,
-    restore: () => {
-      globalThis.fetch = originalFetch;
-      console.warn = originalWarn;
-      supabaseModule.setSupabaseServerClientFactoryForTests(null);
-    },
+    restore,
   };
 }
 
@@ -222,14 +267,21 @@ test("F5 the detail an operator needs still reaches the server log", async () =>
 
 test("F6 a signed upload that Storage refuses says so without quoting Storage", async () => {
   await withRouter({}, async (ctx) => {
-    const { res } = await ctx.call({
+    const { res, events } = await ctx.call({
       segments: ["ad-creatives", "signed-upload"],
       method: "POST",
-      body: { fileName: "creative.jpg", mimeType: "image/jpeg", fileSize: 2048 },
+      body: { requestKey: UPLOAD_REQUEST, fileName: "creative.jpg", mimeType: "image/jpeg", fileSize: 2048 },
     });
 
-    assert.equal(res.statusCode, 502, bodyText(res.body));
-    assert.equal(bodyText(res.body).includes("permission denied"), false);
+    assert.deepEqual(events, ["reserve:upload", "bucket:private", "list:private", "mint:refused"],
+      "The real staged workflow must reach the Storage refusal, without metadata writes or a second admission");
+    assert.equal(res.statusCode, 503, bodyText(res.body));
+    assert.equal(res.body.code, "creative_staging_ticket_unconfirmed");
+    assert.equal(res.body.success, false);
+    assert.equal(res.headers["cache-control"], "private, no-store");
+    for (const leak of ["permission denied", "clients_pkey", SECRET, STORAGE_TOKEN, UPLOAD_ID, "signedUrl", "uploadHandle", "publicUrl"]) {
+      assert.equal(bodyText(res.body).includes(leak), false, `Storage response exposed ${leak}`);
+    }
   });
 });
 
