@@ -172,6 +172,8 @@
     "test:provision": "tsx --test ./src/medina-provision.test.ts",
     "test:mobile-overlays": "tsx --test ./src/medina-mobile-overlays.test.ts ./src/medina-mobile-nav-lifetime.test.ts",
     "test:control-portal": "tsx --test ./src/medina-control-portal.test.ts ./src/medina-control-isolation.test.ts ./src/medina-control-preview-build.test.ts ./src/medina-control-public-env.test.ts ./src/medina-control-api-actor.test.ts ./src/medina-control-subscription-recovery.test.ts ./src/medina-control-onboarding-actor.test.ts ./src/medina-control-operators-actor.test.ts ./src/medina-control-browser-fixture.test.ts",
+    "test:control-lazy-browser": "node --import tsx --test ./fixtures/control-lazy-browser.test.mjs",
+    "test:control-lazy-build": "node --test ./fixtures/control-lazy-build.test.mjs",
     "test:onboarding-portal": "tsx --test ./src/medina-onboarding.test.ts ./src/medina-owner-login-runtime.test.ts ./src/medina-owner-login-ui.test.ts",
     "test:text-provider": "tsx --test ./src/medina-text-provider.test.ts",
     "test:staff-credentials": "tsx --test ./src/medina-staff-credentials.test.ts ./src/medina-staff-exact-login-runtime.test.ts",

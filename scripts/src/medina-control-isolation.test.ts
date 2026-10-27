@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Script } from "node:vm";
+import { eagerControlLazy, controlFixtureType, controlFixtureSuspense, ControlFixtureComponent } from "./control-lazy-test-fixture";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const controlSrc = path.join(root, "artifacts/medina-control/src");
@@ -398,7 +399,7 @@ test("Ready actual Supabase wrapper preserves explicit credentials and session f
 type UiNode = { type: unknown; props: Record<string, any> };
 type FixtureSession = { user: { id: string; email: string }; access_token: string };
 const storedSession: FixtureSession = { user: { id: "synthetic-owner-id", email: "owner@example.test" }, access_token: "synthetic-stored-session" };
-function jsx(type: unknown, props: UiNode["props"]): UiNode { return { type, props }; }
+function jsx(type: unknown, props: UiNode["props"]): UiNode { return { type: controlFixtureType(type), props }; }
 function nodes(value: any): UiNode[] {
   if (Array.isArray(value)) return value.flatMap(nodes);
   if (!value || typeof value !== "object" || !("props" in value)) return [];
@@ -419,6 +420,7 @@ function appFixture(controlConfig: ControlConfig, session: FixtureSession | null
   const actorListeners = new Set<(next: FixtureSession | null) => void>();
   const { default: App } = evaluate<{ default(): UiNode }>(appCode, "control-app.fixture.cjs", {
     react: {
+      lazy: eagerControlLazy, Suspense: controlFixtureSuspense, Component: ControlFixtureComponent,
       useState(initial: unknown) {
         const index = cursor++;
         if (!(index in slots)) slots[index] = initial;
@@ -460,6 +462,7 @@ function appFixture(controlConfig: ControlConfig, session: FixtureSession | null
     "./screens/ClinicCard": { ClinicCard: () => null },
     "./screens/Onboarding": { Onboarding: () => null },
     "./screens/Operators": { Operators: () => null },
+    "./screens/Contributors": { Contributors: () => null },
   });
   function render() { cursor = 0; return App(); }
   return {

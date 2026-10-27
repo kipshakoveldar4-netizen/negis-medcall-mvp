@@ -7,6 +7,7 @@ import test from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { Script } from "node:vm";
+import { eagerControlLazy, controlFixtureType, controlFixtureSuspense, ControlFixtureComponent } from "./control-lazy-test-fixture";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const ts = createRequire(path.join(root, "package.json"))("typescript") as typeof import("typescript");
@@ -676,16 +677,17 @@ function appFixture(fixture: Fixture) {
   const effects: Array<() => void | (() => void)> = [];
   const cleanups: Array<() => void> = [];
   let cursor = 0;
-  const screens = Object.fromEntries(["Login", "Overview", "ClinicCard", "Onboarding", "Operators"]
+  const screens = Object.fromEntries(["Login", "Overview", "ClinicCard", "Onboarding", "Operators", "Contributors"]
     .map((name) => [name, () => null]));
   const exports = {} as { default(): UiNode };
   function jsx(type: unknown, props: UiNode["props"], key?: string | number): UiNode {
-    return { type, props, key: key === undefined ? null : String(key) };
+    return { type: controlFixtureType(type), props, key: key === undefined ? null : String(key) };
   }
   new Script(appCode, { filename: appPath }).runInNewContext({
     exports,
     require(name: string) {
       if (name === "react") return {
+        lazy: eagerControlLazy, Suspense: controlFixtureSuspense, Component: ControlFixtureComponent,
         useState(initial: unknown) {
           const index = cursor++;
           if (!(index in slots)) slots[index] = typeof initial === "function" ? initial() : initial;

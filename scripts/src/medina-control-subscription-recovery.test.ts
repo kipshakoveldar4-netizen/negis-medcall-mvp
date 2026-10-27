@@ -6,6 +6,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Script } from "node:vm";
+import { eagerControlLazy, controlFixtureType, controlFixtureSuspense, ControlFixtureComponent } from "./control-lazy-test-fixture";
 
 // Runs the actual App/Overview, hooks, and local client modules. Only React's
 // hook scheduling, other screen boundaries, auth, storage, and HTTP are faked.
@@ -48,11 +49,13 @@ type Slot =
   | { kind: "memo"; value: unknown; deps: Dependencies }
   | { kind: "effect"; create: Effect; deps: Dependencies; cleanup?: () => void; pending: boolean };
 
-const jsx = (type: unknown, props: Props, key?: unknown): Element => ({ type, props, key });
+const jsx = (type: unknown, props: Props, key?: unknown): Element => ({ type: controlFixtureType(type), props, key });
 function elements(child: Child): Element[] {
   if (Array.isArray(child)) return child.flatMap(elements);
   if (child === null || typeof child !== "object") return [];
-  return [child, ...elements(child.props.children)];
+  // React retries a resolved lazy boundary; the hook-only tree has no reconciler.
+  const type = controlFixtureType(child.type);
+  return [type === child.type ? child : { ...child, type }, ...elements(child.props.children)];
 }
 function content(child: Child): string {
   if (Array.isArray(child)) return child.map(content).join("");
@@ -249,6 +252,9 @@ async function fixture(t: TestContext, storage = memoryStorage(), initialActor =
   const cache = new Map<string, unknown>();
   const browserEvents = { addEventListener() {}, removeEventListener() {} };
   const react = new Proxy({}, { get(_target, name) {
+    if (name === "lazy") return eagerControlLazy;
+    if (name === "Suspense") return controlFixtureSuspense;
+    if (name === "Component") return ControlFixtureComponent;
     return (...args: unknown[]) => {
       const hook = Reflect.get(activeDriver.hooks, name === "useLayoutEffect" ? "useEffect" : name);
       assert.equal(typeof hook, "function", `Unsupported React hook ${String(name)}`);
@@ -260,7 +266,7 @@ async function fixture(t: TestContext, storage = memoryStorage(), initialActor =
     if (filename === path.join(control, "lib/supabase.ts")) return {
       supabase: { auth }, controlConfig: { ready: true, apiOrigin: "https://control.fixture.invalid" },
     };
-    for (const name of ["Login", "ClinicCard", "Onboarding", "Operators"]) {
+    for (const name of ["Login", "ClinicCard", "Onboarding", "Operators", "Contributors"]) {
       if (filename === path.join(control, `screens/${name}.tsx`)) return { [name]: Symbol(name) };
     }
     const source = ts.transpileModule(readFileSync(filename, "utf8"), {

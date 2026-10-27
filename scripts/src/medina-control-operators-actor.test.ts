@@ -7,6 +7,7 @@ import test, { type TestContext } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { Script } from "node:vm";
+import { eagerControlLazy, controlFixtureType, controlFixtureSuspense, ControlFixtureComponent } from "./control-lazy-test-fixture";
 
 // Whole production App, Operators, controlFetch and local contracts are evaluated.
 // React scheduling, the Supabase SDK session API and HTTP delivery are doubles.
@@ -67,7 +68,7 @@ function text(child: Child): string {
   if (child && typeof child === "object") return text(child.props.children);
   return typeof child === "string" || typeof child === "number" ? String(child) : "";
 }
-const jsx = (type: unknown, props: Props, key?: unknown): Element => ({ type, props, key });
+const jsx = (type: unknown, props: Props, key?: unknown): Element => ({ type: controlFixtureType(type), props, key });
 const sameDeps = (a: Deps, b: Deps) => !!a && !!b && a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
 
 function hookDriver() {
@@ -219,7 +220,11 @@ async function fixture(t: TestContext) {
     // Transport cancellation deliberately does not win late-response races.
     return result.promise;
   }
-  const react = new Proxy({}, { get(_target, name) { return (...args: unknown[]) => {
+  const react = new Proxy({}, { get(_target, name) {
+    if (name === "lazy") return eagerControlLazy;
+    if (name === "Suspense") return controlFixtureSuspense;
+    if (name === "Component") return ControlFixtureComponent;
+    return (...args: unknown[]) => {
     const fn = Reflect.get(active.hooks, name === "useLayoutEffect" ? "useEffect" : name);
     assert.equal(typeof fn, "function", `Unsupported React hook ${String(name)}`);
     return fn(...args);
@@ -228,7 +233,7 @@ async function fixture(t: TestContext) {
   function load(filename: string): any {
     if (cache.has(filename)) return cache.get(filename);
     if (filename === path.join(control, "lib/supabase.ts")) return { supabase: { auth }, controlConfig: { ready: true, apiOrigin: origin } };
-    for (const name of ["Overview", "Login", "ClinicCard", "Onboarding"]) {
+    for (const name of ["Overview", "Login", "ClinicCard", "Onboarding", "Contributors"]) {
       if (filename === path.join(control, `screens/${name}.tsx`)) return { [name]: Symbol(name) };
     }
     const exports = {};

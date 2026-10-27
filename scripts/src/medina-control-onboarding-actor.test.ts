@@ -8,6 +8,7 @@ import test, { type TestContext } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { Script } from "node:vm";
+import { eagerControlLazy, controlFixtureType, controlFixtureSuspense, ControlFixtureComponent } from "./control-lazy-test-fixture";
 
 // Whole actual App, Onboarding, controlFetch, and staff-login helpers. React
 // scheduling and the auth SDK are doubles: no real SDK/JWT decoding is claimed.
@@ -60,7 +61,7 @@ type Slot =
   | { kind: "ref"; value: { current: unknown } }
   | { kind: "memo"; value: unknown; deps: Dependencies }
   | { kind: "effect"; create: Effect; deps: Dependencies; pending: boolean; cleanup?: () => void };
-const jsx = (type: unknown, props: Props, key?: unknown): Element => ({ type, props, key });
+const jsx = (type: unknown, props: Props, key?: unknown): Element => ({ type: controlFixtureType(type), props, key });
 function nodes(child: Child): Element[] {
   if (Array.isArray(child)) return child.flatMap(nodes);
   if (child === null || typeof child !== "object") return [];
@@ -180,6 +181,9 @@ async function fixture(t: TestContext) {
   };
   const exportsByFile = new Map<string, any>();
   const react = new Proxy({}, { get(_target, name) {
+    if (name === "lazy") return eagerControlLazy;
+    if (name === "Suspense") return controlFixtureSuspense;
+    if (name === "Component") return ControlFixtureComponent;
     return (...args: unknown[]) => {
       const hook = Reflect.get(active.hooks, name === "useLayoutEffect" ? "useEffect" : name);
       assert.equal(typeof hook, "function", `Unsupported hook ${String(name)}`);
@@ -240,7 +244,7 @@ async function fixture(t: TestContext) {
           || file === sourceFiles.app && name === "./lib/api") return evaluate(sourceFiles.api);
         if (name === "../../../../lib/auth/staff-logins") return evaluate(sourceFiles.logins);
         if (name === "./screens/Onboarding") return evaluate(sourceFiles.screen);
-        for (const nameOfScreen of ["Login", "Overview", "ClinicCard", "Operators"]) {
+        for (const nameOfScreen of ["Login", "Overview", "ClinicCard", "Operators", "Contributors"]) {
           if (name === `./screens/${nameOfScreen}`) return { [nameOfScreen]: Symbol(nameOfScreen) };
         }
         return forbidden(`${file}: ${name}`);

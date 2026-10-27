@@ -1,13 +1,24 @@
-import { useEffect, useRef, useState } from "react";
+import { Component, lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { controlConfig, supabase } from "./lib/supabase";
 import { subscribeControlActor } from "./lib/api";
 import { Login } from "./screens/Login";
-import { Overview } from "./screens/Overview";
-import { ClinicCard } from "./screens/ClinicCard";
-import { Onboarding } from "./screens/Onboarding";
-import { Operators } from "./screens/Operators";
-import { Contributors } from "./screens/Contributors";
+const Overview = lazy(() => import("./screens/Overview").then(module => ({ default: module.Overview })));
+const ClinicCard = lazy(() => import("./screens/ClinicCard").then(module => ({ default: module.ClinicCard })));
+const Onboarding = lazy(() => import("./screens/Onboarding").then(module => ({ default: module.Onboarding })));
+const Operators = lazy(() => import("./screens/Operators").then(module => ({ default: module.Operators })));
+const Contributors = lazy(() => import("./screens/Contributors").then(module => ({ default: module.Contributors })));
+
+class ScreenBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() {
+    return this.state.failed ? <section className="notice error" role="alert">
+      <h2>Не удалось загрузить раздел</h2>
+      <button type="button" className="btn" onClick={() => window.location.reload()}>Обновить страницу</button>
+    </section> : this.props.children;
+  }
+}
 
 // Medina Control — портал владельца платформы.
 //
@@ -89,6 +100,9 @@ export default function App() {
         <button type="button" className="signout" onClick={() => void supabase.auth.signOut()}>Выйти</button>
       </aside>
       <main className="main" key={actorEpoch}>
+        {/* A new boundary removes the previous form even while another chunk is pending. */}
+        <ScreenBoundary key={clinicId ? `clinic:${clinicId}` : screen}>
+        <Suspense fallback={<p role="status" aria-live="polite">Загружаем раздел...</p>}>
         {clinicId ? (
           <ClinicCard workspaceId={clinicId} onBack={() => setClinicId("")} />
         ) : screen === "contributors" ? (
@@ -100,6 +114,8 @@ export default function App() {
         ) : (
           <Overview onOpenClinic={setClinicId} />
         )}
+        </Suspense>
+        </ScreenBoundary>
       </main>
     </div>
   );

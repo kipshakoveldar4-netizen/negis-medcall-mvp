@@ -146,6 +146,8 @@
     "test:provision": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:provision",
     "test:mobile-overlays": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:mobile-overlays",
     "test:control-portal": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:control-portal",
+    "test:control-lazy-browser": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:control-lazy-browser",
+    "test:control-lazy-build": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:control-lazy-build",
     "test:onboarding-portal": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:onboarding-portal",
     "test:text-provider": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:text-provider",
     "test:staff-credentials": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:staff-credentials",
