@@ -1322,6 +1322,85 @@ node_modules/.cache/calendar-working-hours-20261020/. Чужие 059/065 сох�
 Связанный runtime Telegram C37 сохранён отдельным локальным **d3a77ed**.
 Его выпуск и оставшиеся облачные сценарии ещё не выполнены.
 
+### Цикл G2-C20: день восстановленной записи и составная проверка, 27 октября
+
+От базы 4b2028e через настоящие React actions/client/full HTTP router/native
+PostgreSQL 17.11 воспроизведён дефект: после потерянного ответа запись успели
+перенести, API возвращал её текущее время, а календарь открывал день старого
+черновика. Четыре owner/admin × confirmed/cancelled проверки падали именно
+на выбранном дне; failed parent не отдельный пятый дефект.
+
+Второй diagnostic после исправления дня подтвердил независимое ошибочное
+markLeadBooked при восстановлении уже отменённой встречи: два failed child
+под owner/admin и failed parent, 36 passes. Это проверенный callback-spy,
+не настоящее изменение заявки и не полная атомарность двух сущностей.
+
+Узкое frontend-исправление передаёт время подтверждённой строки из
+createAppointment в submitForm. Выбирается текущий день в поясе клиники;
+исходный payload/key не переписывается. Дополнительно текущий status управляет
+dispatch linked-lead booked: для cancelled он не отправляется, для confirmed
+положительный путь остаётся. Локальный prefill очищается в обоих случаях.
+Demo и edit сохраняют свои прежние правила. Ни API, ни SQL, роли, контакты
+клиентов или настройки не менялись.
+
+Локальный native-набор **39/39** объединяет actual React/client/HTTP/SQL
+recovery с +5, двумя услугами, 75 минутами и дробной исходной суммой 700050;
+текущей нулевой ценой, переносом через UTC-день и отменённым интервалом
+через полночь; отказом после деактивации, скрытием формы без потери ключа и
+однократным восстановлением после возврата доступа. Отдельный HTTP/SQL кейс
+пропускает три разных запроса к writer barrier до одновременного освобождения:
+в слоте capacity=2 ровно две записи, третий запрос получает 409/23P01 даже с
+allowConflict, без лишнего origin/receipt/client/audit. Прямые SQL authority
+кейсы входят в общий счёт, не объявляются отдельной браузерной приёмкой.
+
+Календарный regression **334/334**, фиксированный no-network набор **931/931**.
+Первый regression остановился на старом inline-выражении в source-check,
+повторный — на его втором таком же indexOf; оба failed run сохранены, не
+зачтены. Проверка обновлена под ту же подтверждённую переменную с усиленным
+порядком confirm → exact-key clear → normalize → publish и добавленной
+связью server time → calendar day. Поведенческий native red/green сохранён.
+
+Логи в node_modules/.cache: appointment-current-day-red.log;
+appointment-current-day-lead-red.log; appointment-current-day-final-native.log;
+appointment-current-day-final-regression.log;
+appointment-current-day-final-no-network.log. Счета частично перекрываются и не
+равны уникальному общему покрытию проекта. Подробности:
+[CRM-RECOVERY-CALENDAR-2026-10-27](CRM-RECOVERY-CALENDAR-2026-10-27.md).
+
+Root build exit 0: оба API compiler modes, все workspace/scripts types,
+353 cold-start проверки и Vite. Первый combined build после создания bundle
+упал с Windows UV_HANDLE_CLOSING / exit 3221226505 и не зачтён. Неизменённый
+полный повтор прошёл: appointment-current-day-final-build-retry.log; failed
+квитанция сохранена как appointment-current-day-final-build.log в той же cache.
+Прежние tooltip sourcemap/mixed serverAuth import предупреждения остаются;
+новые skips,
+ослабление no-network/IPC, изменение 41-reader snapshot или ключей окружения
+не добавлялись.
+
+Уборка своих строк проверена по точным workspace IDs; owned native helpers
+закрыли и удалили только свои сервер/профили. Пять пользовательских демо
+сохранены, защищённые 059/065 не изменены. Не выполнены real Auth/Preview,
+полные mobile/desktop route pixels, атомарные PATCH/delete, общий task replay
+и остальные G1–G8 gates. Рабочие CRM, Baspana, салоны, WhatsApp, провайдеры,
+реклама и расходы не затронуты. Публикации или облачной миграции не было.
+
+### Цикл G7-C55: свежая проверка окружения Preview без изменения настроек, 27 октября
+
+Read-only повтор от базы 4b2028e: выбранный Vercel deployment по-прежнему
+6c11l89kr / f18f411 / codex/site-blog-release-20260929, а не текущая локальная
+ветка. Project/SUPABASE показывает пять старых branch-specific overrides и
+те же пять общих Production/Preview строк. Shared с теми же Preview/SUPABASE
+фильтрами теперь проверен: No Results Found. Это не доказательство значений,
+принадлежности ключей тестовой базе или изоляции иных переменных/отправителей.
+
+Reveal, секреты, настройки, SQL, CRM API, сеансы клиентов и публикации не
+использовались. Временная вкладка закрыта. Полная новая квитанция и точная
+граница наблюдения: [PREVIEW-PREFLIGHT-2026-10-27](PREVIEW-PREFLIGHT-2026-10-27.md).
+Не выпускать ветку с унаследованными общими настройками. Точный test-only
+build/runtime target, выбранный SQL delta/ACL, старые writers и настоящее
+Auth/Preview остаются gates; локальная 93-пунктная проверка в облаке не запускалась.
+Рабочие Baspana, салоны, WhatsApp, реклама и расходы не затронуты.
+
 ### Цикл G7-C54: актуальная read-only проверка схемы Preview, 27 октября
 
 Base 0dd8d22. Прежний генератор проверял service EXECUTE старых 063/064,

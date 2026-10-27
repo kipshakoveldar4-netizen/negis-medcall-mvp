@@ -631,7 +631,8 @@ test("booking form sends the saved attempt through crmFetch and protects uncerta
   const source = await readFile(new URL("../../artifacts/negis/src/pages/AppointmentsPage.tsx", import.meta.url), "utf8");
   assert.match(source, /body: JSON\.stringify\(\{ \.\.\.attempt\.payload, requestKey: attempt\.requestKey \}\)/);
   assert.match(source, /response = await crmFetch/);
-  assert.match(source, /mergeCreatedAppointment\(current, appointmentFromApi\(saved\)\)/);
+  assert.match(source, /const savedAppointment = appointmentFromApi\(saved\);/);
+  assert.match(source, /mergeCreatedAppointment\(current, savedAppointment\)/);
   assert.match(source, /if \(submitLock\.current \|\| saving\) return/);
   assert.match(source, /if \(!retrying && localConflict/);
   assert.match(source, /<fieldset[^>]*disabled=\{saving \|\| unconfirmedCreate\}/);
@@ -655,7 +656,13 @@ test("booking form sends the saved attempt through crmFetch and protects uncerta
   assert.match(createBlock, /expectedUserId: scope\.actorId/);
   assert.match(createBlock, /dispatchGuard: \(\) => isCurrentMutationScope\(\) && createAttempt\.current === attempt/);
   assert.match(createBlock, /if \(!isCurrentMutationScope\(\) \|\| createAttempt\.current !== attempt\) throw/);
-  assert.match(createBlock, /setItems\(\(current\) => isCurrentMutationScope\(\) \? mergeCreatedAppointment\(current, appointmentFromApi\(saved\)\) : current\)/);
+  assert.match(createBlock, /setItems\(\(current\) => isCurrentMutationScope\(\) \? mergeCreatedAppointment\(current, savedAppointment\) : current\)/);
+  assert.match(createBlock, /startsAt: savedAppointment\.startsAt/);
+  assert.match(createBlock, /status: savedAppointment\.status/);
+  const submitBlock = source.slice(source.indexOf("const submitForm = async"), source.indexOf("const recoveryErrorNotice"));
+  assert.match(submitBlock, /nextCalendarStartsAt = result\.startsAt/);
+  assert.match(submitBlock, /setSelectedDate\(dateKeyFromStartsAt\(nextCalendarStartsAt, clinicTimeZone\)\)/);
+  assert.match(submitBlock, /if \(activeStatuses\.includes\(result\.status\)\) void markLeadBooked\(result\.leadId\)/);
   assert.match(createBlock, /originRole: scope\.role/);
   assert.match(createBlock, /leadId: prefillLeadRef\.current/);
   assert.doesNotMatch(createBlock, /attempt\.(?:payload|workspaceId|actorId|requestKey|originRole|leadId)\s*=(?!=)/);
@@ -666,8 +673,9 @@ test("booking form sends the saved attempt through crmFetch and protects uncerta
   assert.match(createBlock, /if \(current && canReleaseAppointmentAttempt\(attempt, response\?\.status \?\? 0, body\)\s*&& clearPersistedAppointmentCreateAttempt\(storage, attempt\)\)\s*\{\s*createAttempt\.current = null/);
   const confirmed = createBlock.indexOf("const saved = confirmedAppointmentCreate(body)");
   const cleared = createBlock.indexOf("if (!clearPersistedAppointmentCreateAttempt(storage, attempt))");
-  const merged = createBlock.indexOf("mergeCreatedAppointment(current, appointmentFromApi(saved))");
-  assert.ok(confirmed >= 0 && cleared > confirmed && merged > cleared,
+  const normalized = createBlock.indexOf("const savedAppointment = appointmentFromApi(saved)");
+  const merged = createBlock.indexOf("mergeCreatedAppointment(current, savedAppointment)");
+  assert.ok(confirmed >= 0 && cleared > confirmed && normalized > cleared && merged > normalized,
     "confirmation and verified exact-intent clearing must precede publishing success");
   assert.doesNotMatch(source, /clearPersistedAppointmentCreateAttempt\(storage\)/);
   assert.doesNotMatch(source, /saved \? appointmentFromApi\(saved\) : appointment, \.\.\.current/);

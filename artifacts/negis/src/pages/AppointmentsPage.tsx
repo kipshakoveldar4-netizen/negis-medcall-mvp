@@ -2107,7 +2107,7 @@ export function AppointmentsPage() {
     if (!isCurrentMutationScope()) throw new DOMException("Appointment view changed", "AbortError");
     if (!isRealWorkspace()) {
       void addItem(appointment);
-      return { clientCreated: false, replayed: false, leadId: "" };
+      return { clientCreated: false, replayed: false, leadId: "", startsAt: appointment.startsAt, status: appointment.status };
     }
 
     if (createRecoveryError) throw new Error(createRecoveryError);
@@ -2177,11 +2177,13 @@ export function AppointmentsPage() {
       if (!clearPersistedAppointmentCreateAttempt(storage, attempt)) {
         throw new AppointmentCreateRecoveryError("Запись сохранена, но хранилище повтора недоступно. Повторите проверку этой записи; не создавайте новую.");
       }
-      setItems((current) => isCurrentMutationScope() ? mergeCreatedAppointment(current, appointmentFromApi(saved)) : current);
+      const savedAppointment = appointmentFromApi(saved);
+      setItems((current) => isCurrentMutationScope() ? mergeCreatedAppointment(current, savedAppointment) : current);
       warnAboutUnsaved(unsavedFromBody(body));
       createAttempt.current = null;
       setUnconfirmedCreate(false);
-      return { clientCreated: body.data?.clientCreated === true, replayed: body.data?.replayed === true, leadId: attempt.leadId || "" };
+      return { clientCreated: body.data?.clientCreated === true, replayed: body.data?.replayed === true,
+        leadId: attempt.leadId || "", startsAt: savedAppointment.startsAt, status: savedAppointment.status };
     } catch (error) {
       const current = isCurrentMutationScope() && createAttempt.current === attempt;
       if (current && canReleaseAppointmentAttempt(attempt, response?.status ?? 0, body)
@@ -2338,6 +2340,7 @@ export function AppointmentsPage() {
     }
 
     submitLock.current = true;
+    let nextCalendarStartsAt = appointment.startsAt;
     setSaving(true);
     setConflictMessage("");
     setScheduleMessage("");
@@ -2378,10 +2381,12 @@ export function AppointmentsPage() {
       try {
         const result = await createAppointment(appointment, allowConflict, allowOutsideSchedule);
         if (!isCurrentMutationScope()) return;
+        // A recovered visit may have been rescheduled after the original commit.
+        nextCalendarStartsAt = result.startsAt;
         toast.success(result.replayed ? "Запись уже сохранена. Повтор не создал дубликат." : result.clientCreated ? "Запись создана, клиент добавлен в базу" : "Запись создана");
         if (result.leadId) {
           if (prefillLeadRef.current === result.leadId) prefillLeadRef.current = "";
-          void markLeadBooked(result.leadId);
+          if (activeStatuses.includes(result.status)) void markLeadBooked(result.leadId);
         }
       } catch (error) {
         if (!isCurrentMutationScope()) return;
@@ -2405,7 +2410,7 @@ export function AppointmentsPage() {
     if (!isCurrentMutationScope()) return;
     setModalOpen(false);
     setConflictMessage("");
-    setSelectedDate(dateKeyFromStartsAt(appointment.startsAt, clinicTimeZone));
+    setSelectedDate(dateKeyFromStartsAt(nextCalendarStartsAt, clinicTimeZone));
     } finally {
       if (isCurrentMutationScope()) {
         submitLock.current = false;

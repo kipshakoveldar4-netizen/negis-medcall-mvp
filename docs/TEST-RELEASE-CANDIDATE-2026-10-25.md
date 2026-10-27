@@ -1,5 +1,25 @@
 # Test Release Candidate: 25 October 2026
 
+**27 October local G2-C20, base 4b2028e:**
+[recovery calendar acceptance](CRM-RECOVERY-CALENDAR-2026-10-27.md) reproduces
+and fixes opening the original draft day after an already committed visit was
+rescheduled. It also refuses the linked-lead booked callback for an already
+cancelled recovered visit while retaining the confirmed positive callback;
+that callback is a spy, not an actual lead write. The 39/39 suite combines
+actual React actions/full HTTP/owned raw
+009-115 SQL recovery (+5/two services/zero price/denied recovery), a router/SQL
+distinct-key capacity-two race, and direct SQL authority cases. Calendar
+regression passes 334/334. These overlap earlier coverage and are not real Auth,
+full-route pixels or cloud acceptance.
+No API/migration/permission/provider setting changes are part of this delta.
+
+**27 October read-only recheck, base 4b2028e:** the
+[fresh preflight](PREVIEW-PREFLIGHT-2026-10-27.md) still identifies old
+6c11l89kr/f18f411, not the current local candidate. Shared/SUPABASE now visibly
+has no results under Preview; Project retains old-branch overrides plus common
+Production/Preview rows. Effective values, target identity, schema and external
+isolation are not attested. No settings, deployment, CRM API or SQL changed.
+
 **27 October local delta, G6-C3/G7-C40, base 1d33cb1:**
 [partner statistics](PARTNER-LEDGER-2026-10-27.md) adds a GET-only verified-subject
 report and coordinated local 109 reader; no commercial/financial activation.

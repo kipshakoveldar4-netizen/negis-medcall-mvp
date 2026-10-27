@@ -96,6 +96,11 @@ and `appointment-v2-root-build-verified.log` records the successful root build.
 
 ## Before Any Cloud Acceptance
 
+Later G2-C20 [recovery calendar](CRM-RECOVERY-CALENDAR-2026-10-27.md) fixes a
+confirmed-visit day selection defect and extends the actual React/HTTP/native
+lane to +5/two services/zero price/revoked recovery and distinct-key group
+capacity. It does not change 115, attest cloud bindings or close PATCH/delete.
+
 ### Current Read-Only Metadata Gate (G7-C54)
 
 Follow-up base 0dd8d22. The default `appointment-preview-readiness.mjs` CLI and

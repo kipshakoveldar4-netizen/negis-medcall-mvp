@@ -101,6 +101,12 @@ before accepting the native process exit.
 
 ## Remaining Gates
 
+Later local [G2-C20](CRM-RECOVERY-CALENDAR-2026-10-27.md) accepts selected
+actual React/client/full HTTP/native 009-115 recovery compositions and a
+three-distinct-writer capacity-two race. Together with G2-C19 it supersedes
+the corresponding missing local composed lane below, not the remaining real
+Auth/Preview, general task or complete G2 acceptance gates.
+
 This closes the local explicit-ID parity defect and the missing combined
 router/SQL capacity/replay lane, not all G2 or platform readiness. The same
 actual React caller -> native router/SQL lane, committed reload/remount and

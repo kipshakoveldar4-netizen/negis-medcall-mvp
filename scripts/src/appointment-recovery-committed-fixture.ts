@@ -36,7 +36,7 @@ const esbuild = createRequire(frontendRequire.resolve("vite/package.json"))("esb
   stop(): void;
 };
 
-async function actualSlice() {
+async function actualSlice(clinicTimeZone: "UTC" | "Asia/Almaty") {
   const source = await readFile(path.join(frontend, "src/pages/AppointmentsPage.tsx"), "utf8");
   const ast = ts.createSourceFile("AppointmentsPage.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const page = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "AppointmentsPage") as import("typescript").FunctionDeclaration;
@@ -80,7 +80,7 @@ async function actualSlice() {
 import {useSyncExternalStore} from 'react'; import {createRoot} from 'react-dom/client'; import {flushSync} from 'react-dom';
 import {fixture,useAuth,hasSupabaseFrontendEnv,supabase,readCurrentWorkspaceId,isRealWorkspace,toast,markLeadBooked} from 'appointment-committed-fake';
 ${helpers}
-const todayKeyAtLoad='2026-10-25',clinicTimeZone='UTC',clinicTimeZoneReady=true;
+const todayKeyAtLoad='2026-10-25',clinicTimeZone=${JSON.stringify(clinicTimeZone)},clinicTimeZoneReady=true;
 const activeCatalog=[],activeDoctors=[],directory={items:[]};
 const addItem=()=>{throw Error('Demo mutation forbidden');};
 function RecoverySlice(){
@@ -89,7 +89,7 @@ function RecoverySlice(){
  ${state}
  ${scope}
  ${actions}
- useLayoutEffect(()=>{fixture.view={items,form,modalOpen,saving,unconfirmedCreate,createRecoveryError,createRecoveryRead,
+ useLayoutEffect(()=>{fixture.view={items,form,selectedDate,modalOpen,saving,unconfirmedCreate,createRecoveryError,createRecoveryRead,
     createAttempt,mutationScope,submitLock,isCurrentMutationScope,submitForm,createAppointment,setForm,setModalOpen,setEditingId,
     setCreateRecoveryRead,setItems,prefillLeadRef};});
  return <main><output id="rows">{JSON.stringify(items)}</output>{modalOpen?<form onSubmit={e=>{e.preventDefault();void submitForm();}}>
@@ -103,7 +103,7 @@ fixture.unmount=()=>flushSync(()=>app.unmount());
 fixture.draft=()=>flushSync(()=>{fixture.view.setForm(formFromAppointment(${JSON.stringify(visit)},clinicTimeZone));fixture.view.setEditingId(null);fixture.view.setModalOpen(true);});
 fixture.start=()=>{const task={done:false,error:null};fixture.tasks.push(task);task.promise=fixture.view.submitForm().then(()=>{task.done=true;},e=>{task.error=e.message;task.done=true;});};
 fixture.capture=()=>{const action=fixture.view.submitForm;return()=>{const task={done:false,error:null};fixture.tasks.push(task);task.promise=action().then(()=>{task.done=true;},e=>{task.error=e.message;task.done=true;});};};
-fixture.snapshot=()=>({items:fixture.view.items,form:fixture.view.form,modalOpen:fixture.view.modalOpen,saving:fixture.view.saving,
+fixture.snapshot=()=>({items:fixture.view.items,form:fixture.view.form,selectedDate:fixture.view.selectedDate,modalOpen:fixture.view.modalOpen,saving:fixture.view.saving,
  uncertain:fixture.view.unconfirmedCreate,error:fixture.view.createRecoveryError,locked:fixture.view.submitLock.current,
  attempt:fixture.view.createAttempt.current?{requestKey:fixture.view.createAttempt.current.requestKey,payload:fixture.view.createAttempt.current.payload,
  actorId:fixture.view.createAttempt.current.actorId,workspaceId:fixture.view.createAttempt.current.workspaceId,uncertain:fixture.view.createAttempt.current.uncertain}:null,
@@ -142,8 +142,10 @@ export const markLeadBooked=id=>fixture.handoffs.push(id);
 export const toast={success:message=>fixture.successes.push(message),error:message=>fixture.errors.push(message),warning:message=>fixture.warnings.push(message)};
 `;
 
-export async function recoveryBundle(options: { jwtLikeTokens?: boolean } = {}) {
-  const result = await esbuild.build({ stdin: { contents: await actualSlice(), resolveDir: path.join(frontend, "src/pages"),
+export async function recoveryBundle(options: { jwtLikeTokens?: boolean; clinicTimeZone?: "UTC" | "Asia/Almaty" } = {}) {
+  const clinicTimeZone = options.clinicTimeZone ?? "UTC";
+  assert.ok(["UTC", "Asia/Almaty"].includes(clinicTimeZone));
+  const result = await esbuild.build({ stdin: { contents: await actualSlice(clinicTimeZone), resolveDir: path.join(frontend, "src/pages"),
     sourcefile: "appointment-committed-slice.tsx", loader: "tsx" }, bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic",
     define: { "process.env.NODE_ENV": '"production"', "import.meta.env.BASE_URL": '"/"', "import.meta.env.VITE_API_BASE_URL": '""' },
     plugins: [{ name: "owned-appointment-recovery", setup(build: any) {
