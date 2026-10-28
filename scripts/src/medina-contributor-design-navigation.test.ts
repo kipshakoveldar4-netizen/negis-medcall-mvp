@@ -10,7 +10,7 @@ import { Script } from "node:vm";
 // Local, bounded host-tree regression, not React DOM/StrictMode or SDK acceptance.
 // The complete production root/Application and pure contracts execute unchanged.
 // Auth, operatorApi, Shell and private child boundaries are synthetic. No child
-// ledger/jobs/terms internals, HTTP, database, CSS/layout or real Auth are tested.
+// ledger/history/jobs/terms internals, HTTP, database, CSS/layout or real Auth are tested.
 // Run: node scripts/node_modules/tsx/dist/cli.mjs --test scripts/src/medina-contributor-design-navigation.test.ts
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const ts = createRequire(path.join(root, "package.json"))("typescript") as typeof import("typescript");
@@ -202,6 +202,7 @@ async function runtime(t: TestContext, delayInitialSession = false) {
     });
   }
   function PartnerLedger(_props: Props) { boundaryRenders.push("PartnerLedger"); return jsx("section", { "data-private-panel": "ledger" }); }
+  function PartnerHistory(_props: Props) { boundaryRenders.push("PartnerHistory"); return jsx("section", { "data-private-panel": "history" }); }
   function CreatorJobs(_props: Props) { boundaryRenders.push("CreatorJobs"); return jsx("section", { "data-private-panel": "jobs" }); }
   function PartnerTerms(_props: Props) { boundaryRenders.push("PartnerTerms"); return jsx("section", { "data-private-panel": "terms" }); }
   const modules = new Map<string, Record<string, unknown>>();
@@ -220,6 +221,7 @@ async function runtime(t: TestContext, delayInitialSession = false) {
       if (dependency === "@/lib/operatorApi") return { operatorApi };
       if (dependency === "@/components/portals/PortalShell") return { PortalShell };
       if (dependency === "@/components/contributors/PartnerLedger") return { PartnerLedger };
+      if (dependency === "@/components/contributors/PartnerHistory") return { PartnerHistory };
       if (dependency === "@/components/contributors/PartnerTerms") return { PartnerTerms };
       if (dependency === "@/components/contributors/CreatorJobs") return { CreatorJobs };
       if (dependency === "../../../../lib/crm/contributor-contracts") return load("contracts");
@@ -253,7 +255,7 @@ async function runtime(t: TestContext, delayInitialSession = false) {
     const request = matches[0]!; request.claimed = true;
     return request;
   }
-  function boundary(name: "PartnerLedger" | "CreatorJobs" | "PartnerTerms") {
+  function boundary(name: "PartnerLedger" | "PartnerHistory" | "CreatorJobs" | "PartnerTerms") {
     const instances = render.instances(name);
     assert.equal(instances.length, 1, `${name} must actually render through Application`);
     return instances[0]!.input.props;
@@ -284,7 +286,7 @@ async function runtime(t: TestContext, delayInitialSession = false) {
 type Ui = Awaited<ReturnType<typeof runtime>>;
 function assertNoPrivate(ui: Ui) {
   assert.equal(ui.render.nodes().filter(node => node.props["data-private-panel"] !== undefined).length, 0);
-  for (const name of ["PartnerLedger", "CreatorJobs", "PartnerTerms"]) assert.equal(ui.render.instances(name).length, 0, name);
+  for (const name of ["PartnerLedger", "PartnerHistory", "CreatorJobs", "PartnerTerms"]) assert.equal(ui.render.instances(name).length, 0, name);
 }
 function assertActorGone(ui: Ui, previous: ContributorProfile) {
   assertNoPrivate(ui);
@@ -307,6 +309,9 @@ test("actual approved-both Application switches partner -> creator -> profile an
   t.diagnostic(`Actual ContributorPortal/Application SHA256 ${ui.sourceHash}; synthetic host tree, Auth and private child boundaries`);
   assert.equal(ui.boundary("PartnerLedger").userId, A);
   assert.equal((ui.boundary("PartnerLedger").isActorCurrent as () => boolean)(), true);
+  assert.equal(ui.boundary("PartnerHistory").userId, A);
+  assert.equal((ui.boundary("PartnerHistory").isActorCurrent as () => boolean)(), true);
+  const historyInstance = ui.render.instances("PartnerHistory")[0]!.id;
   assert.equal(ui.render.instances("CreatorJobs").length, 0);
   assert.equal(ui.nav("operator").props.href, "/operator");
   const title = ui.find(node => node.type === "h1").props.children;
@@ -315,6 +320,7 @@ test("actual approved-both Application switches partner -> creator -> profile an
   assert.equal(ui.boundary("CreatorJobs").actorId, A);
   assert.equal((ui.boundary("CreatorJobs").isSessionCurrent as () => boolean)(), true);
   assert.equal(ui.render.instances("PartnerLedger").length, 0);
+  assert.equal(ui.render.instances("PartnerHistory").length, 0);
   assert.equal(ui.render.nodes().some(node => node.props["data-nav-id"] === "terms"), false);
   await ui.navigate("profile");
   assertNoPrivate(ui);
@@ -327,6 +333,8 @@ test("actual approved-both Application switches partner -> creator -> profile an
   await ui.mode("partner");
   assert.equal(ui.shell().props["data-active-id"], "overview", "Mode handler resets profile to overview");
   ui.boundary("PartnerLedger");
+  ui.boundary("PartnerHistory");
+  assert.notEqual(ui.render.instances("PartnerHistory")[0]!.id, historyInstance, "Returning to partner mode mounts fresh history");
   assert.equal(ui.requests.length, 1, "Navigation itself does not invent mutations or fetches");
 });
 
@@ -343,19 +351,27 @@ for (const status of [null, "pending", "suspended"] as const) {
     assertNoPrivate(ui);
     assert.equal(ui.boundaryRenders.includes("CreatorJobs"), false, "No hidden or transient creator component invocation");
     assert.equal(ui.requests.length, 1);
-    await ui.mode("partner"); ui.boundary("PartnerLedger");
+    await ui.mode("partner"); ui.boundary("PartnerLedger"); ui.boundary("PartnerHistory");
   });
 }
 
-test("actual creator-only account defaults to jobs and cannot mount partner ledger or terms", async t => {
-  const ui = await populated(t, profile(A, null, "approved"));
-  ui.boundary("CreatorJobs");
-  await ui.mode("partner"); assertNoPrivate(ui);
-  await ui.navigate("terms"); assertNoPrivate(ui);
-  assert.equal(ui.boundaryRenders.includes("PartnerLedger"), false);
-  assert.equal(ui.boundaryRenders.includes("PartnerTerms"), false);
-  await ui.mode("creator"); ui.boundary("CreatorJobs");
-});
+for (const status of [null, "pending", "suspended"] as const) {
+  test(`actual approved creator/unapproved partner (${status}) cannot mount partner ledger, history or terms`, async t => {
+    const ui = await populated(t, profile(A, status, "approved"));
+    if (status === null) ui.boundary("CreatorJobs");
+    else assertNoPrivate(ui);
+    await ui.mode("partner"); assertNoPrivate(ui);
+    await ui.navigate("terms"); assertNoPrivate(ui);
+    await ui.navigate("profile"); assertNoPrivate(ui);
+    await ui.navigate("overview"); assertNoPrivate(ui);
+    for (const name of ["PartnerLedger", "PartnerHistory", "PartnerTerms"]) {
+      assert.equal(ui.boundaryRenders.includes(name), false, `No hidden or transient ${name} invocation`);
+    }
+    await ui.mode("creator"); ui.boundary("CreatorJobs");
+    assert.equal(ui.render.instances("PartnerHistory").length, 0);
+    assert.equal(ui.requests.length, 1);
+  });
+}
 
 for (const outcome of ["revoked", "failed", "malformed"] as const) {
   test(`actual focus revalidation removes visible creator jobs after a ${outcome} profile response`, async t => {
@@ -378,15 +394,92 @@ for (const outcome of ["revoked", "failed", "malformed"] as const) {
   });
 }
 
+for (const outcome of ["revoked", "failed", "malformed"] as const) {
+  test(`actual focus revalidation removes partner ledger and history after a ${outcome} profile response`, async t => {
+    const value = profile(), ui = await populated(t, value);
+    ui.boundary("PartnerLedger"); ui.boundary("PartnerHistory");
+    ui.dispatchFocus(); await ui.render.flush();
+    const read = ui.take();
+    assert.equal(read.actor, A); assert.equal(read.valid(), true);
+    ui.boundary("PartnerLedger"); ui.boundary("PartnerHistory");
+    if (outcome === "failed") read.fail(new Error("Synthetic partner profile recheck failure"));
+    else read.succeed(outcome === "revoked" ? profile(A, "suspended", "approved") : { ...value, revision: "not-a-revision" });
+    await ui.render.flush(); assertNoPrivate(ui);
+    if (outcome === "revoked") assert.equal(ui.shell().props["data-display-name"], value.displayName);
+    else {
+      assertActorGone(ui, value);
+      assert.ok(ui.render.nodes().some(node => node.props.role === "alert"));
+    }
+    await ui.navigate("profile"); await ui.navigate("overview"); assertNoPrivate(ui);
+    assert.equal(ui.requests.length, 2, "Navigation cannot restore history after failed/revoked profile validation");
+  });
+}
+
+test("actual explicit refresh removes partner history before passive effects and remounts it only after profile approval", async t => {
+  const value = profile(), ui = await populated(t, value);
+  const application = ui.render.instances("Application")[0]!.id;
+  const historyInstance = ui.render.instances("PartnerHistory")[0]!.id;
+  const ledgerInstance = ui.render.instances("PartnerLedger")[0]!.id;
+  const previousRead = ui.requests[0]!;
+  ui.invoke(ui.refresh());
+  assert.equal(previousRead.valid(), false, "Explicit refresh immediately invalidates the previous profile generation");
+  await ui.render.beforeEffects(); assertActorGone(ui, value);
+  assert.equal(ui.render.instances("Application")[0]!.id, application, "Refresh cleans children without changing the Auth lifetime");
+  await ui.render.flush();
+  assert.equal(previousRead.signal.aborted, true);
+  const read = ui.take();
+  assert.equal(read.actor, A); assert.equal(read.valid(), true); assertNoPrivate(ui);
+  read.succeed(value); await ui.render.flush();
+  assert.equal(ui.boundary("PartnerHistory").userId, A);
+  assert.equal((ui.boundary("PartnerHistory").isActorCurrent as () => boolean)(), true);
+  ui.boundary("PartnerLedger");
+  assert.notEqual(ui.render.instances("PartnerHistory")[0]!.id, historyInstance);
+  assert.notEqual(ui.render.instances("PartnerLedger")[0]!.id, ledgerInstance);
+  assert.equal(ui.requests.length, 2);
+});
+
+test("actual PartnerHistory denial clears all private UI and invalidates a late profile read until explicit refresh", async t => {
+  const value = profile(), ui = await populated(t, value);
+  const history = ui.boundary("PartnerHistory");
+  const historyInstance = ui.render.instances("PartnerHistory")[0]!.id;
+  assert.equal(history.userId, A);
+  assert.equal((history.isActorCurrent as () => boolean)(), true);
+  assert.equal(typeof history.onAccessDenied, "function");
+  ui.dispatchFocus(); await ui.render.flush();
+  const late = ui.take();
+  assert.equal(late.actor, A); assert.equal(late.valid(), true);
+  ui.boundary("PartnerHistory");
+  (history.onAccessDenied as () => void)();
+  assert.equal(late.valid(), false, "Child denial invalidates the in-flight parent profile generation");
+  await ui.render.beforeEffects(); assertActorGone(ui, value);
+  await ui.render.flush();
+  assert.ok(ui.render.nodes().some(node => node.props.role === "alert"));
+  late.succeed(value); await ui.render.flush(); assertActorGone(ui, value);
+  await ui.mode("partner"); assertNoPrivate(ui);
+  await ui.navigate("terms"); assertNoPrivate(ui);
+  await ui.navigate("profile"); await ui.navigate("overview"); assertNoPrivate(ui);
+  assert.equal(ui.requests.length, 2, "Denial cannot silently reload or restore private panels");
+  ui.invoke(ui.refresh()); await ui.render.flush();
+  const read = ui.take();
+  assert.equal(read.actor, A); assert.equal(read.valid(), true);
+  read.succeed(value); await ui.render.flush();
+  ui.boundary("PartnerLedger");
+  assert.equal(ui.boundary("PartnerHistory").userId, A);
+  assert.notEqual(ui.render.instances("PartnerHistory")[0]!.id, historyInstance);
+  assert.equal(ui.render.nodes().some(node => node.props.role === "alert"), false);
+});
+
 test("actual terms navigation and request/resolve/denial callbacks retain actor, body, signal and lifetime guards", async t => {
   const value = profile(), ui = await populated(t, value);
   const previousLedgerKey = ui.render.instances("PartnerLedger")[0]!.input.key;
+  const previousHistoryKey = ui.render.instances("PartnerHistory")[0]!.input.key;
   const shortcut = ui.find(node => node.type === "button" && node.props["data-nav-id"] === undefined
     && node.props["aria-pressed"] === undefined && node.props["data-sign-out"] === undefined
     && node.props["aria-label"] === undefined);
   ui.invoke(shortcut); await ui.render.flush();
   assert.equal(ui.shell().props["data-active-id"], "terms");
   assert.equal(ui.render.instances("PartnerLedger").length, 0);
+  assert.equal(ui.render.instances("PartnerHistory").length, 0);
   const terms = ui.boundary("PartnerTerms");
   assert.equal(terms.actorId, A); assert.equal(terms.profileId, value.id); assert.equal(terms.side, "partner");
   const request = terms.request as (options: TermsOptions) => Promise<unknown>;
@@ -410,6 +503,9 @@ test("actual terms navigation and request/resolve/denial callbacks retain actor,
   await ui.navigate("overview");
   const ledger = ui.render.instances("PartnerLedger")[0]!;
   assert.notEqual(ledger.input.key, previousLedgerKey, "Real terms receipt invalidates the ledger revision");
+  ui.boundary("PartnerHistory");
+  assert.notEqual(ui.render.instances("PartnerHistory")[0]!.input.key, previousHistoryKey,
+    "Real terms receipt also invalidates the history revision");
   await ui.navigate("terms");
   (ui.boundary("PartnerTerms").onAccessDenied as () => void)();
   await ui.render.flush(); assertActorGone(ui, value);
@@ -419,14 +515,15 @@ test("actual terms navigation and request/resolve/denial callbacks retain actor,
   refreshed.succeed(value); await ui.render.flush(); ui.boundary("PartnerTerms");
 });
 
-for (const panel of ["partner", "creator", "terms", "profile"] as const) {
+for (const panel of ["partner", "history", "creator", "terms", "profile"] as const) {
   test(`actual root account change clears ${panel} and displayName before passive effects; late A response cannot enter B`, async t => {
     const previous = { ...profile(), portfolioUrls: ["https://example.com/contributor-a/"] };
     const ui = await populated(t, previous);
     if (panel === "creator") await ui.mode("creator");
     if (panel === "terms") await ui.navigate("terms");
     if (panel === "profile") await ui.navigate("profile");
-    const name = panel === "partner" ? "PartnerLedger" : panel === "creator" ? "CreatorJobs" : "PartnerTerms";
+    const name = panel === "partner" ? "PartnerLedger" : panel === "history" ? "PartnerHistory"
+      : panel === "creator" ? "CreatorJobs" : "PartnerTerms";
     const old = panel === "profile" ? ui.render.instances("Application")[0]!.input.props : ui.boundary(name);
     const guard = (old.isActorCurrent ?? old.isSessionCurrent) as () => boolean;
     const oldRefresh = ui.refresh();
@@ -456,6 +553,14 @@ for (const panel of ["partner", "creator", "terms", "profile"] as const) {
     next.succeed(current); await ui.render.flush();
     assert.equal(ui.shell().props["data-display-name"], current.displayName);
     assert.equal(ui.boundary("PartnerLedger").userId, B, "Mode/section selection is not inherited from A");
+    assert.equal(ui.boundary("PartnerHistory").userId, B, "History receives B's original actor, not stale A identity");
+    assert.equal((ui.boundary("PartnerHistory").isActorCurrent as () => boolean)(), true);
+    assert.equal(guard(), false);
+    if (typeof old.onAccessDenied === "function") (old.onAccessDenied as () => void)();
+    await ui.render.flush();
+    assert.equal(ui.shell().props["data-display-name"], current.displayName, "Stale child denial cannot clear approved B");
+    assert.equal(ui.boundary("PartnerHistory").userId, B);
+    assert.equal(ui.requests.length, count);
     await ui.mode("creator"); assertNoPrivate(ui);
     await ui.navigate("profile");
     assert.ok(!ui.render.content().includes(previous.displayName));
@@ -467,6 +572,39 @@ for (const panel of ["partner", "creator", "terms", "profile"] as const) {
     assert.equal(ui.signOutCalls(), 1); assert.equal(ui.render.instances("Application").length, 0);
   });
 }
+
+test("actual PartnerHistory original-actor guard never revives after sign-out and same-actor re-entry or disposal", async t => {
+  const value = profile(), ui = await populated(t, value);
+  const old = ui.boundary("PartnerHistory");
+  const guard = old.isActorCurrent as () => boolean;
+  assert.equal(old.userId, A); assert.equal(guard(), true);
+  ui.emit(null);
+  assert.equal(guard(), false, "Actual Auth callback invalidates history before passive cleanup");
+  await ui.render.beforeEffects(); assertActorGone(ui, value);
+  await ui.render.flush();
+  assert.equal(ui.render.instances("Application").length, 0);
+  (old.onAccessDenied as () => void)();
+  await ui.render.flush(); assertNoPrivate(ui);
+  assert.equal(ui.requests.length, 1);
+  ui.emit(A); await ui.render.flush();
+  const read = ui.take();
+  assert.equal(read.actor, A); assert.equal(read.valid(), true);
+  read.succeed(value); await ui.render.flush();
+  const current = ui.boundary("PartnerHistory");
+  const currentGuard = current.isActorCurrent as () => boolean;
+  assert.equal(current.userId, A); assert.equal(currentGuard(), true);
+  assert.equal(guard(), false, "Matching actor IDs cannot revive the previous Auth lifetime");
+  (old.onAccessDenied as () => void)();
+  await ui.render.flush();
+  assert.equal(ui.boundary("PartnerHistory").userId, A);
+  assert.equal(ui.shell().props["data-display-name"], value.displayName);
+  assert.equal(ui.render.nodes().some(node => node.props.role === "alert"), false);
+  ui.render.dispose();
+  assert.equal(currentGuard(), false, "Disposal invalidates the propagated root lifetime guard");
+  (current.onAccessDenied as () => void)();
+  assertNoPrivate(ui);
+  assert.equal(ui.requests.length, 2, "Disposed child callbacks cannot start profile work");
+});
 
 test("actual root ignores delayed initial Auth after an event and rejects A -> B -> A stale profile responses", async t => {
   const ui = await runtime(t, true);
@@ -480,7 +618,7 @@ test("actual root ignores delayed initial Auth after an event and rejects A -> B
   await ui.render.flush();
   assert.equal(firstA.valid(), false); assert.equal(firstB.valid(), false); assert.equal(secondA.valid(), true);
   assert.equal(ui.shell().props["data-display-name"], undefined); assertNoPrivate(ui);
-  secondA.succeed(profile()); await ui.render.flush(); ui.boundary("PartnerLedger");
+  secondA.succeed(profile()); await ui.render.flush(); ui.boundary("PartnerLedger"); ui.boundary("PartnerHistory");
   assert.equal(ui.requests.length, 3, "Late bootstrap Auth must not replace the last observed account");
 });
 

@@ -183,6 +183,7 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   "contributor-account": { kind: "bootstrap", methods: ["GET", "POST"] },
   "platform-contributors": { kind: "platform", methods: ["GET", "PATCH"] },
   "partner-ledger": { kind: "bootstrap", methods: ["GET"] },
+  "partner-history": { kind: "bootstrap", methods: ["GET"] },
   "partner-terms": { kind: "bootstrap", methods: ["GET", "POST"] },
   "platform-partner-terms": { kind: "platform", methods: ["GET", "POST"] },
   "partner-entry": { kind: "partner_entry", methods: ["POST"] },

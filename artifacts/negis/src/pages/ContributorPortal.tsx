@@ -8,6 +8,7 @@ import { validatePasswordRules } from "../../../../lib/auth/password-rules";
 import { isSyntheticEmail, loginOrEmailToAuthEmail } from "../../../../lib/auth/staff-logins";
 import { contributorStatusLabels, parseContributorApplication, parseContributorProfile, type ContributorProfile } from "../../../../lib/crm/contributor-contracts";
 import { PartnerLedger } from "@/components/contributors/PartnerLedger";
+import { PartnerHistory } from "@/components/contributors/PartnerHistory";
 import { PartnerTerms } from "@/components/contributors/PartnerTerms";
 import { CreatorJobs } from "@/components/contributors/CreatorJobs";
 
@@ -178,6 +179,7 @@ function Application({ userId, isActorCurrent }: { userId: string; isActorCurren
           return operatorApi<unknown>("partner-terms" + query, options.body, options.method, options.signal, userId, () => current() && options.isCurrent());
         }} />}
         {section === "overview" && <><PartnerLedger key={partnerLedgerRevision} userId={userId} isActorCurrent={current} onAccessDenied={() => denyAccess("Доступ партнёра изменился. Обновите профиль.")} />
+          <PartnerHistory key={`history:${partnerLedgerRevision}`} userId={userId} isActorCurrent={current} onAccessDenied={() => denyAccess("Доступ партнёра изменился. Обновите профиль.")} />
           <div className="portal-profile-summary"><div><h2 className="font-medium">Партнёрская программа</h2><p className="portal-note">{contributorStatusLabels[profile.partnerStatus]}</p></div><button type="button" className="neu-btn" onClick={() => setSection("terms")}><FileText size={16}/>Код и условия<ArrowRight size={16}/></button></div></>}
       </>}
       {!isProfile && activeMode === "creator" && section === "overview" && profile.creatorStatus === "approved" && <CreatorJobs actorId={userId} isSessionCurrent={current} onAccessDenied={() => denyAccess("Доступ автора изменился. Обновите профиль.")} />}

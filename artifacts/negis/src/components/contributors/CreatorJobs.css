@@ -420,6 +420,54 @@
   flex-wrap: wrap;
 }
 
+.creator-workspace .creator-deadline {
+  display: grid;
+  min-width: 0;
+  width: 100%;
+  min-height: 72px;
+  grid-template-columns: 24px minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 20px;
+  padding: 16px 20px;
+  border: 1px solid var(--creator-line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--creator-ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.creator-workspace .creator-deadline__content {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  overflow-wrap: anywhere;
+}
+
+.creator-workspace .creator-deadline__label {
+  color: var(--creator-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.creator-workspace .creator-deadline__details {
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.creator-workspace .creator-deadline__details time {
+  font-weight: 500;
+}
+
+.creator-workspace .creator-deadline[data-expired="true"] .creator-deadline__label {
+  color: #983c35;
+}
+
+.creator-workspace .creator-deadline[aria-pressed="true"] {
+  border-color: #579e77;
+}
+
 .creator-workspace .creator-workspace__sr-only {
   position: absolute;
   width: 1px;
@@ -441,6 +489,11 @@
     border-color: #579e77;
     background: #edf8f2;
     color: var(--creator-ink);
+  }
+
+  .creator-workspace .creator-deadline:hover {
+    border-color: #579e77;
+    background: #edf8f2;
   }
 
   .creator-workspace .creator-workspace__status-options button:hover {
@@ -493,6 +546,11 @@
 }
 
 @media (max-width: 520px) {
+  .creator-workspace .creator-deadline {
+    gap: 12px;
+    padding-inline: 16px;
+  }
+
   .creator-workspace .creator-workspace__metrics {
     grid-template-columns: minmax(0, 1fr);
     padding: 0 16px;

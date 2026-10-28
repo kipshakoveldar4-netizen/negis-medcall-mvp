@@ -7,7 +7,8 @@ import { exercisePartnerCompanyApproval } from './partner-company-approval-cases
 
 test('owned native partner-company approval foundation; no HTTP activation, Auth creation or payment provider',{timeout:300000},async t=>{
   assert.equal(process.env.MEDINA_TEST_POSTGRES_NATIVE,'1','Explicit owned native opt-in only, no remote DSN');
-  const chain=await readReviewedChain(fileURLToPath(new URL('../../migrations/',import.meta.url))),last=chain.at(-1);assert.equal(last.file,'121_partner_company_approval.sql');
+  // Historical 121 protocol; current-chain composition is proved separately.
+  const chain=(await readReviewedChain(fileURLToPath(new URL('../../migrations/',import.meta.url)))).filter(e=>Number(e.file.slice(0,3))<=121),last=chain.at(-1);assert.equal(last.file,'121_partner_company_approval.sql');
   const fixture=await startNativePostgres();t.after(()=>fixture.close());const db=await fixture.connect();
   await db.query(`create role anon nologin;create role authenticated nologin;create role service_role nologin bypassrls;grant usage on schema public to anon,authenticated,service_role;
     create schema storage;create table storage.buckets(id text primary key,name text,public boolean,file_size_limit bigint,allowed_mime_types text[]);

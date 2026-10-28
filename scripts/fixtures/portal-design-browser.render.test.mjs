@@ -175,6 +175,38 @@ test('actual portals: owned headless screenshots, navigation, states and console
     await wait(`return document.querySelectorAll('button[aria-label^="Открыть задание:"]').length===3;`);
     assert.equal(await evaluate('return window.__portalDesignQA.snapshot().actor;'), actor);
   });
+  await t.test('partner confirmation history filters UTC months and resets without financial writes at 375/1440', async () => {
+    for (const width of [375, 1440]) {
+      await cdp.call('Emulation.setDeviceMetricsOverride', { width, height: width === 375 ? 900 : 1000, deviceScaleFactor: 1, mobile: width === 375 });
+      await navigate('partner');
+      await wait(`return !!document.querySelector('.ph-table tbody tr')&&!!document.querySelector('.ph-cards li');`);
+      assert.equal(await evaluate(`return document.querySelectorAll('.ph-table tbody tr').length;`), 3);
+      assert.equal(await evaluate(`return getComputedStyle(document.querySelector('.ph-table-wrap')).display!=='none';`), width === 1440);
+      assert.equal(await evaluate(`return getComputedStyle(document.querySelector('.ph-cards')).display!=='none';`), width === 375);
+      await evaluate(`const input=document.querySelector('.ph-month input');const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;setter.call(input,'2026-10');input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));`);
+      await wait(`return document.querySelectorAll('.ph-table tbody tr').length===2&&document.querySelector('.ph-heading p')?.textContent==='За 2026-10';`);
+      await evaluate(`document.querySelector('.partner-history').scrollIntoView({block:'start'});`);
+      const screenshot = await cdp.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+      const file = path.join(output, `partner-history-filter-${width}.png`); await writeFile(file, Buffer.from(screenshot.data, 'base64')); report.screenshots.push(file);
+      await evaluate(`document.querySelector('button[aria-label="Показать историю за всё время"]').click();`);
+      await wait(`return document.querySelectorAll('.ph-table tbody tr').length===3&&document.querySelector('.ph-heading p')?.textContent==='За всё время';`);
+      assert.equal(await evaluate(`return window.__portalDesignQA.calls.filter(call=>call.path.startsWith('/api/crm/partner-history')).every(call=>call.method==='GET'&&!call.body);`), true);
+    }
+  });
+  await t.test('creator nearest deadline opens the existing job detail and closes at 375/1440', async () => {
+    for (const width of [375, 1440]) {
+      await cdp.call('Emulation.setDeviceMetricsOverride', { width, height: width === 375 ? 900 : 1000, deviceScaleFactor: 1, mobile: width === 375 });
+      await navigate('creator');
+      await wait(`return !!document.querySelector('.creator-deadline');`);
+      await evaluate(`document.querySelector('.creator-deadline').click();`);
+      await wait(`return window.__portalDesignQA.calls.some(call=>call.path.startsWith('/api/crm/creator-job-detail?'))&&!!document.querySelector('[aria-label="Карточка задания"]');`);
+      await evaluate(`document.querySelector('[aria-label="Карточка задания"]').scrollIntoView({block:'start'});`);
+      const screenshot = await cdp.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+      const file = path.join(output, `creator-deadline-detail-${width}.png`); await writeFile(file, Buffer.from(screenshot.data, 'base64')); report.screenshots.push(file);
+      await evaluate(`document.querySelector('[aria-label="Карточка задания"] button[aria-label="Закрыть карточку"]').click();`);
+      await wait(`return !document.querySelector('[aria-label="Карточка задания"]');`);
+    }
+  });
   if (hotOnly) { assertIsolation(); return; }
   await t.test('production mode and sidebar navigation retain the same contributor identity', async () => {
     await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });

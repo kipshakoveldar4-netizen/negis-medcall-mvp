@@ -6,6 +6,7 @@ import { handleSiteInquiryDeletion, handleSiteInquiryDeletionPreview, handleSite
 import { handlePlatformOperators, handleOperatorAccount, handleOperatorInbox, handleClinicOperators } from "../../lib/crm/operators";
 import { handleContributorAccount, handlePlatformContributors } from "../../lib/crm/contributors";
 import { handlePartnerLedger } from "../../lib/crm/partner-ledger";
+import { handlePartnerHistory } from "../../lib/crm/partner-history";
 import { handlePartnerTerms } from "../../lib/crm/partner-terms";
 import { handlePartnerEntry } from "../../lib/crm/partner-entry";
 import { handleCreatorJobs, handleCreatorJobReads } from "../../lib/crm/creator-jobs";
@@ -319,6 +320,7 @@ async function dispatch(
     case "contributor-account": return segments.length === 1 ? handleContributorAccount(req, res) : notFound(res);
     case "platform-contributors": return segments.length === 1 ? handlePlatformContributors(req, res) : notFound(res);
     case "partner-ledger": return segments.length === 1 ? handlePartnerLedger(req, res) : notFound(res);
+    case "partner-history": return segments.length === 1 ? handlePartnerHistory(req, res) : notFound(res);
     case "partner-terms": return segments.length === 1 ? handlePartnerTerms(req, res) : notFound(res);
     case "platform-partner-terms": return segments.length === 1 ? handlePartnerTerms(req, res, true) : notFound(res);
     case "creator-jobs": return segments.length === 1 ? handleCreatorJobs(req, res) : notFound(res);

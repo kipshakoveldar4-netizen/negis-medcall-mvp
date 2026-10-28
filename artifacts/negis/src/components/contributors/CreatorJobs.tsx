@@ -16,6 +16,18 @@ const money = (job: Pick<CreatorJob, "feeMinor" | "currency">) => ["KZT", "USD",
   ? formatArrivalPrice(job.feeMinor, job.currency) : `${BigInt(job.feeMinor).toLocaleString("ru-RU")} ${job.currency} (мин. ед.)`;
 const date = (value: string) => new Date(value).toLocaleString("ru-RU", { dateStyle: "medium", timeStyle: "short" });
 const zone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+export function selectCreatorDeadline(items: readonly CreatorJob[], now: number): CreatorJob | null {
+  let upcoming: CreatorJob | null = null, overdue: CreatorJob | null = null;
+  const earlier = (job: CreatorJob, previous: CreatorJob | null) => previous === null
+    || Date.parse(job.dueAt) < Date.parse(previous.dueAt)
+    || (Date.parse(job.dueAt) === Date.parse(previous.dueAt) && job.id < previous.id);
+  for (const job of items) {
+    if (["approved", "declined", "cancelled"].includes(job.state) || !Number.isFinite(Date.parse(job.dueAt))) continue;
+    if (Date.parse(job.dueAt) > now) { if (earlier(job, upcoming)) upcoming = job; }
+    else if (earlier(job, overdue)) overdue = job;
+  }
+  return upcoming ?? overdue;
+}
 const illustrations = [
   { src: "/images/contributors/filming.webp", alt: "Иллюстрация: съёмка контента" },
   { src: "/images/contributors/interior.webp", alt: "Иллюстрация: интерьер" },
@@ -81,6 +93,7 @@ function CreatorJobsSession({ actorId, workspaceId, isSessionCurrent, onAccessDe
   const [offset, setOffset] = useState(0), [directoryOffset, setDirectoryOffset] = useState(0);
   const [selected, setSelected] = useState<string | null>(null), [creating, setCreating] = useState(false);
   const [search, setSearch] = useState(""), [status, setStatus] = useState<CreatorJobState | "all">("all");
+  const [deadlineTick, setDeadlineTick] = useState(0);
   const [message, setMessage] = useState(""), [busy, setBusy] = useState(false);
   const pending = useRef<{ controller: AbortController } | null>(null);
   const company = workspaceId !== undefined;
@@ -137,6 +150,18 @@ function CreatorJobsSession({ actorId, workspaceId, isSessionCurrent, onAccessDe
   const query = search.trim().toLocaleLowerCase("ru-RU");
   const visibleJobs = list?.data?.items.filter(job => (status === "all" || job.state === status)
     && [job.title, job.brief, ...(company ? [job.creatorName] : [])].some(value => value.toLocaleLowerCase("ru-RU").includes(query))) ?? [];
+  const deadlineNow = Date.now();
+  const nearest = !company && list?.data ? selectCreatorDeadline(list.data.items, deadlineNow) : null;
+  const deadlineExpired = nearest !== null && Date.parse(nearest.dueAt) <= deadlineNow;
+  useEffect(() => {
+    if (!nearest || deadlineExpired) return;
+    const timer = window.setTimeout(() => setDeadlineTick(value => value + 1),
+      Math.min(Math.max(0, Date.parse(nearest.dueAt) - Date.now()) + 1, 2147483647));
+    return () => window.clearTimeout(timer);
+  }, [nearest?.dueAt, deadlineExpired, deadlineTick, list?.data]);
+  function openJob(job: CreatorJob) {
+    if (list?.isCurrent()) { setSelected(job.id); setCreating(false); }
+  }
   if (denied || command.lifetime.expired) return <section aria-label="Задания авторов" className="creator-workspace"><p role="alert">Доступ к заданиям изменился. Обновите страницу после проверки прав.</p></section>;
   if (!command.isCurrent()) return <p role="status" className="creator-workspace">Проверяем доступ к заданиям…</p>;
   return <section aria-label="Задания авторов" className={`creator-workspace${company ? " creator-workspace--company" : ""}`}>
@@ -199,9 +224,17 @@ function CreatorJobsSession({ actorId, workspaceId, isSessionCurrent, onAccessDe
               : job.acceptedAt ? <p className="creator-job__note"><CheckCircle2 size={16} aria-hidden="true"/>Условия приняты</p> : null}
           </div>
           <button type="button" className="creator-job__open" aria-pressed={selected === job.id} aria-label={`Открыть задание: ${job.title}`}
-            onClick={() => { if (command.isCurrent()) { setSelected(job.id); setCreating(false); } }}>Открыть задание<ArrowRight size={18} aria-hidden="true"/></button>
+            onClick={() => openJob(job)}>Открыть задание<ArrowRight size={18} aria-hidden="true"/></button>
         </li>; })}</ul>}
       <Pages label="Страницы заданий" offset={offset} hasMore={list.data.hasMore} disabled={false} onChange={setOffset}/>
+      {nearest && <button type="button" className="creator-deadline" data-expired={deadlineExpired} aria-pressed={selected === nearest.id}
+        aria-label={`${deadlineExpired ? "Срок истёк" : "Ближайший срок"} на текущей странице. Открыть задание: ${nearest.title}`}
+        onClick={() => openJob(nearest)}>
+        <CalendarDays size={24} aria-hidden="true"/>
+        <span className="creator-deadline__content"><span className="creator-deadline__label">{deadlineExpired ? "Срок истёк" : "Ближайший срок"}<span aria-hidden="true"> · </span>На текущей странице</span>
+          <span className="creator-deadline__details"><time dateTime={nearest.dueAt}>{date(nearest.dueAt)}</time><span aria-hidden="true"> · </span>{nearest.title}</span></span>
+        <ChevronRight size={20} aria-hidden="true"/>
+      </button>}
     </>}
     {selected && <JobPanel key={selected} jobId={selected} actorId={actorId} workspaceId={workspaceId} command={command} revision={revision}
       busy={busy} onDenied={deny} onSend={send} onClose={() => setSelected(null)}/>}

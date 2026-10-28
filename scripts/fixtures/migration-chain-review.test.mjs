@@ -8,12 +8,21 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-121, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 113);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 113 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-122, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 114);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 114 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
+});
+
+test('122 adds a single authority-locked journal reader without business writes or browser grants',()=>{
+  const e=chain.find(v=>v.file.startsWith('122_'));
+  assert.deepEqual(e.evidence.tables,[]);assert.deepEqual(e.evidence.functions.map(f=>f.name),['public.read_growth_partner_history']);
+  assert.deepEqual(e.evidence.dynamicSqlLines,[]);assert.deepEqual(e.evidence.storageCatalogueLines,[]);assert.deepEqual(e.evidence.extensions,[]);
+  assert.match(e.source,/authority:=public\.read_growth_partner_ledger\(p_actor\)/);assert.match(e.source,/offset p_offset limit 21/);
+  assert.match(e.source,/kind collate "C"/);assert.match(e.source,/grant execute on function public\.read_growth_partner_history\(uuid,integer,text\) to service_role/);
+  assert.doesNotMatch(e.source,/grant\s+(?:select|insert|update|delete)|(?:insert into|update|delete from) public\./i);
 });
 
 test('121 creates only a private application and an explicitly approved company, without accounts or money',()=>{

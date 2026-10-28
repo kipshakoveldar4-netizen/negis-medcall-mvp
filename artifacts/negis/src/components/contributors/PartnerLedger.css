@@ -3,7 +3,7 @@
   --pl-muted: var(--portal-muted, var(--ink-2, #66736c));
   --pl-ink: var(--portal-ink, var(--ink, #18231d));
   min-width: 0;
-  padding-top: 24px;
+  padding-top: 16px;
   border-top: 1px solid var(--pl-line);
   color: var(--pl-ink);
   letter-spacing: 0;
@@ -14,7 +14,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 24px;
+  margin-bottom: 16px;
 }
 
 .partner-ledger .pl-header > div {
@@ -80,7 +80,7 @@
 .partner-ledger .pl-metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin-bottom: 28px;
+  margin-bottom: 20px;
 }
 
 .partner-ledger .pl-metric,
@@ -118,7 +118,7 @@
 }
 
 .partner-ledger .pl-metric dt {
-  min-height: 39px;
+  min-height: 24px;
 }
 
 .partner-ledger dt svg {
@@ -136,7 +136,7 @@
 }
 
 .partner-ledger .pl-balances {
-  padding: 20px 0 24px;
+  padding: 16px 0;
   border-block: 1px solid var(--pl-line);
 }
 
@@ -148,7 +148,7 @@
 
 .partner-ledger .pl-currency {
   min-width: 0;
-  padding-top: 20px;
+  padding-top: 16px;
 }
 
 .partner-ledger .pl-currency + .pl-currency {
@@ -157,7 +157,7 @@
 }
 
 .partner-ledger h4 {
-  margin-bottom: 12px;
+  margin-bottom: 8px;
   color: var(--pl-muted);
   font-size: 12px;
   font-weight: 600;
@@ -177,7 +177,7 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px 24px;
-  padding: 20px 0;
+  padding: 12px 0;
 }
 
 .partner-ledger .pl-rates > div {

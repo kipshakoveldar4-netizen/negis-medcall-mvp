@@ -1,6 +1,7 @@
 import { createOperatorBrowserFixture } from "./operator-browser-store";
 import { parseCreatorCommandIdentity, parseCreatorJobAction, type CreatorJob, type CreatorSubmission } from "../../lib/crm/creator-job-contracts";
 import { parseContributorApplication, type ContributorProfile } from "../../lib/crm/contributor-contracts";
+import { partnerHistoryMonth, type PartnerHistoryItem } from "../../lib/crm/partner-history-contracts";
 
 export const portalDesignIds = {
   contributor: "33333333-3333-4333-8333-333333333333",
@@ -108,6 +109,21 @@ export function createPortalDesignStore(input: string | URL = "/contributors?mod
         registrations: "5", paidCompanies: "5", firstPayments: "5", renewals: "3",
         balances: [{ currency: "KZT", earnedMinor: "7200000", paidMinor: "4800000", availableMinor: "2400000" }],
       });
+      if (route === "partner-history" && method === "GET") {
+        const rawOffset = url.searchParams.get("offset") ?? "0", month = url.searchParams.get("month");
+        if ([...url.searchParams.keys()].some(key => !["offset", "month"].includes(key))
+          || url.searchParams.getAll("offset").length > 1 || url.searchParams.getAll("month").length > 1
+          || !/^(?:0|[1-9]\d{0,6})$/.test(rawOffset) || Number(rawOffset) > 1_000_000 || !partnerHistoryMonth(month)) return fail(400);
+        if (state === "empty") return ok({ state: "not_activated" });
+        const journal: PartnerHistoryItem[] = [
+          { id: "88888888-8888-4888-8888-888888888881", kind: "renewal", occurredAt: "2026-10-28T08:15:00.000000Z", amountMinor: "3600000", currency: "KZT" },
+          { id: "88888888-8888-4888-8888-888888888882", kind: "payout", occurredAt: "2026-10-27T09:00:00.000000Z", amountMinor: "4800000", currency: "KZT" },
+          { id: "88888888-8888-4888-8888-888888888883", kind: "first_payment", occurredAt: "2026-09-30T09:00:00.000000Z", amountMinor: "3600000", currency: "KZT" },
+        ];
+        const rows = journal.filter(item => month === null || item.occurredAt.startsWith(month + "-")), offset = Number(rawOffset);
+        return ok({ state: "ready", generatedAt: "2026-10-28T09:00:00.000000Z", offset, month,
+          items: rows.slice(offset, offset + 20), hasMore: rows.length > offset + 20 });
+      }
       if (route === "partner-terms" && method === "GET" && url.searchParams.get("profileId") === profile.id && !url.searchParams.has("requestId")) {
         return ok({ state: "not_offered", profileId: profile.id, profileRevision: profile.revision, agreement: null });
       }

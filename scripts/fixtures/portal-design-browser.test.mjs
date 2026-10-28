@@ -29,12 +29,13 @@ const compiled = await bundle({ write: false, bundle: true, format: 'esm', platf
     export { parseContributorProfile } from '../../lib/crm/contributor-contracts.ts';
     export { parseCreatorJobPage, parseCreatorJobDetail, parseCreatorCommandResult } from '../../lib/crm/creator-job-contracts.ts';
     export { parsePartnerLedger } from '../../lib/crm/partner-contracts.ts';
+    export { parsePartnerHistory } from '../../lib/crm/partner-history-contracts.ts';
     export { parsePartnerTermsSnapshot } from '../../lib/crm/partner-terms-contracts.ts';
     export { parseOperatorCommandResult } from '../../lib/crm/operator-contracts.ts';`,
 } });
 const { createPortalDesignStore, portalDesignIds: ids, portalDesignLocation, portalDesignHref, portalDesignStates,
   parseContributorProfile, parseCreatorJobPage, parseCreatorJobDetail, parseCreatorCommandResult,
-  parsePartnerLedger, parsePartnerTermsSnapshot, parseOperatorCommandResult,
+  parsePartnerLedger, parsePartnerHistory, parsePartnerTermsSnapshot, parseOperatorCommandResult,
 } = await import('data:text/javascript;base64,' + Buffer.from(compiled.outputFiles[0].text).toString('base64'));
 const url = route => new URL('/api/crm/' + route, 'http://fixture.invalid');
 const request = (store, route, body, method = 'POST') => store.request(url(route), {
@@ -82,12 +83,26 @@ test('approved partner read-only synthetic ledger never fabricates an agreement 
   assert.equal(ledger.registrations, '5'); assert.equal(ledger.firstPayments, '5'); assert.equal(ledger.renewals, '3');
   assert.deepEqual(ledger.balances, [{ currency: 'KZT', earnedMinor: '7200000', paidMinor: '4800000', availableMinor: '2400000' }]);
   assert.equal(ledger.firstCommissionBps, null); assert.equal(ledger.renewalCommissionBps, null);
+  const history = await data(request(store, 'partner-history?offset=0'));
+  assert.ok(parsePartnerHistory(history, { offset: 0, month: null }));
+  assert.deepEqual(history.items.map(item => item.kind), ['renewal', 'payout', 'first_payment']);
+  assert.equal(history.items.filter(item => item.kind !== 'payout').reduce((sum, item) => sum + BigInt(item.amountMinor), 0n).toString(), ledger.balances[0].earnedMinor);
+  const october = await data(request(store, 'partner-history?offset=0&month=2026-10'));
+  assert.ok(parsePartnerHistory(october, { offset: 0, month: '2026-10' }));
+  assert.equal(october.items.length, 2);
+  const noRows = await data(request(store, 'partner-history?offset=20'));
+  assert.ok(parsePartnerHistory(noRows, { offset: 20, month: null }));
+  assert.deepEqual(noRows.items, []);
+  for (const query of ['offset=-1', 'offset=01', 'offset=1000001', 'offset=0&offset=0', 'month=0000-01', 'month=2026-13', 'workspaceId=foreign']) {
+    assert.equal((await request(store, 'partner-history?' + query)).status, 400);
+  }
   for (const route of ['partner-referrals', 'partner-payments', 'platform-contributors', 'clinic-creator-jobs', 'meta-launches']) {
     assert.equal((await request(store, route, {})).status, 403);
   }
   assert.deepEqual(await data(request(store, 'partner-ledger')), ledger);
   assert.equal((await request(store, `partner-terms?profileId=${crypto.randomUUID()}`)).status, 403);
   store.setState('empty'); assert.deepEqual(await data(request(store, 'partner-ledger')), { state: 'not_activated' });
+  assert.deepEqual(await data(request(store, 'partner-history?offset=0')), { state: 'not_activated' });
 });
 
 test('empty, error, denial, pending and suspended scenarios recover only by explicit fixture state change', async () => {

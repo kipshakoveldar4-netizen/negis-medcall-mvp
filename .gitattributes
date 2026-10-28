@@ -114,3 +114,4 @@
 /migrations/119_appointment_patch_journal.sql text eol=lf
 /migrations/120_partner_first_paid_window.sql text eol=lf
 /migrations/121_partner_company_approval.sql text eol=lf
+/migrations/122_partner_history_read.sql text eol=lf

@@ -8,7 +8,40 @@ close the first-source/referral, payment/payout or creator-job gates below.
 The owner selected BOTH blogger roles: partner acquisition and content creation.
 This receipt does not claim public recruitment/commercial readiness.
 
-## Working Scope
+## Current Local Status: 28 October
+
+The local design baseline is saved in `b2c92d0`: operator suite 733/733 after
+resolving the eight earlier fixture failures, combined UI 126/126, browser
+24/24 and final capture/navigation 9/9 at 375/1440 with synthetic Auth/API.
+The full build exited 0. These overlapping suites are not added together;
+they do not prove real Auth, payments, cloud acceptance or overall readiness.
+Full mockup parity remains blocked (`design-qa.md`: `blocked`): confirmed partner
+link and shared operator analytics/agenda are still absent. The next local cycle
+adds protected own history (SQL 122) and the creator's current-page nearest
+deadline: 25/25 native/HTTP, 186/186 parser/isolation, 25/25 root boundary and
+28/28 actual browser cases at 375/1440. These overlapping suites are not summed.
+See [exact evidence and limits](PARTNER-HISTORY-ACCEPTANCE-2026-10-28.md).
+No cloud application of 122 or release is claimed.
+
+Company approval 121 is a separate local backend foundation in `2e2a951`, with
+cumulative native 694/694 on 113 raw SQL files 009–121, not HTTP wiring or an
+accepted company-onboarding flow. Real Auth/allowlist, consent, recovery/review
+and two-user acceptance remain gates. These SQL receipts do not supply browser,
+payment, public legal or cloud proof for 121.
+
+Current partner policy requires the **first actual subscription payment within
+the original 168 hours** from the first confirmed capture. Application, approval,
+company creation and sign-in neither satisfy nor restart that window. Historical
+27 October registration-based descriptions are superseded, not current rules.
+The agreed first-payment 10–50% and renewal 5–10% ranges are unchanged; no
+individual rates, legal terms, real payments or payouts are activated here.
+See [current partner rules and local boundaries](OPERATORS-AND-PARTNERS.md).
+
+The dated receipts below preserve the earlier milestones, not new acceptance
+of this baseline or the work in progress. This documentation pass reran no tests
+and authorizes no deploy/cloud/env, real accounts, working data or paid requests.
+
+## Working Scope: 26 October
 
 - Existing /operator application, moderation, availability and scoped clinic
   cooperation remain the operator path. Only a cross-link was added there.
@@ -38,7 +71,7 @@ This receipt does not claim public recruitment/commercial readiness.
   hides the old profile before authoritative reading. SDK auth is not faked in
   production source; it is replaced only in the separate local test fixture.
 
-## Acceptance
+## Acceptance: 26 October
 
 - 18/18 in-memory PostgreSQL/contract/API VM tests, no external clients. Cover
   both roles, replay, additive roles, stale reviews, denial of browser table/RPC
