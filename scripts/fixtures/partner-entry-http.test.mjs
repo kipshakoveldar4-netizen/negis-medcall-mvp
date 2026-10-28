@@ -35,6 +35,19 @@ async function call(f, op, body = {}, options = {}) {
 const prepareBody = { code: 'CODE_A', source: 'link', consent: true, consentVersion: 'owned-partner-v1', challengeToken: 'owned-challenge' };
 async function prepare(f, options = {}) { const r=await call(f,'prepare',prepareBody,options); assert.equal(r.statusCode,200); return r.headers['set-cookie']?.split(';')[0] ?? options.cookie; }
 
+test('reserved company remains pending payment, and an expired reserved source is not reported as bound',async()=>{
+  const db=adapter(),f=await partnerEntryHttpFixture(db);try{
+    const cookie=await prepare(f),options={cookie,token:'owned.owner.signature'};
+    await call(f,'capture',{},options);await call(f,'claim',{},options);
+    const value=[...db.saved.values()][0];value.workspaceId=ENTRY_OTHER;
+    for(const state of ['pending_payment','expired','bound']){
+      value.state=state;const r=await call(f,'read',{},options);assert.equal(r.statusCode,200);assert.equal(r.body.data.state,state);assert.equal(r.body.data.workspaceId,ENTRY_OTHER);
+    }
+    value.state='pending_payment';value.workspaceId=null;assert.equal((await call(f,'read',{},options)).statusCode,503);
+    value.state='captured';value.workspaceId=ENTRY_OTHER;assert.equal((await call(f,'read',{},options)).statusCode,503);
+  }finally{f.close();}
+});
+
 test('actual router has no enabled gateway without explicit config AND approved notice', async () => {
   for (const options of [{ approved: false }, { env: { MEDINA_PARTNER_ENTRY_ENABLED: 'false' } }, { env: { MEDINA_PARTNER_ENTRY_COOKIE_KEY: '' } }]) {
     const db=adapter(), f=await partnerEntryHttpFixture(db,options); try { const r=await call(f,'prepare',prepareBody); assert.equal(r.statusCode,503); assert.equal(r.headers['set-cookie'],undefined); assert.equal(db.calls.length,0); assert.equal(f.state.challenges.length,0); } finally { f.close(); }

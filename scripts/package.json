@@ -28,6 +28,7 @@
     "test:operator-cooperation-native-http": "node --import tsx --test ./fixtures/operator-cooperation-native-http.test.mjs",
     "test:partner-ledger-postgres": "node --test ./fixtures/partner-ledger-postgres.test.mjs",
     "test:partner-source-postgres": "node --test ./fixtures/partner-source-postgres.test.mjs",
+    "test:partner-first-paid-window": "node --test ./fixtures/partner-first-paid-window-postgres.test.mjs",
     "test:partner-entry-http": "node --test ./fixtures/partner-entry-http.test.mjs",
     "test:partner-entry-postgres": "node --test ./fixtures/partner-entry-postgres.test.mjs",
     "test:partner-terms-http": "node --test ./fixtures/partner-terms-http.test.mjs",

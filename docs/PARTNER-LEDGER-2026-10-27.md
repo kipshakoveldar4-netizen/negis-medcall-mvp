@@ -1,5 +1,14 @@
 # Partner Statistics: Local Read-Only Milestone
 
+Current-rule addendum, 28 October: the owner's qualifying event is the first
+actual subscription payment within 168 hours of the original entry, not an
+application or workspace creation. Local candidate 120 stages the source,
+creates the referral only with a qualifying first receipt, and preserves paid
+historical bindings without rewriting receipts. The unchanged 109 reader thus
+counts only confirmed referrals, not new pending reservations. The original
+milestone and counts below are historical. See OPERATORS-AND-PARTNERS.md for
+the current protocol, its limits and still-open financial/Preview gates.
+
 G6-C3/G7-C40, base 1d33cb1, 27 October 2026. This advances the existing
 operator/partner and G1-G8 plan; it does not replace its remaining requirements
 or claim public recruitment, financial activation or complete platform readiness.

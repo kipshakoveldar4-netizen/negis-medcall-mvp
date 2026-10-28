@@ -77,8 +77,9 @@ function parseResult(value: unknown, id: string, startedAt: string, source: stri
   const expected = ["id", "capturedAt", "expiresAt", "policyVersion", ...(full ? ["state", "source", "workspaceId"] : [])];
   if (!keys(v, expected) || v.id !== id || normalizedInstant(v.capturedAt) !== startedAt || v.policyVersion !== PARTNER_POLICY_VERSION
     || normalizedInstant(v.expiresAt) !== new Date(Date.parse(startedAt)+PARTNER_WINDOW_MS).toISOString()) return null;
-  if (full && (typeof v.state !== "string" || !["captured", "expired", "bound"].includes(v.state) || v.source !== source
-    || (v.state === "bound" ? !isUuidValue(v.workspaceId) : v.workspaceId !== null))) return null;
+  if (full && (typeof v.state !== "string" || !["captured", "expired", "pending_payment", "bound"].includes(v.state) || v.source !== source
+    || (["bound", "pending_payment"].includes(v.state) ? !isUuidValue(v.workspaceId)
+      : v.state === "expired" ? v.workspaceId !== null && !isUuidValue(v.workspaceId) : v.workspaceId !== null))) return null;
   return v;
 }
 export function createPartnerEntryHandler(deps: { env?: () => NodeJS.ProcessEnv; now?: () => number;

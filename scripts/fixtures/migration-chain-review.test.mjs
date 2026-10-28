@@ -8,12 +8,24 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-119, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 111);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 111 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-120, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 112);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 112 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
+});
+
+test('120 stages the original source and creates paid attribution only through the private original financial writer',()=>{
+  const e=chain.find(v=>v.file.startsWith('120_'));
+  assert.deepEqual(e.evidence.tables,['public.growth_partner_payment_windows']);assert.deepEqual(e.evidence.rls,e.evidence.tables);
+  assert.deepEqual(e.evidence.functions.map(f=>f.name),['public.partner_source_result','public.bind_growth_partner_source','public.confirm_growth_subscription_payment']);
+  assert.deepEqual(e.evidence.dynamicSqlLines,[]);assert.deepEqual(e.evidence.storageCatalogueLines,[]);assert.deepEqual(e.evidence.extensions,[]);
+  assert.ok(e.source.includes(digest(chain.find(v=>v.file.startsWith('052_')).evidence.functions.find(f=>f.name==='public.confirm_growth_subscription_payment').body.replaceAll('\r\n','\n'))));
+  assert.match(e.source,/rename to confirm_growth_subscription_payment_052/);
+  assert.match(e.source,/p_paid_at>=saved\.captured_at.*p_paid_at<saved\.expires_at/);
+  assert.match(e.source,/partner_payment_legacy_review_required/);
+  assert.doesNotMatch(e.source,/grant\s+(?:select|insert|update|delete)|on\s+delete\s+cascade|(?:insert into|update|delete from) public\.(?:staff_users|workspaces|growth_contributor_profiles|growth_partner_commissions|growth_partner_payouts)/i);
 });
 
 test('107 adds only private committed operator command receipts and leaves the 096 implementation intact',()=>{
