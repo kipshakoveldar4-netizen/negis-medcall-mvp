@@ -25,6 +25,10 @@ company/group filters, exact counts and independent report lifetimes. Final
 browser results retain their separate synthetic/HTTP/native boundaries. Full
 browser-to-native mutation and cloud acceptance remain gates; see
 [exact search evidence](OPERATOR-LEAD-SEARCH-ACCEPTANCE-2026-10-28.md).
+The later [connected local actions receipt](LOCAL-READINESS-ACTIONS-2026-10-28.md)
+adds 15/15 Explorer -> actual HTTP -> native SQL cases and 14/14 creator cases,
+including lost acceptance acknowledgement/reload. The selected mutation gate is
+now covered locally; full Portal/real Auth, public intake and cloud remain open.
 The preceding local cycle
 adds protected own history (SQL 122) and the creator's current-page nearest
 deadline: 25/25 native/HTTP, 186/186 parser/isolation, 25/25 root boundary and

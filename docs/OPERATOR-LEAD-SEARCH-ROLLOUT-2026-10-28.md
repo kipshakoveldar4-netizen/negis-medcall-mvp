@@ -73,7 +73,7 @@ authorizes no execution, environment/key access, migration, deployment or commit
   metadata refuse the whole report, not partial success or zero. Verify route-level
   unauthenticated denial, invalid-input/method refusals, `P1241` -> 403 and other
   search unavailability -> 503, no-store and no private database diagnostics.
-- [ ] **R7 - Existing actions and lifetimes.** Search is read-only. Stage/booking
+- [x] **R7 - Existing actions and lifetimes.** Search is read-only. Stage/booking
   actions retain existing endpoints and exact row request/lead identity, not the
   currently selected company's identity. Stage writes retain both `expectedStageId`
   and `expectedStatus` CAS checks; conflict/denial cannot become success. Refresh
@@ -102,7 +102,7 @@ the implementation. Evidence codes below are separate obligations, not one pass.
   concurrency/completeness and independent count/search/classification/page checks.
   Preserve lifecycle/RLS guards. Model SQL, source inspection or workday-123 passes
   do not satisfy this gate.
-- [ ] **H - Actual HTTP.** Real loopback requests through the current catch-all,
+- [x] **H - Actual HTTP.** Real loopback requests through the current catch-all,
   authorization, handler and parser to native fixture SQL, including refusal/header
   and existing stage-CAS paths. Direct handler calls or mocked fetch are not HTTP
   proof; identify any synthetic Auth/SDK boundary, never label it real authentication.
@@ -111,7 +111,7 @@ the implementation. Evidence codes below are separate obligations, not one pass.
   retry, filter reset to first page, paging, row-specific actions and delayed races.
   Verify totals versus matched and clearing stale private state; this is not browser
   or native database acceptance.
-- [ ] **B - Real browser.** Fresh desktop/mobile screenshots plus network and
+- [x] **B - Real browser.** Fresh desktop/mobile screenshots plus network and
   interaction assertions on the integrated candidate: search/filter/company/page,
   reload, retry, lost-stage/conflict and denial. Russian labels, keyboard-accessible
   controls, readable counts and no clipping/overlap or stale contacts. Disclose
@@ -126,12 +126,14 @@ the implementation. Evidence codes below are separate obligations, not one pass.
   database-backed browser/post-application receipts, with release/recovery scope.
   Native, loopback, synthetic UI and local-browser passes never substitute for C.
 
-R7/H/B remain partial only at their full integration scope: new read HTTP,
-browser search/filter/card/open/close/denial and original booking-read identity
-passed; existing stage/booking submissions were checked separately through
-native SQL and synthetic UI, not browser-to-native submission in this cycle.
-See the exact receipt rather than interpreting an unchecked complete gate as
-absence of all local work. C remains entirely unverified/unapplied.
+The later [connected actions cycle](LOCAL-READINESS-ACTIONS-2026-10-28.md) supplies
+15/15 actual Explorer/browser -> compiled HTTP/Auth/router -> native SQL cases:
+original stage CAS, both companies and viewports, booking and exact-key recovery,
+current receipt outcomes, delayed replies/ABA and native revocation. It closes the
+selected connected local R7/H/B workflow in addition to the prior read/unit layers.
+This is not exhaustive testing of every matrix combination, full Portal login or
+cloud evidence. Expanded criteria retain unexercised corners explicitly; C remains
+entirely unverified/unapplied.
 
 ## Receipt Hygiene And Cleanup
 

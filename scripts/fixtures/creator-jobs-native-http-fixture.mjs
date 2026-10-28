@@ -101,13 +101,18 @@ export async function creatorNativeBundle(f, initialSide = 'company') {
       return <main className="mx-auto min-w-0 max-w-4xl px-4 py-6"><h1 className="mb-5 text-xl font-semibold">${'Тестовая сквозная проверка заданий'}</h1>
         <CreatorJobs key={view.epoch} actorId={view.actor} workspaceId={view.side==='company'?ids.workspace:undefined} isSessionCurrent={()=>scope.active}/></main>;}
     createRoot(document.getElementById('root')).render(<Host/>);`;
-  return (await esbuild.build({ stdin: { contents: entry, resolveDir: frontend, loader: 'tsx' }, bundle: true, write: false, format: 'iife', platform: 'browser', jsx: 'automatic',
+  const bundled = await esbuild.build({ stdin: { contents: entry, resolveDir: frontend, loader: 'tsx' }, bundle: true, write: false,
+    outfile: path.join(root, 'node_modules/.cache/creator-native-browser/bundle.js'), format: 'iife', platform: 'browser', jsx: 'automatic',
     define: { 'process.env.NODE_ENV': '"production"', 'import.meta.env.BASE_URL': '"/"', 'import.meta.env.VITE_API_BASE_URL': '""' },
     plugins: [{ name: 'owned-creator-sdk-only', setup(build) {
       build.onResolve({ filter: /^@\/lib\/supabase$/ }, () => ({ path: 'sdk', namespace: 'owned' }));
       build.onLoad({ filter: /.*/, namespace: 'owned' }, () => ({ contents: sdk, loader: 'ts' }));
       build.onResolve({ filter: /^@\// }, args => { const base = path.join(frontend, 'src', args.path.slice(2)), file = [base + '.ts', base + '.tsx'].find(existsSync); assert.ok(file, args.path); return { path: file }; });
-    } }] })).outputFiles[0].text;
+    } }] });
+  const js = bundled.outputFiles.find(file => path.basename(file.path) === 'bundle.js');
+  const css = bundled.outputFiles.find(file => path.basename(file.path) === 'bundle.css');
+  assert.ok(js?.text.trim() && css?.text.trim(), 'Creator browser fixture requires real JavaScript and extracted CSS');
+  return { js: js.text, css: css.text };
 }
 
 async function assets() {
@@ -115,19 +120,25 @@ async function assets() {
   assert.equal(names.length, 1, 'Build the current application before native styled acceptance');
   const result = new Map([['/style.css', { type: 'text/css', data: await readFile(path.join(folder, names[0])) }]]);
   for (const name of ['inter-latin.woff2', 'inter-cyrillic.woff2', 'inter-cyrillic-ext.woff2']) result.set('/fonts/inter/' + name, { type: 'font/woff2', data: await readFile(path.join(frontend, 'public/fonts/inter', name)) });
+  for (const name of ['filming.webp', 'interior.webp', 'photography.webp']) result.set('/images/contributors/' + name, { type: 'image/webp', data: await readFile(path.join(frontend, 'public/images/contributors', name)) });
   return result;
 }
 export async function creatorNativeServer(handler, code) {
   const files = await assets(), controls = { mode: '', held: [], active: new Set(), requests: [], errors: [] }; let origin;
+  const bundle = typeof code === 'string' ? { js: code, css: '' } : code;
+  assert.ok(bundle && typeof bundle.js === 'string' && typeof bundle.css === 'string');
+  files.set('/bundle.js', { type: 'application/javascript', data: bundle.js });
+  if (bundle.css) files.set('/bundle.css', { type: 'text/css', data: bundle.css });
   const routes = ['creator-jobs', 'creator-job-command', 'clinic-creator-jobs', 'clinic-creator-job-command', 'creator-directory', 'creator-job-detail', 'clinic-creator-job-detail', 'owned-unknown'];
   const server = createServer(async (incoming, outgoing) => {
     if (!origin || incoming.headers.host !== new URL(origin).host) { outgoing.writeHead(403).end(); return; }
     const url = new URL(incoming.url, origin);
     if (incoming.method === 'GET' && files.has(url.pathname)) { const file = files.get(url.pathname); outgoing.writeHead(200, { 'Content-Type': file.type, 'Cache-Control': 'no-store' }).end(file.data); return; }
-    if (incoming.method === 'GET' && url.pathname === '/bundle.js') { outgoing.writeHead(200, { 'Content-Type': 'application/javascript', 'Cache-Control': 'no-store' }).end(code); return; }
     if (incoming.method === 'GET' && url.pathname === '/') {
-      outgoing.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'" })
-        .end('<!doctype html><html lang="ru"><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><link rel="stylesheet" href="/style.css"></head><body><div id="root"></div><script src="/bundle.js"></script></body></html>'); return;
+      outgoing.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; font-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'" })
+        .end('<!doctype html><html lang="ru"><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><link rel="stylesheet" href="/style.css">'
+          + (bundle.css ? '<link rel="stylesheet" href="/bundle.css">' : '')
+          + '</head><body><div id="root"></div><script src="/bundle.js"></script></body></html>'); return;
     }
     if (!url.pathname.startsWith('/api/crm/') || !routes.includes(url.pathname.split('/')[3])) { outgoing.writeHead(404).end(); return; }
     try {

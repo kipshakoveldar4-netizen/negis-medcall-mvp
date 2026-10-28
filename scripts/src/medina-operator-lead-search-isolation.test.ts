@@ -695,6 +695,38 @@ test("close and reopen of the same lead never revives old booking callbacks", as
   assert.equal(boundary.isSessionCurrent(), false); click(current.probe); assert.equal(r.boundaryActions.length, 1);
 });
 
+for (const transition of ["booking-close-reopen", "unmount", "unmount-remount", "aba"] as const) {
+  test(`retained booking callbacks stay retired after ${transition}`, async t => {
+    const r = await runtime(t); await r.seed(); const old = await r.openBooking();
+    if (transition === "booking-close-reopen") {
+      click(r.iconButton("CalendarPlus")); assert.equal(old.boundary.isSessionCurrent(), false);
+      const writes = r.render.writes();
+      click(old.probe); old.boundary.onBooked(bookingReceipt()); old.boundary.onAccessDenied();
+      assert.equal(r.render.writes(), writes);
+      await r.render.beforeEffects(); assert.equal(r.booking().length, 0); assert.equal(r.opener().props["aria-expanded"], true);
+      await r.render.flush(); click(r.iconButton("CalendarPlus")); await r.render.flush();
+    } else if (transition === "aba") {
+      r.mount(B); await r.render.flush(); await r.reply("actorB");
+      r.mount(A); await r.render.flush(); await r.reply("freshA"); await r.openBooking();
+    } else {
+      r.render.mount(null); await r.render.beforeEffects(); assert.equal(old.boundary.isSessionCurrent(), false);
+      await r.render.flush();
+      if (transition === "unmount-remount") { r.mount(A); await r.render.flush(); await r.reply("remounted"); await r.openBooking(); }
+    }
+    const current = transition === "unmount" ? null : { boundary: r.boundaries.at(-1)!, probe: r.booking()[0]! };
+    if (current) { assert.notEqual(current.boundary, old.boundary); assert.equal(current.boundary.isSessionCurrent(), true); }
+    const calls = r.requests.length, writes = r.render.writes(), content = r.render.content();
+    assert.equal(old.boundary.isSessionCurrent(), false);
+    click(old.probe); old.boundary.onBooked(bookingReceipt()); old.boundary.onAccessDenied(); await r.render.flush();
+    assert.equal(r.render.writes(), writes); assert.equal(r.requests.length, calls); assert.equal(r.render.content(), content);
+    assert.deepEqual(r.denials, []); assert.deepEqual(r.boundaryActions, []);
+    if (current) {
+      assert.equal(current.boundary.isSessionCurrent(), true); click(current.probe);
+      assert.deepEqual(r.boundaryActions, [`${A}:${current.boundary.requestId}:${current.boundary.leadId}`]);
+    } else { assert.deepEqual(r.contacts(), []); assert.equal(r.booking().length, 0); }
+  });
+}
+
 test("booking callbacks check a false parent before React commits and never revive when it returns", async t => {
   const r = await runtime(t); let current = true; r.mount(A, () => current); await r.render.flush(); await r.reply();
   const { boundary, probe } = await r.openBooking(); current = false;
@@ -765,6 +797,40 @@ test("parent false during stage token lookup prevents a write before React commi
   assert.equal(r.requests.filter(item => item.init.method === "PATCH").length, 0); assert.equal(r.render.writes(), writes); assert.deepEqual(r.denials, []);
 });
 
+for (const transition of ["search", "group", "company", "page", "refresh", "close-reopen", "unmount", "aba"] as const) {
+  test(`stage waiting for token lookup cannot dispatch after ${transition}`, async t => {
+    const r = await runtime(t, { holdSdk: true }); r.mount(); await r.render.flush();
+    r.lookups[0]!.resolve(); await r.render.flush(); await r.reply();
+    const old = await r.stageEditor(); submit(old.form); await r.render.flush();
+    assert.equal(r.lookups.length, 2); assert.equal(r.requests.length, 1);
+    const stageLookup = r.lookups[1]!;
+    if (transition === "search") await r.search("replacement");
+    else if (transition === "group") click(r.group("new"));
+    else if (transition === "company") change(r.company(), D);
+    else if (transition === "page" || transition === "refresh") click(r.iconButton(transition === "page" ? "ChevronRight" : "RefreshCw"));
+    else if (transition === "close-reopen") { click(r.opener()); await r.render.flush(); await r.openCard(); }
+    else if (transition === "unmount") r.render.mount(null);
+    else { r.mount(B); await r.render.flush(); r.mount(A); }
+    await r.render.flush();
+    // Publish the replacement without releasing the retired stage's token lookup.
+    for (const lookup of r.lookups.slice(2)) lookup.resolve();
+    await r.render.flush();
+    if (transition !== "close-reopen" && transition !== "unmount") await r.reply("replacement");
+    const contacts = r.contacts(), calls = r.requests.length, lookups = r.lookups.length;
+    stageLookup.resolve(); await r.render.flush();
+    assert.equal(r.requests.filter(item => item.init.method === "PATCH").length, 0);
+    assert.equal(r.requests.length, calls); assert.equal(r.lookups.length, lookups); assert.deepEqual(r.contacts(), contacts); assert.deepEqual(r.denials, []);
+    assert.equal(r.render.nodes().some(node => node.props.role === "alert"), false);
+    const writes = r.render.writes(); submit(old.form); change(old.select, S0); await r.render.flush();
+    assert.equal(r.render.writes(), writes); assert.equal(r.requests.length, calls); assert.equal(r.lookups.length, lookups);
+    if (transition === "unmount") { assert.deepEqual(r.contacts(), []); assert.equal(r.booking().length, 0); }
+    else {
+      const name = transition === "close-reopen" ? old.name : await r.openCard();
+      assert.equal(r.labelled("select", labels.stage + name).props.disabled, false);
+    }
+  });
+}
+
 test("unresolved stage send remains locked through filter changes and fresh reads until settlement", async t => {
   const r = await runtime(t); await r.seed(); const old = await r.stageEditor(); submit(old.form); await r.render.flush(); const write = r.pending("PATCH");
   click(r.group("new")); await r.render.flush(); await r.reply("replacement"); const name = await r.openCard();
@@ -797,6 +863,23 @@ for (const outcome of [200, 401, 403, 503, "network"] as const) {
     const contacts = r.contacts(), writes = r.render.writes(), calls = r.requests.length;
     if (outcome === "network") write.reject(); else if (outcome === 200) write.succeed({}); else if (outcome === 401 || outcome === 403) write.headersOnly(outcome); else write.fail(outcome);
     await r.render.flush(); assert.equal(r.render.writes(), writes); assert.equal(r.requests.length, calls); assert.deepEqual(r.contacts(), contacts); assert.deepEqual(r.denials, []);
+    if (outcome === 401 || outcome === 403) assert.equal(write.bodyReads, 0);
+  });
+}
+
+for (const outcome of [200, 401, 403, 503, "network"] as const) {
+  test(`dispatched stage ${outcome} after unmount cannot write state, deny or replay`, async t => {
+    const r = await runtime(t); await r.seed(); const old = await r.stageEditor(); submit(old.form); await r.render.flush();
+    const write = r.pending("PATCH"); assert.equal(r.requests.filter(item => item.init.method === "PATCH").length, 1);
+    r.render.mount(null); await r.render.beforeEffects(); await r.render.flush();
+    const writes = r.render.writes(), calls = r.requests.length, lookups = r.lookups.length;
+    submit(old.form); change(old.select, S0);
+    if (outcome === "network") write.reject(); else if (outcome === 200) write.succeed({});
+    else if (outcome === 401 || outcome === 403) write.headersOnly(outcome); else write.fail(outcome);
+    await r.render.flush(); r.window.dispatch("focus"); r.document.dispatch("visibilitychange"); await r.render.flush();
+    assert.equal(r.render.writes(), writes); assert.equal(r.requests.length, calls); assert.equal(r.lookups.length, lookups);
+    assert.deepEqual(r.contacts(), []); assert.equal(r.booking().length, 0); assert.equal(r.render.content(), ""); assert.deepEqual(r.denials, []);
+    assert.equal(r.requests.filter(item => item.init.method === "PATCH").length, 1);
     if (outcome === 401 || outcome === 403) assert.equal(write.bodyReads, 0);
   });
 }

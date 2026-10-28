@@ -8041,7 +8041,7 @@ async function readMetaLiveLaunchEnabled(workspaceId: string): Promise<boolean> 
     if (error) throw new Error(error.message);
     const value = asRecord(asRecord(data).value);
     if (Object.prototype.hasOwnProperty.call(value, "enabled")) {
-      return readBoolean(value.enabled);
+      return value.enabled === true;
     }
   } catch (error) {
     console.warn(supabaseWarning("workspace_settings meta_live_launch_enabled", error));

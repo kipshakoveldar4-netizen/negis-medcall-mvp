@@ -148,10 +148,12 @@ transport intercepts those requests in memory; static assets are loopback only.
 
 ## Remaining Gates
 
-- Full end-to-end submission/recovery of the existing stage/booking actions from
-  this new Explorer still needs an explicit browser-to-native integration case.
-  Split-layer tests above are not relabelled as that missing case. In the rollout
-  checklist R7, H and B therefore remain partial at their complete stated scope.
+- At this receipt's original checkpoint, stage/booking submission/recovery from
+  the Explorer still lacked connected browser-to-native proof. The later local
+  cycle supplies 15/15 actual connected cases and closes that selected R7/H/B
+  workflow: [current actions evidence](LOCAL-READINESS-ACTIONS-2026-10-28.md).
+  It does not relabel these earlier split-layer passes or close real Auth/cloud
+  gates; broader unexercised matrix corners remain explicit in the new criteria.
 - No 124, API/UI candidate or environment change has been applied to any cloud
   target. A separately scoped release/dependency/recovery plan, isolated Preview
   Auth and actual database-backed browser receipt remain before rollout.

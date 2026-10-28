@@ -165,22 +165,43 @@ test('creator real forms/transport, compiled catch-all, real authorization and n
       assert.equal((await call(b.server, f, f.owner, 'clinic-creator-job-detail', { query: '?workspaceId=' + f.otherW + '&jobId=' + job.id })).status, 403);
     } finally { await b.close(); await f.cleanup(); }
   });
-  for (const action of ['create', 'submit']) await t.test(`lost ${action} acknowledgement survives an actual page reload and resolves without another business row`, async () => {
+  for (const action of ['create', 'accept', 'submit']) await t.test(`lost ${action} acknowledgement survives an actual page reload and resolves without another business row`, async () => {
     const f = await seed(), b = await browserFor(f, action === 'create' ? 'company' : 'creator');
     try {
+      let offered;
       if (action === 'create') await b.draft('Owned dropped create');
       else {
         const made = await committed(b.server, f, f.owner, 'clinic-creator-jobs', create(f));
-        await committed(b.server, f, f.actor, 'creator-jobs', change(made.result.job, 'accept', { termsRevision: made.result.job.termsRevision }));
-        await b.run(`document.querySelector('button[aria-label="Обновить задания"]').click();`); await b.open(); await b.fill('Ссылки на результат', 'https://example.com/once.mp4');
+        offered = made.result.job;
+        if (action === 'submit') await committed(b.server, f, f.actor, 'creator-jobs', change(offered, 'accept', { termsRevision: offered.termsRevision }));
+        await b.run(`document.querySelector('button[aria-label="Обновить задания"]').click();`); await b.open();
+        if (action === 'accept') await b.run(`document.querySelector('[aria-label="Карточка задания"] input[type=checkbox]').click();`);
+        else await b.fill('Ссылки на результат', 'https://example.com/once.mp4');
       }
-      const baseline = await f.counts(); b.server.controls.mode = 'drop'; await b.click(action === 'create' ? 'Предложить задание' : 'Отправить результат');
+      const baseline = await f.counts(); b.server.controls.mode = 'drop';
+      await b.click({ create: 'Предложить задание', accept: 'Принять задание', submit: 'Отправить результат' }[action]);
       await b.wait(`!!document.querySelector('[aria-label="Состояние отправки"]')&&![...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='Проверить состояние').disabled`);
-      const after = await f.counts(); assert.equal(after.commands, baseline.commands + 1); assert.equal(after.submissions, baseline.submissions + (action === 'submit' ? 1 : 0));
+      const after = await f.counts(); assert.deepEqual(after, { ...baseline, jobs: baseline.jobs + (action === 'create' ? 1 : 0),
+        commands: baseline.commands + 1, events: baseline.events + 1, submissions: baseline.submissions + (action === 'submit' ? 1 : 0) });
       const metadata = await b.pending(); assert.equal(metadata.length, 1); assert.doesNotMatch(metadata[0], /BRIEF|terms|feeMinor|https|900719/);
+      const retained = JSON.parse(metadata[0]);
+      const acceptanceSnapshot = () => one(db, 'select accepted_at::text accepted_at,terms_revision,revision from public.growth_creator_jobs where id=$1', [offered.id]);
+      const accepted = action === 'accept' ? await acceptanceSnapshot() : null;
+      if (action === 'accept') {
+        assert.ok(accepted?.accepted_at); assert.equal(accepted.terms_revision, offered.termsRevision);
+        assert.deepEqual(retained, { actorId: f.actor, workspaceId: null, requestId: retained.requestId, action: 'accept', targetId: offered.id });
+      }
       await b.browser.load(); await b.wait(`!!document.querySelector('[aria-label="Состояние отправки"]')`);
       assert.equal(await b.run(`return document.body.innerText.includes('Повторить исходную отправку');`), false);
       assert.deepEqual(await b.pending(), metadata); await b.click('Проверить состояние'); await b.wait(`!document.querySelector('[aria-label="Состояние отправки"]')`);
+      if (action === 'accept') {
+        await b.wait(`!!document.querySelector('form[aria-label="Результат задания"] button[type=submit]:not(:disabled)')`);
+        assert.equal(await b.run(`return document.body.innerText.includes('Принять задание');`), false);
+        assert.deepEqual(await acceptanceSnapshot(), accepted);
+        for (const name of ['execute_growth_creator_job_v2', 'read_growth_creator_command_v2'])
+          assert.equal(native.controls.calls.filter(entry => entry.name === name && entry.args.p_request === retained.requestId).length, 1);
+        assert.equal(b.server.controls.requests.filter(entry => entry.path === 'creator-job-command' && entry.method === 'GET' && entry.state === 'committed').length, 1);
+      }
       assert.deepEqual(await f.counts(), after); assert.deepEqual(await b.pending(), []);
     } finally { await b.close(); await f.cleanup(); }
   });

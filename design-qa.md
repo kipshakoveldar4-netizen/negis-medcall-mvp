@@ -115,6 +115,16 @@ requests. The owned browser ran after all application-source edits; both final
 31/31 runs completed normally. The final one adds matching-state captures only.
 The former mobile P2 is resolved locally. Partner-link parity remains blocked.
 
+Later connected action evidence is in
+`output/design-qa/contributors-2026-10-28/native-actions/`: six actual operator
+stage/booking/recovery screenshots, fourteen sanitized per-case HTTP/native
+receipts and two creator screenshots. Native-size action captures were inspected.
+Selected forms/controls fit at 375x900 and 1440x1000 with the real styles; unrelated
+rows may naturally cross viewport edges while scrolling. This evidence connects
+actual consumer actions to native business SQL, with a controlled parent/synthetic
+Auth, not full-Portal or source-mock comparison. Application UI/CSS did not change
+in that cycle; the existing same-input visual comparisons remain applicable.
+
 ## Fidelity Surfaces
 
 - Typography: existing local Inter, restrained 400/500/600 weights, no viewport
@@ -150,9 +160,10 @@ The former mobile P2 is resolved locally. Partner-link parity remains blocked.
   implemented by 124/API/Explorer, with complete native authorization and counts,
   20-row replacement pages and small-screen native selection. Actual browser
   search/filter/card/open/close/denial and original booking-read identity pass.
-  Full browser-to-native stage/booking submission remains distinct from these
-  read-only browser cases and the passing split-layer native/UI mutation tests.
-  See `docs/OPERATOR-LEAD-SEARCH-ACCEPTANCE-2026-10-28.md`.
+  A later connected 15/15 actual browser/HTTP/native matrix now verifies selected
+  stage/booking submissions and exact recovery. It remains distinct from these
+  earlier read-only browser/split-layer cases and does not establish real Auth
+  or cloud acceptance. See `docs/LOCAL-READINESS-ACTIONS-2026-10-28.md`.
 - Open product definition: initial-contact success and next-contact events still
   have no authoritative definition. Tracking is explicitly unavailable; created
   time is labelled UTC, not passed off as a planned next-contact time. Summary
@@ -205,7 +216,7 @@ local layers do not establish real Auth, cloud or commercial acceptance.
 - [x] Desktop/mobile ready-state screenshots and same-page comparisons.
 - [ ] Complete verified partner-link entry and company onboarding.
 - [ ] Define authoritative initial-contact/next-contact events without invented metrics.
-- [ ] Complete browser-to-native stage/booking submission from the new Explorer.
+- [x] Selected browser-to-native stage/booking submission and recovery from Explorer.
 - [ ] Separately authorize and verify an isolated cloud Preview; no release here.
 
 final result: blocked
