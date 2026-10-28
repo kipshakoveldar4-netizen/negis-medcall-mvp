@@ -463,6 +463,7 @@ function appFixture(controlConfig: ControlConfig, session: FixtureSession | null
     "./screens/Onboarding": { Onboarding: () => null },
     "./screens/Operators": { Operators: () => null },
     "./screens/Contributors": { Contributors: () => null },
+    "./screens/PartnerCompanies": { PartnerCompanies: () => null },
   });
   function render() { cursor = 0; return App(); }
   return {

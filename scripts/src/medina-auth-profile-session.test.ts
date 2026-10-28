@@ -552,7 +552,7 @@ for (const batching of ["committed B", "raw ABA"] as const) {
   }
 }
 
-for (const pathname of ["/r/" + "A".repeat(32), "/r/invalid-code", "/r/" + "B".repeat(32) + "/"]) {
+for (const pathname of ["/r/" + "A".repeat(32), "/r/invalid-code", "/r/" + "B".repeat(32) + "/", "/partner-company"]) {
   test(`public attribution ${pathname} does not require staff membership or show the unlinked-clinic warning`, async () => {
     await withFixture(async fixture => {
       await confirm(fixture, []);

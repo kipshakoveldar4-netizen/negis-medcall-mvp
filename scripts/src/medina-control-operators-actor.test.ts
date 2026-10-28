@@ -233,7 +233,7 @@ async function fixture(t: TestContext) {
   function load(filename: string): any {
     if (cache.has(filename)) return cache.get(filename);
     if (filename === path.join(control, "lib/supabase.ts")) return { supabase: { auth }, controlConfig: { ready: true, apiOrigin: origin } };
-    for (const name of ["Overview", "Login", "ClinicCard", "Onboarding", "Contributors"]) {
+    for (const name of ["Overview", "Login", "ClinicCard", "Onboarding", "Contributors", "PartnerCompanies"]) {
       if (filename === path.join(control, `screens/${name}.tsx`)) return { [name]: Symbol(name) };
     }
     const exports = {};

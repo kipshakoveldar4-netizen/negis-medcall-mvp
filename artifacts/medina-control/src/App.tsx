@@ -8,6 +8,7 @@ const ClinicCard = lazy(() => import("./screens/ClinicCard").then(module => ({ d
 const Onboarding = lazy(() => import("./screens/Onboarding").then(module => ({ default: module.Onboarding })));
 const Operators = lazy(() => import("./screens/Operators").then(module => ({ default: module.Operators })));
 const Contributors = lazy(() => import("./screens/Contributors").then(module => ({ default: module.Contributors })));
+const PartnerCompanies = lazy(() => import("./screens/PartnerCompanies").then(module => ({ default: module.PartnerCompanies })));
 
 class ScreenBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
@@ -30,7 +31,7 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [ready, setReady] = useState(false);
   const [clinicId, setClinicId] = useState("");
-  const [screen, setScreen] = useState<"overview" | "onboard" | "operators" | "contributors">("overview");
+  const [screen, setScreen] = useState<"overview" | "onboard" | "operators" | "contributors" | "partner-companies">("overview");
   const [actorEpoch, setActorEpoch] = useState(0);
   const actor = useRef("");
   const epoch = useRef(0);
@@ -95,6 +96,7 @@ export default function App() {
         </button>
         <button type="button" className={`nav-item ${!clinicId && screen === "operators" ? "on" : ""}`} onClick={() => { setClinicId(""); setScreen("operators"); }}>Операторы</button>
         <button type="button" className={`nav-item ${!clinicId && screen === "contributors" ? "on" : ""}`} onClick={() => { setClinicId(""); setScreen("contributors"); }}>Блогеры</button>
+        <button type="button" className={`nav-item ${!clinicId && screen === "partner-companies" ? "on" : ""}`} onClick={() => { setClinicId(""); setScreen("partner-companies"); }}>Заявки компаний</button>
         <div className="spacer" />
         <div className="who">{session.user.email}</div>
         <button type="button" className="signout" onClick={() => void supabase.auth.signOut()}>Выйти</button>
@@ -105,6 +107,8 @@ export default function App() {
         <Suspense fallback={<p role="status" aria-live="polite">Загружаем раздел...</p>}>
         {clinicId ? (
           <ClinicCard workspaceId={clinicId} onBack={() => setClinicId("")} />
+        ) : screen === "partner-companies" ? (
+          <PartnerCompanies />
         ) : screen === "contributors" ? (
           <Contributors />
         ) : screen === "operators" ? (

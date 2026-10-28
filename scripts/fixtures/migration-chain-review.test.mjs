@@ -8,12 +8,28 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-124, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 116);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 116 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-125, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 117);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 117 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
+});
+
+test('125 closes absent company commands without rewriting 121, direct browser access, finance or provider effects',()=>{
+  const e=chain.find(v=>v.file.startsWith('125_'));
+  assert.deepEqual(e.evidence.tables,['public.growth_partner_company_submission_fences','public.growth_partner_company_review_fences']);
+  assert.deepEqual(e.evidence.rls,e.evidence.tables);
+  assert.deepEqual(e.evidence.functions.map(f=>f.name),['public.submit_growth_partner_company','public.review_growth_partner_company',
+    'public.read_growth_partner_company_submission','public.read_growth_partner_company_review','public.list_growth_partner_companies']);
+  assert.deepEqual(e.evidence.dynamicSqlLines,[]);assert.deepEqual(e.evidence.extensions,[]);assert.deepEqual(e.evidence.storageCatalogueLines,[]);
+  for(const name of ['submit_growth_partner_company','review_growth_partner_company']){
+    const original=chain.find(v=>v.file.startsWith('121_')).evidence.functions.find(f=>f.name==='public.'+name);
+    assert.ok(e.source.includes(digest(original.body.replaceAll('\r\n','\n'))));
+    assert.match(e.source,new RegExp('rename to '+name+'_121'));
+  }
+  assert.match(e.source,/offset p_offset limit 21/);assert.match(e.source,/P1252/);assert.match(e.source,/P1253/);
+  assert.doesNotMatch(e.source,/grant\s+(?:select|insert|update|delete)|on\s+delete\s+cascade|(?:insert into|update|delete from) public\.(?:platform_subscription|growth_referrals|growth_partner_commissions|growth_partner_payouts|workspaces|staff_users)/i);
 });
 
 test('124 adds only a complete authorized search reader without business writes or browser grants',()=>{

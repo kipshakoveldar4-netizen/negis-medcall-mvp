@@ -22,7 +22,7 @@ export function WorkspacePicker() {
 
   const needsChoice =
     !isLoading && !clinicId && !isDemoMode && !isImpersonation && availableWorkspaces.length > 1;
-  if (!needsChoice || location === '/operator' || /^\/r\/[^/?#\\\s]+\/?$/.test(location)) return null;
+  if (!needsChoice || location === '/operator' || location === '/partner-company' || /^\/r\/[^/?#\\\s]+\/?$/.test(location)) return null;
 
   return (
     <div

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { useParams } from "wouter";
+import { Link, useParams } from "wouter";
 import { ArrowRight, Check, CircleCheck, Clock3, ExternalLink, Link2, LoaderCircle, RotateCw, ShieldCheck, X } from "lucide-react";
 import { PortalShell } from "@/components/portals/PortalShell";
 import { parsePartnerEntryCaptured, parsePartnerEntryNotice, parsePartnerEntryPrepared,
@@ -221,12 +221,13 @@ function PartnerEntrySession({ code, request = requestPartnerEntry, challenge = 
       </div>
 
       <div className="partner-entry-actions">
+        {state.phase === "captured" && <Link href="/partner-company" className="partner-entry-primary">Подать заявку компании<ArrowRight size={17} aria-hidden="true" /></Link>}
         {state.phase === "idle" && validCode && <button type="button" className="partner-entry-primary" disabled={!state.consent || state.noticeStatus !== "ready" || !state.notice} onClick={() => void start()}>Начать проверку<ArrowRight size={17} aria-hidden="true" /></button>}
         {state.phase === "prepare-unknown" && <button type="button" className="partner-entry-primary" onClick={() => { if (snapshot.current.phase === "prepare-unknown") void prepare(); }}><RotateCw size={17} aria-hidden="true" />Повторить исходную подготовку</button>}
         {(state.phase === "ready" || state.phase === "capture-unknown") && <button type="button" className="partner-entry-primary" disabled={!state.consent || !state.notice} onClick={() => void capture()}>
           {state.phase === "capture-unknown" ? <RotateCw size={17} aria-hidden="true" /> : <Check size={17} aria-hidden="true" />}{state.phase === "capture-unknown" ? "Повторить фиксацию" : "Зафиксировать источник перехода"}</button>}
       </div>
-      <footer className="partner-entry-boundary"><p>Компания не зарегистрирована. Рабочее пространство не создано.</p></footer>
+      <footer className="partner-entry-boundary"><p>Компания не зарегистрирована. Рабочее пространство не создано.</p><Link href="/partner-company">Моя заявка компании</Link></footer>
     </div>
   </PortalShell>;
 }

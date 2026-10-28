@@ -8,7 +8,8 @@ import { gzipSync } from 'node:zlib';
 import test from 'node:test';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..'),control=path.join(root,'artifacts/medina-control');
 const require=createRequire(path.join(control,'package.json')),app=path.join(control,'src/App.tsx'),base='757d5f7';
-const screenNames=['Overview','ClinicCard','Onboarding','Operators','Contributors'];
+const baselineScreens=['Overview','ClinicCard','Onboarding','Operators','Contributors'];
+const screenNames=[...baselineScreens,'PartnerCompanies'];
 const settings={NODE_ENV:'production',VITE_MEDINA_CONTROL_MODE:'isolated-preview',
   VITE_MEDINA_API_URL:'https://negis-medcall-mvp-api-server-abc123def-yeldar-s-projects.vercel.app',
   VITE_SUPABASE_URL:'https://ukiobbwsdoblooynzlnx.supabase.co',VITE_SUPABASE_ANON_KEY:'sb_publishable_owned_control_build_fixture'};
@@ -34,7 +35,7 @@ test('Control production build defers all business screens and reduces the actua
   for(const name of screenNames){assert.ok(after.screens[name],'Every business screen has its own import boundary: '+name);
     assert.ok(after.entry.dynamicImports.includes(after.screens[name].fileName));
     assert.equal([...initialModules].some(p=>p.endsWith('/screens/'+name+'.tsx')),false,'No unselected business screen enters initial JS: '+name);
-    assert.ok(before.initial.some(c=>Object.keys(c.modules).some(p=>p.replaceAll('\\','/').endsWith('/screens/'+name+'.tsx'))),'Baseline actually contains '+name);
+    if(baselineScreens.includes(name))assert.ok(before.initial.some(c=>Object.keys(c.modules).some(p=>p.replaceAll('\\','/').endsWith('/screens/'+name+'.tsx'))),'Baseline actually contains '+name);
   }
   assert.ok(after.initialSize.bytes<before.initialSize.bytes);assert.ok(after.initialSize.gzipBytes<before.initialSize.gzipBytes);
   assert.ok(after.overviewSize.bytes<before.initialSize.bytes,'Opening the first authorized screen must still save JS');

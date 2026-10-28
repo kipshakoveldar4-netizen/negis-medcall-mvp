@@ -244,7 +244,7 @@ async function fixture(t: TestContext) {
           || file === sourceFiles.app && name === "./lib/api") return evaluate(sourceFiles.api);
         if (name === "../../../../lib/auth/staff-logins") return evaluate(sourceFiles.logins);
         if (name === "./screens/Onboarding") return evaluate(sourceFiles.screen);
-        for (const nameOfScreen of ["Login", "Overview", "ClinicCard", "Operators", "Contributors"]) {
+        for (const nameOfScreen of ["Login", "Overview", "ClinicCard", "Operators", "Contributors", "PartnerCompanies"]) {
           if (name === `./screens/${nameOfScreen}`) return { [nameOfScreen]: Symbol(nameOfScreen) };
         }
         return forbidden(`${file}: ${name}`);

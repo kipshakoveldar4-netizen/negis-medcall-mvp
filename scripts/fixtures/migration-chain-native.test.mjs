@@ -347,6 +347,10 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     const expected = new Map(chain.flatMap(entry => entry.evidence.functions.map(fn => [fn.name, { ...fn, file: entry.file }])));
     const originalPayment=chain.find(e=>e.file.startsWith('052_')).evidence.functions.find(f=>f.name==='public.confirm_growth_subscription_payment');
     expected.set('public.confirm_growth_subscription_payment_052',{...originalPayment,name:'public.confirm_growth_subscription_payment_052',file:'052 preserved privately by 120'});
+    for(const name of ['submit_growth_partner_company','review_growth_partner_company']){
+      const original=chain.find(e=>e.file.startsWith('121_')).evidence.functions.find(f=>f.name==='public.'+name);
+      expected.set('public.'+name+'_121',{...original,name:'public.'+name+'_121',file:'121 preserved privately by 125'});
+    }
     const functions = (await db.query(`select n.nspname||'.'||p.proname as name,p.prosrc as body,p.oid::regprocedure::text as signature
       from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public'
       and not exists(select 1 from pg_depend d where d.classid='pg_proc'::regclass and d.objid=p.oid and d.deptype='e')`)).rows;
@@ -393,7 +397,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
 
   await t.test('RPC-only and read-only server boundaries survive later migrations', async () => {
     for (const table of ['platform_subscription_operations', 'content_telegram_deliveries', 'content_telegram_delivery_guards', 'site_deletion_operations','growth_operator_request_commands','growth_operator_command_fences',
-      'growth_creator_jobs','growth_creator_submissions','growth_creator_commands','growth_creator_events','growth_creator_command_fences','growth_partner_sources','growth_partner_payment_windows','growth_partner_company_applications','crm_appointment_request_actors']) {
+      'growth_creator_jobs','growth_creator_submissions','growth_creator_commands','growth_creator_events','growth_creator_command_fences','growth_partner_sources','growth_partner_payment_windows','growth_partner_company_applications','growth_partner_company_submission_fences','growth_partner_company_review_fences','crm_appointment_request_actors']) {
       const result = await one(db, `select has_table_privilege('service_role',$1,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') as tab,
         has_any_column_privilege('service_role',$1,'SELECT,INSERT,UPDATE,REFERENCES') as col`, [`public.${table}`]);
       assert.deepEqual(result, { tab: false, col: false }, `${table}: no direct service access may be restored`);
@@ -420,6 +424,8 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'public.confirm_growth_subscription_payment_052(uuid,uuid,bigint,text,timestamptz,uuid,uuid)',
       'public.valid_partner_company(jsonb)','public.guard_partner_company_application()',
       'public.partner_company_result(public.growth_partner_company_applications)',
+      'public.submit_growth_partner_company_121(uuid,uuid,text,uuid,jsonb,text,jsonb)',
+      'public.review_growth_partner_company_121(uuid,uuid,uuid,uuid,text)',
       'public.operator_workday_zone(text)','public.operator_workday_day_start(date,text)',
       'public.create_crm_appointment_with_new_client(uuid,jsonb,jsonb)',
       'public.operator_command_result_v2(uuid,uuid,text,uuid,uuid,text,uuid)',
@@ -435,6 +441,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'read_growth_creator_directory','read_growth_creator_job_detail',
       'capture_growth_partner_source_v2','purge_growth_partner_sources','claim_growth_partner_source','read_growth_partner_source',
       'submit_growth_partner_company','read_growth_partner_company','review_growth_partner_company',
+      'read_growth_partner_company_submission','read_growth_partner_company_review','list_growth_partner_companies',
       'execute_growth_partner_terms','read_growth_partner_terms','confirm_growth_subscription_payment','read_crm_appointment_request_v2','create_crm_appointment_v2','patch_crm_appointment_journaled']) {
       const functions = (await db.query(`select p.oid::regprocedure::text as signature,has_function_privilege('service_role',p.oid,'EXECUTE') as allowed
         from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname=$1`, [name])).rows;

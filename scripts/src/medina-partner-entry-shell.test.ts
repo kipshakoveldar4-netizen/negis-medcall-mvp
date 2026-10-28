@@ -29,7 +29,7 @@ function picker(pathname: string, choices = true) {
   return value;
 }
 
-for (const route of ["/r/" + "A".repeat(32), "/r/invalid-code", "/r/" + "B".repeat(32) + "/"]) {
+for (const route of ["/r/" + "A".repeat(32), "/r/invalid-code", "/r/" + "B".repeat(32) + "/", "/partner-company"]) {
   test(`public attribution ${route} is not covered by a workspace picker`, () => assert.equal(picker(route), null));
 }
 for (const route of ["/dashboard", "/appointments", "/admin", "/r/", "/r/code/extra", "/r/code?next=/admin", "/r/code\\extra"]) {

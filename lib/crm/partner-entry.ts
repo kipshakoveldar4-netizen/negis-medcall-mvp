@@ -48,6 +48,7 @@ async function body(req: VercelRequest): Promise<Row | null> {
     if (bytes > 8192) throw new BodyLimitError(); chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)); }
   return record(JSON.parse(Buffer.concat(chunks, bytes).toString("utf8")));
 }
+export { body as readPartnerEntryBody, BodyLimitError as PartnerEntryBodyLimitError };
 export async function verifyPartnerEntryChallenge(config: Config, token: string, request: typeof fetch = fetch): Promise<boolean> {
   try {
     const response = await request("https://challenges.cloudflare.com/turnstile/v0/siteverify", {

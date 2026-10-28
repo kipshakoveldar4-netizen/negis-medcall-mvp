@@ -22,7 +22,7 @@ const allowedPaths = [
   "/ai-content-studio", "/content", "/studio", "/privacy", "/terms",
   "/data-deletion", "/ai-control-center", "/operator",
 ];
-const authPaths = ["/onboarding", "/join", "/join-request", "/reset-password", "/contributors", "/r/:code"];
+const authPaths = ["/onboarding", "/join", "/join-request", "/reset-password", "/contributors", "/r/:code", "/partner-company"];
 
 type Pageview = { type: "pageview"; url: string };
 type Policy = {

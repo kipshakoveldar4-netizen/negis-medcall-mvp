@@ -29,6 +29,7 @@ const JoinRequest = lazy(() => import("@/pages/JoinRequest"));
 const OperatorPortal = lazy(() => import("@/pages/OperatorPortal"));
 const ContributorPortal = lazy(() => import("@/pages/ContributorPortal"));
 const PartnerEntry = lazy(() => import("@/pages/PartnerEntry"));
+const PartnerCompany = lazy(() => import("@/pages/PartnerCompany"));
 const ClientBasePage = lazy(() => import("@/pages/ClientBasePage"));
 const StatsPage = lazy(() => import("@/pages/StatsPage"));
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
@@ -286,6 +287,7 @@ function Router() {
       <Route path="/operator" component={OperatorPortal} />
       <Route path="/contributors" component={ContributorPortal} />
       <Route path="/r/:code" component={PartnerEntry} />
+      <Route path="/partner-company" component={PartnerCompany} />
       <Route path="/ai-control-center" component={() => <ProtectedPage component={AiControlCenter} permission="dashboard" />} />
       <Route path="/dashboard" component={() => <PurposePage mortgage={MortgageOverview} clinic={Dashboard} permission="dashboard" />} />
       <Route path="/analytics" component={() => <PurposePage mortgage={MortgageAnalytics} clinic={NotFound} permission="crm" />} />

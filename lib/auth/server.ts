@@ -47,6 +47,8 @@ type SupabaseAuthFetch = (
 type VerifiedSupabaseUser = {
   id: string;
   email?: string;
+  /** Contact proof from the verified Auth response, never JWT/user metadata. */
+  emailConfirmed?: true;
 };
 
 export type WorkspaceMembership = {
@@ -189,7 +191,7 @@ async function verifySupabaseAccessToken(token: string): Promise<VerifiedSupabas
 
   const user = readRecord(payload);
   // The immutable Supabase user id is the only identity we accept. Email is
-  // carried for display and is never used to look up authority; user_metadata
+  // carried for contact proof, never used to look up authority; user_metadata
   // and app_metadata are deliberately ignored.
   const id = readString(user?.id);
   if (!id) {
@@ -197,9 +199,14 @@ async function verifySupabaseAccessToken(token: string): Promise<VerifiedSupabas
   }
 
   const email = readString(user?.email);
+  const confirmed = user?.email_confirmed_at;
+  const emailConfirmed = Boolean(email && typeof confirmed === "string" && !confirmed.startsWith("0000-")
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)$/.test(confirmed)
+    && Number.isFinite(Date.parse(confirmed)) && new Date(confirmed).toISOString().slice(0, 19) === confirmed.slice(0, 19));
   return {
     id,
     ...(email ? { email } : {}),
+    ...(emailConfirmed ? { emailConfirmed: true as const } : {}),
   };
 }
 

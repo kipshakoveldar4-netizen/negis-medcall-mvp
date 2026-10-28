@@ -677,7 +677,7 @@ function appFixture(fixture: Fixture) {
   const effects: Array<() => void | (() => void)> = [];
   const cleanups: Array<() => void> = [];
   let cursor = 0;
-  const screens = Object.fromEntries(["Login", "Overview", "ClinicCard", "Onboarding", "Operators", "Contributors"]
+  const screens = Object.fromEntries(["Login", "Overview", "ClinicCard", "Onboarding", "Operators", "Contributors", "PartnerCompanies"]
     .map((name) => [name, () => null]));
   const exports = {} as { default(): UiNode };
   function jsx(type: unknown, props: UiNode["props"], key?: string | number): UiNode {

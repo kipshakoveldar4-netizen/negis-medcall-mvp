@@ -3,6 +3,7 @@ import { withAppointmentCreateRpcSpy, appointmentSpyRows, appointmentSpyBody } f
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import ts from "typescript";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { crmTransportOffenders } from "./crm-transport-audit";
 
@@ -463,6 +464,92 @@ test("C5b site intake is disabled without explicit configuration and never expos
   } finally {
     if (previous === undefined) delete process.env.MEDINA_SITE_INTAKE_ENABLED;
     else process.env.MEDINA_SITE_INTAKE_ENABLED = previous;
+  }
+});
+
+test("C5c company recovery is authenticated bootstrap, not clinic membership", async () => {
+  const registry = await import(pathToFileURL(registryPath).href);
+  assert.deepEqual(registry.resolveCrmRoute(["partner-company"])?.authorization,
+    { kind: "bootstrap", methods: ["GET", "POST"] });
+  await withRouter({ memberships: [] }, async ctx => {
+    for (const method of ["GET", "POST"]) {
+      const anonymous = await ctx.call({ segments: ["partner-company"], method, token: null, body: {} });
+      assert.equal(anonymous.res.statusCode, 401, method);
+      assert.deepEqual(anonymous.log, [], "anonymous recovery cannot resolve a clinic");
+      const unlinked = await ctx.call({ segments: ["partner-company"], method, body: {} });
+      assert.equal(unlinked.res.statusCode, method === "GET" ? 400 : 403,
+        "verified unlinked actor must reach the recovery contract, not membership denial");
+      assert.deepEqual(unlinked.log, [], "bootstrap must not query staff, settings or clinic data");
+      const extra = await ctx.call({ segments: ["partner-company", "unexpected"], method, body: {} });
+      assert.equal(extra.res.statusCode, 404, method);
+      assert.deepEqual(extra.log, []);
+    }
+    assert.equal(ctx.crmClientCreations, 0, "invalid recovery cannot create a business client");
+  });
+});
+
+test("C5d company review is platform-only even for a clinic owner", async () => {
+  const registry = await import(pathToFileURL(registryPath).href);
+  assert.deepEqual(registry.resolveCrmRoute(["platform-partner-companies"])?.authorization,
+    { kind: "platform", methods: ["GET", "POST"] });
+  const previous = process.env.MEDINA_PLATFORM_OWNER_IDS;
+  process.env.MEDINA_PLATFORM_OWNER_IDS = USER_A.replace(/^1/, "2");
+  try {
+    for (const memberships of [[], [memberA]]) {
+      await withRouter({ memberships }, async ctx => {
+        for (const method of ["GET", "POST", "PATCH"]) {
+          for (const token of [null, TOKEN]) {
+            const denied = await ctx.call({ segments: ["platform-partner-companies"], method, token });
+            assert.equal(denied.res.statusCode, 404, `${memberships.length} memberships: ${method}`);
+            assert.deepEqual(denied.log, [], "clinic roles cannot grant cross-company review access");
+          }
+        }
+        assert.equal(ctx.crmClientCreations, 0);
+      });
+    }
+    process.env.MEDINA_PLATFORM_OWNER_IDS = USER_A;
+    await withRouter({ memberships: [] }, async ctx => {
+      const allowed = await ctx.call({ segments: ["platform-partner-companies"], method: "PATCH" });
+      assert.equal(allowed.res.statusCode, 405, "only an allowlisted owner may discover supported methods");
+      for (const method of ["GET", "POST"]) {
+        const extra = await ctx.call({ segments: ["platform-partner-companies", "unexpected"], method, body: {} });
+        assert.equal(extra.res.statusCode, 404, method);
+        assert.deepEqual(extra.log, []);
+      }
+      assert.equal(ctx.crmClientCreations, 0);
+    });
+  } finally {
+    if (previous === undefined) delete process.env.MEDINA_PLATFORM_OWNER_IDS;
+    else process.env.MEDINA_PLATFORM_OWNER_IDS = previous;
+  }
+});
+
+test("C5e entry accepts only the exact authenticated company subpath", async () => {
+  const previous = process.env.MEDINA_PARTNER_COMPANY_ENABLED;
+  process.env.MEDINA_PARTNER_COMPANY_ENABLED = "false";
+  try {
+    await withRouter({ memberships: [] }, async ctx => {
+      const anonymous = await ctx.call({ segments: ["partner-entry", "company"], method: "POST", token: null,
+        query: { op: "context" } });
+      assert.equal(anonymous.res.statusCode, 401);
+      const accepted = await ctx.call({ segments: ["partner-entry", "company"], method: "POST",
+        query: { op: "context" } });
+      assert.equal(accepted.res.statusCode, 503, "exact subpath reaches the disabled company intake gate");
+      assert.equal(accepted.res.body.code, "partner_company_registration_unavailable");
+      const unsupported = await ctx.call({ segments: ["partner-entry", "company"], method: "GET" });
+      assert.equal(unsupported.res.statusCode, 405);
+      for (const segments of [["partner-entry", "unknown"], ["partner-entry", "company", "unexpected"]]) {
+        for (const token of [null, TOKEN]) {
+          const extra = await ctx.call({ segments, method: "POST", token, query: { op: "context" } });
+          assert.equal(extra.res.statusCode, 404, segments.join("/"));
+          assert.deepEqual(extra.log, []);
+        }
+      }
+      assert.equal(ctx.crmClientCreations, 0, "closed or malformed intake must not resolve clinic data");
+    });
+  } finally {
+    if (previous === undefined) delete process.env.MEDINA_PARTNER_COMPANY_ENABLED;
+    else process.env.MEDINA_PARTNER_COMPANY_ENABLED = previous;
   }
 });
 
@@ -1384,6 +1471,93 @@ test("K5 the Meta payload semantics are untouched by this phase", async () => {
 // L. Legacy webhook and frontend guarantees
 // ===========================================================================
 
+const publicPartnerEntryFile = "pages/partner-entry-client.ts";
+
+// Mask one proved anonymous request, never a file or a caller-supplied URL.
+// Every other CRM call still reaches both original transport audits unchanged.
+function reviewedPublicPartnerEntrySource(file: string, source: string): string {
+  if (file.replaceAll("\\", "/") !== publicPartnerEntryFile) return source;
+  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const nodes: ts.Node[] = [];
+  const visit = (node: ts.Node) => { nodes.push(node); ts.forEachChild(node, visit); };
+  visit(ast);
+  const one = <T,>(values: T[]): T | undefined => values.length === 1 ? values[0] : undefined;
+  const literal = (node: ts.Node | undefined, text: string) => !!node && ts.isStringLiteral(node) && node.text === text;
+  const identifier = (node: ts.Node | undefined, text: string) => !!node && ts.isIdentifier(node) && node.text === text;
+  const fail = () => assert.fail(`${file}: anonymous partner-entry request boundary requires review`);
+  const operation = one(ast.statements.filter(ts.isTypeAliasDeclaration).filter(node => node.name.text === "PartnerEntryOperation"));
+  if (!operation || !ts.isUnionTypeNode(operation.type)
+    || operation.type.types.length !== 3 || operation.type.types.some((node, index) =>
+      !ts.isLiteralTypeNode(node) || !literal(node.literal, ["notice", "prepare", "capture"][index]))) return fail();
+  const requestType = one(ast.statements.filter(ts.isTypeAliasDeclaration).filter(node => node.name.text === "PartnerEntryRequest"));
+  if (!requestType || !ts.isFunctionTypeNode(requestType.type)
+    || requestType.type.getText(ast).replace(/\s/g, "") !== "(op:PartnerEntryOperation,body:unknown,signal:AbortSignal)=>Promise<unknown>") return fail();
+  const declaration = one(nodes.filter(ts.isVariableDeclaration).filter(node => identifier(node.name, "requestPartnerEntry")));
+  if (!declaration || !declaration.type || !ts.isTypeReferenceNode(declaration.type)
+    || !identifier(declaration.type.typeName, "PartnerEntryRequest") || declaration.type.typeArguments
+    || !ts.isVariableDeclarationList(declaration.parent) || !(declaration.parent.flags & ts.NodeFlags.Const)
+    || declaration.parent.declarations.length !== 1 || !ts.isVariableStatement(declaration.parent.parent)
+    || !declaration.parent.parent.modifiers?.some(node => node.kind === ts.SyntaxKind.ExportKeyword)
+    || !declaration.initializer || !ts.isArrowFunction(declaration.initializer)) return fail();
+  const fn = declaration.initializer;
+  if (!fn.modifiers?.some(node => node.kind === ts.SyntaxKind.AsyncKeyword) || fn.parameters.length !== 3
+    || fn.parameters.some((param, index) => !identifier(param.name, ["op", "body", "signal"][index])
+      || param.initializer || param.dotDotDotToken || param.questionToken || param.type)
+    || !ts.isBlock(fn.body)) return fail();
+  const statement = fn.body.statements[0];
+  const response = statement && ts.isVariableStatement(statement) && statement.declarationList.declarations.length === 1
+    ? statement.declarationList.declarations[0] : undefined;
+  const awaited = response?.initializer;
+  const call = awaited && ts.isAwaitExpression(awaited) && ts.isCallExpression(awaited.expression) ? awaited.expression : undefined;
+  if (!response || !identifier(response.name, "response") || !call || !identifier(call.expression, "fetch")
+    || call.arguments.length !== 2 || call.typeArguments || call.questionDotToken
+    || !ts.isTemplateExpression(call.arguments[0])) return fail();
+  const url = call.arguments[0];
+  if (url.head.text !== "/api/crm/partner-entry?op=" || url.templateSpans.length !== 1
+    || !identifier(url.templateSpans[0].expression, "op") || url.templateSpans[0].literal.text !== "") return fail();
+  const options = call.arguments[1];
+  const properties = (node: ts.Node): readonly (ts.PropertyAssignment | ts.ShorthandPropertyAssignment)[] | null => {
+    if (!ts.isObjectLiteralExpression(node)) return null;
+    const result = node.properties.filter((property): property is ts.PropertyAssignment | ts.ShorthandPropertyAssignment =>
+      (ts.isPropertyAssignment(property) && ts.isIdentifier(property.name)) || ts.isShorthandPropertyAssignment(property));
+    return result.length === node.properties.length ? result : null;
+  };
+  const optionsProperties = properties(options);
+  const expected = new Map([
+    ["method", "POST"], ["credentials", "same-origin"], ["mode", "same-origin"], ["redirect", "error"],
+    ["cache", "no-store"], ["referrerPolicy", "no-referrer"],
+  ]);
+  if (!optionsProperties || optionsProperties.length !== expected.size + 3
+    || new Set(optionsProperties.map(property => property.name!.getText(ast))).size !== optionsProperties.length) return fail();
+  const property = (name: string) => optionsProperties.find(node => node.name!.getText(ast) === name);
+  for (const [name, value] of expected) {
+    const node = property(name);
+    if (!node || !ts.isPropertyAssignment(node) || !literal(node.initializer, value)) return fail();
+  }
+  const headers = property("headers"), body = property("body"), signal = property("signal");
+  if (!headers || !ts.isPropertyAssignment(headers) || !ts.isObjectLiteralExpression(headers.initializer)
+    || headers.initializer.properties.length !== 2 || headers.initializer.properties.some((node, index) =>
+      !ts.isPropertyAssignment(node) || !literal(node.initializer, "application/json")
+      || !(index === 0 ? literal(node.name, "Content-Type") : identifier(node.name, "Accept")))
+    || !body || !ts.isPropertyAssignment(body) || !ts.isCallExpression(body.initializer)
+    || !ts.isPropertyAccessExpression(body.initializer.expression) || !identifier(body.initializer.expression.expression, "JSON")
+    || body.initializer.expression.name.text !== "stringify" || body.initializer.arguments.length !== 1
+    || !identifier(body.initializer.arguments[0], "body") || body.initializer.typeArguments || body.initializer.questionDotToken
+    || !signal || !ts.isShorthandPropertyAssignment(signal) || signal.objectAssignmentInitializer) return fail();
+  // No imported/shadowed built-ins, parameter mutation, alias or extra network call.
+  if (nodes.filter(node => identifier(node, "fetch")).length !== 1
+    || nodes.filter(node => identifier(node, "JSON")).length !== 1) return fail();
+  const fnNodes: ts.Node[] = [];
+  const visitFn = (node: ts.Node) => { fnNodes.push(node); ts.forEachChild(node, visitFn); };
+  visitFn(fn);
+  for (const [index, use] of [url.templateSpans[0].expression, body.initializer.arguments[0], signal.name].entries()) {
+    const name = ["op", "body", "signal"][index];
+    const uses = fnNodes.filter(node => identifier(node, name) && !(ts.isPropertyAssignment(node.parent) && node.parent.name === node));
+    if (uses.length !== 2 || !uses.includes(fn.parameters[index].name) || !uses.includes(use)) return fail();
+  }
+  return source.slice(0, call.getStart(ast)) + "undefined".padEnd(call.getWidth(ast), " ") + source.slice(call.end);
+}
+
 test("L1 the legacy webhook is outside the CRM router and still disabled", async () => {
   const handler = await readFile(path.join(repoRoot, "api", "leads", "webhook", "[clinicId].ts"), "utf8");
   assert.ok(handler.includes("legacy_webhook_disabled"));
@@ -1403,8 +1577,8 @@ test("L2 the browser reaches CRM only through the authorized helper", async () =
   await walk(negisSrc);
 
   for (const file of files) {
-    const source = await readFile(file, "utf8");
     const rel = path.relative(negisSrc, file);
+    const source = reviewedPublicPartnerEntrySource(rel, await readFile(file, "utf8"));
     if (rel === path.join("lib", "api.ts")) continue;
     assert.ok(
       !/fetch\(\s*apiUrl\(\s*[`'"][^`'"]*\/api\/crm\//.test(source),
@@ -1415,6 +1589,52 @@ test("L2 the browser reaches CRM only through the authorized helper", async () =
       `${rel} must not call the CRM API directly`,
     );
   }
+});
+
+test("L2b only the actual closed anonymous entry request is recognized; private or widened fetches remain forbidden", async () => {
+  const source = await readFile(path.join(negisSrc, publicPartnerEntryFile), "utf8");
+  const reviewed = reviewedPublicPartnerEntrySource(publicPartnerEntryFile, source);
+  assert.notEqual(reviewed, source, "the exact audited call, not the file, is masked");
+  assert.deepEqual(crmTransportOffenders(new Map([[publicPartnerEntryFile, reviewed]])), []);
+  const lf = source.replaceAll("\r\n", "\n");
+  assert.notEqual(reviewedPublicPartnerEntrySource(publicPartnerEntryFile, lf), lf);
+  for (const [from, to] of [
+    ["/api/crm/partner-entry?op=", "/api/crm/partner-entry/company?op="],
+    ["/api/crm/partner-entry?op=", "/api/crm/leads?op="],
+    ["/api/crm/partner-entry?op=", "https://other.invalid/api/crm/partner-entry?op="],
+    ["?op=${op}`", "?op=${op}&workspaceId=foreign`"],
+    ['"notice" | "prepare" | "capture"', '"notice" | "prepare" | "capture" | "claim"'],
+    ['method: "POST"', 'method: "GET"'],
+    ['credentials: "same-origin"', 'credentials: "include"'],
+    ['mode: "same-origin"', 'mode: "cors"'],
+    ['redirect: "error"', 'redirect: "follow"'],
+    ['cache: "no-store"', 'cache: "default"'],
+    ['referrerPolicy: "no-referrer"', 'referrerPolicy: "unsafe-url"'],
+    ['Accept: "application/json"', 'Accept: "application/json", Authorization: "Bearer token"'],
+    ['body: JSON.stringify(body)', 'body: JSON.stringify({ ...body as object, workspaceId: "foreign" })'],
+    ['body: JSON.stringify(body)', 'body: body as BodyInit'],
+    ['    signal,', '    signal: new AbortController().signal,'],
+    ['    signal,', '    ...options, signal,'],
+    ['    signal,', '    signal, method: "GET",'],
+    ['async (op, body, signal) => {', 'async (op, body, signal) => { body = { workspaceId: "foreign" };'],
+    ['async (op, body, signal) => {', 'async (op, body, signal) => { const JSON = unsafeSerializer;'],
+    ['await fetch(', 'await window.fetch('],
+  ]) {
+    assert.ok(source.includes(from), `mutation must alter an actual boundary: ${from}`);
+    assert.throws(() => reviewedPublicPartnerEntrySource(publicPartnerEntryFile, source.replace(from, to)),
+      /anonymous partner-entry request boundary requires review/, to);
+  }
+  const privateFetch = '\nexport const unsafe = () => fetch("/api/crm/leads", { method: "POST" });';
+  assert.throws(() => reviewedPublicPartnerEntrySource(publicPartnerEntryFile, source + privateFetch),
+    /anonymous partner-entry request boundary requires review/, "an added fetch cannot hide behind a reviewed module");
+  for (const file of ["pages/partner-company-client.ts", "pages/Other.ts"]) {
+    const unchanged = reviewedPublicPartnerEntrySource(file, source + privateFetch);
+    assert.equal(unchanged, source + privateFetch, "authenticated or arbitrary files receive no exemption");
+    assert.ok(crmTransportOffenders(new Map([[file, unchanged]])).some(message => message.startsWith(file + ":")));
+  }
+  const privateFile = "pages/partner-company-client.ts";
+  assert.ok(crmTransportOffenders(new Map([[publicPartnerEntryFile, reviewed], [privateFile, privateFetch]]))
+    .some(message => message.startsWith(privateFile + ":")), "recognizing the public call cannot mask another module");
 });
 
 test("L3 Security-1A browser invariants still hold", async () => {
@@ -1523,7 +1743,8 @@ test("L5d every CRM call site goes through the authenticated helper", async () =
   // them answered 401 — including /api/crm/meta-launch, so the whole Ads
   // Automation flow was dead in the preview while the dashboard looked fine.
   //
-  // The rule: a /api/crm/ path may only reach the network through crmFetch. Page
+  // Private /api/crm/ paths may only reach the network through crmFetch. The one
+  // explicit public entry call is proved and masked above, not file-exempted. Page
   // wrappers are fine as long as they delegate to it. Non-CRM endpoints are not
   // covered here — ContentStudio's /api/content-studio/* calls are a different
   // contract.
@@ -1540,7 +1761,8 @@ test("L5d every CRM call site goes through the authenticated helper", async () =
     for (const name of names) {
       if (!name.endsWith(".ts") && !name.endsWith(".tsx")) continue;
       const source = await readFile(path.join(root, name), "utf8");
-      sources.set(path.relative(negisSrc, path.join(root, name)).replaceAll("\\", "/"), source);
+      const relative = path.relative(negisSrc, path.join(root, name)).replaceAll("\\", "/");
+      sources.set(relative, reviewedPublicPartnerEntrySource(relative, source));
     }
   }
 

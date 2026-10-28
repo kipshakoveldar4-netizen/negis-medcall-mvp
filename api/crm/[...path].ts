@@ -9,6 +9,7 @@ import { handlePartnerLedger } from "../../lib/crm/partner-ledger";
 import { handlePartnerHistory } from "../../lib/crm/partner-history";
 import { handlePartnerTerms } from "../../lib/crm/partner-terms";
 import { handlePartnerLink } from "../../lib/crm/partner-link";
+import { handlePartnerCompanyEntry, handlePartnerCompanyRecovery, handlePlatformPartnerCompanies } from "../../lib/crm/partner-companies";
 import { handlePartnerEntry } from "../../lib/crm/partner-entry";
 import { handleCreatorJobs, handleCreatorJobReads } from "../../lib/crm/creator-jobs";
 import { handleOperatorLeads, handleClinicOperatorLeads } from "../../lib/crm/operator-leads";
@@ -326,6 +327,8 @@ async function dispatch(
     case "partner-history": return segments.length === 1 ? handlePartnerHistory(req, res) : notFound(res);
     case "partner-terms": return segments.length === 1 ? handlePartnerTerms(req, res) : notFound(res);
     case "partner-link": return segments.length === 1 ? handlePartnerLink(req, res) : notFound(res);
+    case "partner-company": return segments.length === 1 ? handlePartnerCompanyRecovery(req, res) : notFound(res);
+    case "platform-partner-companies": return segments.length === 1 ? handlePlatformPartnerCompanies(req, res) : notFound(res);
     case "platform-partner-terms": return segments.length === 1 ? handlePartnerTerms(req, res, true) : notFound(res);
     case "creator-jobs": return segments.length === 1 ? handleCreatorJobs(req, res) : notFound(res);
     case "creator-job-command": return segments.length === 1 ? handleCreatorJobs(req, res, false, true) : notFound(res);
@@ -482,7 +485,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   // Creator denials can happen in this router before the private handler runs.
-  if (["partner-link", "creator-jobs", "creator-job-command", "clinic-creator-jobs", "clinic-creator-job-command",
+  if (["partner-link", "partner-company", "platform-partner-companies", "creator-jobs", "creator-job-command", "clinic-creator-jobs", "clinic-creator-job-command",
     "creator-job-detail", "clinic-creator-job-detail", "creator-directory"].includes(route.key)) {
     res.setHeader("Cache-Control", "no-store");
   }
@@ -509,8 +512,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
   if (route.authorization.kind === "partner_entry") {
     res.setHeader("Cache-Control", "no-store");
-    if (route.key !== "partner-entry" || segments.length !== 1) return notFound(res);
-    try { return await handlePartnerEntry(req, res); }
+    if (route.key !== "partner-entry" || (segments.length !== 1 && !(segments.length === 2 && segments[1] === "company"))) return notFound(res);
+    try { return await (segments.length === 2 ? handlePartnerCompanyEntry(req, res) : handlePartnerEntry(req, res)); }
     catch (error) { if (error instanceof WorkspaceAdminAuthError) return sendAuthError(res, error); throw error; }
   }
 

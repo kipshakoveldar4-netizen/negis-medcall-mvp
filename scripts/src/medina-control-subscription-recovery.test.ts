@@ -266,7 +266,7 @@ async function fixture(t: TestContext, storage = memoryStorage(), initialActor =
     if (filename === path.join(control, "lib/supabase.ts")) return {
       supabase: { auth }, controlConfig: { ready: true, apiOrigin: "https://control.fixture.invalid" },
     };
-    for (const name of ["Login", "ClinicCard", "Onboarding", "Operators", "Contributors"]) {
+    for (const name of ["Login", "ClinicCard", "Onboarding", "Operators", "Contributors", "PartnerCompanies"]) {
       if (filename === path.join(control, `screens/${name}.tsx`)) return { [name]: Symbol(name) };
     }
     const source = ts.transpileModule(readFileSync(filename, "utf8"), {
