@@ -5,10 +5,10 @@ import { DEFAULT_VERTICAL, readVertical, type Vertical } from '../../../../lib/v
 import { isWorkspacePurpose, type WorkspacePurpose } from '../../../../lib/crm/workspace-purpose';
 import { useLocation } from 'wouter';
 import { toast } from 'sonner';
-import { apiUrl, clearCrmCache, crmFetch } from '@/lib/api';
+import { apiUrl, clearCrmCache, crmFetch, CrmApiError } from '@/lib/api';
 import { getSupabaseAccessToken } from '@/lib/serverAuth';
 import { isSignOutPending, getSignOutRevision, markSignOutPending, clearSignOutPending } from '@/lib/authSignOut';
-import { clearListReadCache, WORKSPACE_SELECTOR_KEY } from '@/lib/demoStorage';
+import { bindWorkspaceReadScope, clearWorkspaceReadScope, clearListReadCache, WORKSPACE_SELECTOR_KEY } from '@/lib/demoStorage';
 import { isStaffRole, permissionsForRole, type StaffRole } from '@/lib/permissions';
 
 /* ── Types ────────────────────────────────────────────────── */
@@ -97,6 +97,9 @@ interface AuthContextType {
   availableWorkspaces: WorkspaceChoice[];
   /** Applies one of `availableWorkspaces`. Anything else is refused. */
   selectWorkspace: (workspaceId: string) => void;
+  /** Fresh owner membership is required; a previous selector is never a fallback. */
+  enterWorkspace: (workspaceId: string, options: { expectedUserId: string; signal: AbortSignal; isCurrent(): boolean;
+    confirm?(): Promise<void> }) => Promise<boolean>;
   /** Drops the current choice and returns the user to the picker. */
   clearWorkspaceSelection: () => void;
   /** Apply only the confirmed display name; never replace an SDK session. */
@@ -321,6 +324,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const authIdentityRef = useRef<string | null>(null);
   const profileSubjectRevisionRef = useRef(0);
   const profileSubjectRevision = profileSubjectRevisionRef.current;
+  const workspaceSelectionRevisionRef = useRef(0);
+  const workspaceReadOwner = useRef({}).current;
+  const workspaceIntentRef = useRef<{ actorId: string; workspaceId: string | null; blocked: boolean } | null>(null);
   const mountedRef = useRef(true);
   const signOutRequestRef = useRef<Promise<void> | null>(null);
   const profileContextRef = useRef({ userId: user?.id, sessionUserId: session?.user.id,
@@ -336,10 +342,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     mountedRef.current = true;
+    bindWorkspaceReadScope(workspaceReadOwner, null);
     void initAuth();
     return () => {
       mountedRef.current = false;
       authRevisionRef.current += 1;
+      clearWorkspaceReadScope(workspaceReadOwner);
       subscriptionRef.current?.unsubscribe();
     };
   }, []);
@@ -393,6 +401,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     userRef.current = nextUser;
     const revision = ++authRevisionRef.current;
     if (changed || !nextUser) {
+      workspaceIntentRef.current = null;
+      bindWorkspaceReadScope(workspaceReadOwner, null);
       profileSubjectRevisionRef.current++;
       clearCrmCache();
       clearListReadCache();
@@ -414,6 +424,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   /** Apply stored impersonation state to React state (idempotent). */
   const applyImpersonationState = (d: ImpersonationData) => {
+    bindWorkspaceReadScope(workspaceReadOwner, d.clinic_id);
     setIsImpersonation(true);
     setIsDemoMode(false);
     setIsStaffMode(false);
@@ -426,6 +437,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const applyDemoWorkspaceState = (d: DemoAuthData) => {
+    bindWorkspaceReadScope(workspaceReadOwner, d.workspace.id);
     const demoUser = {
       id: d.user.id || 'demo-user',
       email: d.user.email || '',
@@ -451,6 +463,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const applyStaffWorkspaceState = (d: StaffAuthData, supabaseUser?: User | null) => {
     const role = isStaffRole(d.user.role) ? d.user.role : 'receptionist';
     const workspaceId = d.user.workspaceId || d.user.workspace_id || d.session.workspaceId || 'demo-workspace';
+    bindWorkspaceReadScope(workspaceReadOwner, workspaceId);
     const staffUser = supabaseUser ?? ({
       id: d.user.authUserId || d.user.auth_user_id || d.user.id || 'staff-user',
       email: d.user.email || d.session.email,
@@ -487,14 +500,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     purpose: WorkspacePurpose;
   };
 
-  const fetchAuthContext = async (userId: string, revision: number): Promise<{
+  const fetchAuthContext = async (userId: string, revision: number, scope?: { signal: AbortSignal; isCurrent(): boolean }): Promise<{
     memberships: AuthContextMembership[];
     status: number;
     sessionChanged?: boolean;
   }> => {
     const changedSession = { memberships: [], status: 0, sessionChanged: true };
     let accessToken = '';
-    const isCurrentRequest = () => isCurrentAuthResolution(userId, revision);
+    const isCurrentRequest = () => isCurrentAuthResolution(userId, revision)
+      && (!scope || (!scope.signal.aborted && scope.isCurrent()));
     const hasCurrentToken = async () => {
       if (!accessToken || !isCurrentRequest()) return false;
       try {
@@ -510,6 +524,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       const response = await crmFetch('/api/crm/auth-context', {
         accessToken, expectedUserId: userId, dispatchGuard: isCurrentRequest,
+        ...(scope ? { signal: scope.signal, cache: 'no-store' as const } : {}),
       });
       const text = response.ok ? await response.text() : '';
       // The SDK can replace its session before this tab receives its auth event.
@@ -576,6 +591,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     memberships: AuthContextMembership[],
   ) => {
     rememberSelector(selected.workspaceId);
+    bindWorkspaceReadScope(workspaceReadOwner, selected.workspaceId);
 
     const role = isStaffRole(selected.role) ? selected.role : 'receptionist';
     setIsDemoMode(false);
@@ -617,6 +633,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       clearListReadCache();
     }
     membershipsRef.current = memberships;
+    const intent = workspaceIntentRef.current?.actorId === supabaseUser.id ? workspaceIntentRef.current : null;
+    if (intent?.blocked) {
+      setAvailableWorkspaces(toWorkspaceChoices(memberships));
+      rememberSelector(null);
+      applyNoWorkspaceAccess(false);
+      return true;
+    }
     if (memberships.length === 0) {
       setAvailableWorkspaces([]);
       rememberSelector(null);
@@ -645,8 +668,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     })();
 
-    const selected =
-      memberships.find((entry) => entry.workspaceId === storedSelector) ||
+    const selected = intent
+      ? memberships.find((entry) => entry.workspaceId === intent.workspaceId) ?? null
+      : memberships.find((entry) => entry.workspaceId === storedSelector) ||
       (memberships.length === 1 ? memberships[0] : null);
 
     if (!selected) {
@@ -676,10 +700,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const selected = memberships.find((entry) => entry.workspaceId === workspaceId);
     const supabaseUser = userRef.current;
 
-    if (!selected || !supabaseUser || authIdentityRef.current !== supabaseUser.id) {
+    if (!mountedRef.current || isSignOutPending() || !selected || !supabaseUser || authIdentityRef.current !== supabaseUser.id) {
       toast.error('Клиника недоступна. Войдите заново.');
       return;
     }
+    workspaceSelectionRevisionRef.current++;
+    workspaceIntentRef.current = { actorId: supabaseUser.id, workspaceId: selected.workspaceId, blocked: false };
 
     // The read cache is keyed by path, and workspaceId travels in the path, so
     // the previous clinic's answers could not be served here anyway. Dropping
@@ -690,9 +716,69 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setLocation(selected.purpose === 'mortgage_leads' ? '/dashboard' : selected.role === 'lead_manager' ? '/leads' : '/dashboard');
   };
 
+  const enterWorkspace: AuthContextType['enterWorkspace'] = async (workspaceId, options) => {
+    const subject = options.expectedUserId;
+    const sameSubject = () => {
+      try {
+        const context = profileContextRef.current;
+        return Boolean(subject) && !options.signal.aborted && options.isCurrent()
+          && mountedRef.current && !isSignOutPending()
+          && profileSubjectRevisionRef.current === profileSubjectRevision
+          && authIdentityRef.current === subject && userRef.current?.id === subject
+          && context.userId === subject && context.sessionUserId === subject
+          && !context.isImpersonation && !context.isDemoMode && !context.isSigningOut
+          && !loadStoredImpersonation() && !loadStoredDemoAuth() && !loadStoredStaffAuth();
+      } catch { return false; }
+    };
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(workspaceId) || !sameSubject()) return false;
+    const revision = ++authRevisionRef.current;
+    const selection = ++workspaceSelectionRevisionRef.current;
+    workspaceIntentRef.current = { actorId: subject, workspaceId, blocked: true };
+    const ownsRead = () => isCurrentAuthResolution(subject, revision) && workspaceSelectionRevisionRef.current === selection;
+    const current = () => ownsRead() && sameSubject();
+    // Clear the previous tenant before the read. A failed handoff cannot revive it.
+    clearCrmCache();
+    clearListReadCache();
+    rememberSelector(null);
+    membershipsRef.current = [];
+    setAvailableWorkspaces([]);
+    applyNoWorkspaceAccess(false);
+    setIsLoading(true);
+    try {
+      if (options.confirm) {
+        if (!current()) return false;
+        await options.confirm();
+        if (!current()) return false;
+      }
+      const result = await fetchAuthContext(subject, revision, { signal: options.signal, isCurrent: current });
+      if (!current() || result.sessionChanged) return false;
+      if (result.status === 401 || result.status === 403)
+        throw new CrmApiError(result.status, 'partner_company_access_denied', 'Доступ к выбранной компании изменился.');
+      if (result.status !== 200) return false;
+      const matches = result.memberships.filter(entry => entry.workspaceId.toLowerCase() === workspaceId.toLowerCase());
+      if (matches.length !== 1 || matches[0].role !== 'owner')
+        throw new CrmApiError(403, 'partner_company_access_denied', 'Доступ к выбранной компании изменился.');
+      const resolvedUser = userRef.current;
+      if (!resolvedUser || !current()) return false;
+      workspaceIntentRef.current = { actorId: subject, workspaceId: matches[0].workspaceId, blocked: false };
+      membershipsRef.current = result.memberships;
+      applyMembership(resolvedUser, matches[0], result.memberships);
+      setIsLoading(false);
+      setLocation('/dashboard');
+      return true;
+    } catch (error) {
+      if (current() && error instanceof CrmApiError) throw error;
+      return false;
+    }
+    finally { if (ownsRead()) setIsLoading(false); }
+  };
+
   /** Returns a multi-clinic user to the picker without ending the session. */
   const clearWorkspaceSelection = () => {
-    if (membershipsRef.current.length < 2) return;
+    if (!mountedRef.current || isSignOutPending() || membershipsRef.current.length < 2) return;
+    workspaceSelectionRevisionRef.current++;
+    workspaceIntentRef.current = userRef.current ? { actorId: userRef.current.id, workspaceId: null, blocked: true } : null;
+    bindWorkspaceReadScope(workspaceReadOwner, null);
     clearCrmCache();
     rememberSelector(null);
     setClinicId(null);
@@ -966,6 +1052,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
      signed-in account is not linked to any clinic — we grant NO role and NO
      permissions rather than guessing or elevating. */
   const applyNoWorkspaceAccess = (notifyUnlinked = true) => {
+    bindWorkspaceReadScope(workspaceReadOwner, null);
     setClinicId(null);
     setUserRole(null);
     setRolePermissions({});
@@ -1051,7 +1138,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       rolePermissions,
       isImpersonation, isDemoMode, isStaffMode, impersonationClinicName, vertical,
       workspacePurpose,
-      availableWorkspaces, selectWorkspace, clearWorkspaceSelection,
+      availableWorkspaces, selectWorkspace, enterWorkspace, clearWorkspaceSelection,
       applyConfirmedProfile,
       signOut,
     }}>

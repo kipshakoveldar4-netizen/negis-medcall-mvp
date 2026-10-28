@@ -15,6 +15,11 @@ const actorA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const actorB = "bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb";
 const requestId = "cccccccc-cccc-4ccc-accc-cccccccccccc";
 const sourceId = "dddddddd-dddd-4ddd-bddd-dddddddddddd";
+const revisionId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const workspaceId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+const approvedCompany = { id: requestId, revision: revisionId, state: "approved", company: { name: "Synthetic Company", purpose: "marketing",
+  vertical: null, timeZone: "UTC", ownerName: "Synthetic Owner" }, workspaceId, sourceState: "pending_payment",
+  submittedAt: "2026-10-28T01:00:00Z", reviewedAt: "2026-10-28T02:00:00Z", expiresAt: "2026-11-01T01:00:00Z" };
 const submitBody = Object.freeze({ requestId, company: Object.freeze({ name: "Synthetic Company", purpose: "marketing",
   vertical: null, timeZone: "UTC", ownerName: "Synthetic Owner" }), consent: true, consentVersion: "company-v1" });
 
@@ -26,6 +31,7 @@ async function compile(file: string) {
 }
 const pageCode = await compile(pageFile);
 const clientCode = await compile(clientFile);
+const contractsCode = await compile("lib/crm/partner-company-contracts.ts");
 
 type Props = Record<string, any>;
 type Element = { type: string | ((props: Props) => Child); props: Props; key?: string | number };
@@ -81,9 +87,12 @@ function clientFixture(config: { apiUrl?: (path: string) => string; respond?: (c
       return config.respond ? config.respond(call) : Promise.resolve(reply());
     },
   };
-  const client = evaluate(clientCode, clientFile, { "@/lib/api": api }) as {
+  const client = evaluate(clientCode, clientFile, { "@/lib/api": api,
+    "../../../../lib/crm/partner-company-contracts": evaluate(contractsCode, "company-contracts", {}) }) as {
     companyRequestForActor(actorId: string, isCurrent: () => boolean): CompanyRequest;
     companyInboxRequestForActor(actorId: string, isCurrent: () => boolean): InboxRequest;
+    companyWorkspaceRequestForActor(actorId: string, isCurrent: () => boolean): (options: {
+      applicationId: string; revision: string; signal: AbortSignal; isCurrent(): boolean }) => Promise<typeof approvedCompany>;
   };
   return { client, calls, trace, tokenReads: () => tokenReads };
 }
@@ -180,7 +189,8 @@ function hookRenderer() {
 }
 
 type ChildProps = { actorId: string; request: CompanyRequest; isSessionCurrent(): boolean; onAccessDenied(): void };
-type InboxChildProps = Omit<ChildProps, "request"> & { request: InboxRequest; onNewApplication(): void };
+type InboxChildProps = Omit<ChildProps, "request"> & { request: InboxRequest; onNewApplication(): void;
+  onOpenWorkspace(application: typeof approvedCompany, scope: { signal: AbortSignal; isCurrent(): boolean }): Promise<void> };
 type Mount<P = ChildProps> = { kind: "application" | "inbox"; props: P; active: boolean; unmounts: number };
 const session = (id: string | null) => id ? { user: { id, email: "synthetic@example.invalid" } } : null;
 type SessionReply = { data: { session: ReturnType<typeof session> }; error?: unknown };
@@ -191,6 +201,15 @@ function pageFixture(t: TestContext, config: { configured?: boolean; search?: st
   const signIns: { body: { email: string; password: string }; gate: ReturnType<typeof deferred<any>> }[] = [];
   const sdkTrace: string[] = [];
   const navigations: string[] = [], history = ["/partner-company" + (config.search ? "?" + config.search : "")];
+  const entries: { workspaceId: string; options: { expectedUserId: string; signal: AbortSignal; isCurrent(): boolean } }[] = [];
+  let entryResult = true;
+  let context: Record<string, any> = { user: null, session: null, isLoading: false, isDemoMode: false, isImpersonation: false, isSigningOut: false,
+    async signOut() { return sdk.signOut(); },
+    async enterWorkspace(workspaceId: string, options: { expectedUserId: string; signal: AbortSignal; isCurrent(): boolean; confirm?(): Promise<void> }) {
+      await options.confirm?.();
+      if (options.signal.aborted || !options.isCurrent()) return false;
+      entries.push({ workspaceId, options }); return entryResult;
+    } };
   let historyIndex = 0;
   const location = () => new URL(history[historyIndex], origin);
   const navigate = (url: string) => {
@@ -233,6 +252,8 @@ function pageFixture(t: TestContext, config: { configured?: boolean; search?: st
     "@/components/contributors/PartnerCompanyApplication": { PartnerCompanyApplication: childDouble("application") },
     "@/components/contributors/PartnerCompanyInbox": { PartnerCompanyInbox: childDouble("inbox") },
     "@/lib/supabase": { supabase: { auth }, hasSupabaseFrontendEnv: config.configured !== false },
+    "@/lib/api": { CrmApiError },
+    "@/contexts/AuthContext": { useAuth: () => context },
     "./partner-company-client": transport.client,
   });
   renderer.mount(page.default);
@@ -246,15 +267,23 @@ function pageFixture(t: TestContext, config: { configured?: boolean; search?: st
     const node = renderer.nodes().find(n => n.type === "input" && n.props.type === type); assert.ok(node, `Expected ${type} input`); return node;
   }
   return {
-    ...renderer, transport, mounts, signIns, sdkTrace, sessionGate, navigations, location, navigate,
+    ...renderer, transport, mounts, signIns, sdkTrace, sessionGate, navigations, location, navigate, entries,
+    authPatch(patch: Record<string, any>) { context = { ...context, ...patch }; renderer.rerender(); },
+    entryResult(value: boolean) { entryResult = value; },
     travel(delta: -1 | 1) {
       const next = historyIndex + delta;
       assert.ok(next >= 0 && next < history.length, "Expected an existing browser history entry");
       historyIndex = next; renderer.rerender();
     },
     shell: () => shell, signOuts: () => signOuts, prevented: () => prevented,
-    emit(id: string | null, event = id ? "SIGNED_IN" : "SIGNED_OUT") { for (const callback of [...listeners]) callback(event, session(id)); },
-    async ready(id: string | null) { await renderer.flush(); sessionGate.resolve({ data: { session: session(id) } }); await renderer.flush(); },
+    emit(id: string | null, event = id ? "SIGNED_IN" : "SIGNED_OUT") {
+      context = { ...context, user: session(id)?.user ?? null, session: session(id) };
+      for (const callback of [...listeners]) callback(event, session(id));
+    },
+    async ready(id: string | null) {
+      context = { ...context, user: session(id)?.user ?? null, session: session(id) };
+      await renderer.flush(); sessionGate.resolve({ data: { session: session(id) } }); await renderer.flush();
+    },
     child() {
       const child = mounts.filter(m => m.active).at(-1);
       assert.ok(child); assert.equal(child.kind, "application", "Expected actual page to mount application boundary");
@@ -759,4 +788,122 @@ test("page: retained shell sign-out cannot log out B, a new A lifetime, or an un
   const currentSignOut = f.shell().onSignOut; currentSignOut(); assert.equal(f.signOuts(), 1);
   f.dispose(); currentSignOut(); await f.flush(); assert.equal(f.signOuts(), 1);
   assert.equal(f.transport.calls.length, 0);
+});
+
+const workspaceOptions = (patch: Record<string, any> = {}) => ({ applicationId: requestId, revision: revisionId,
+  signal: new AbortController().signal, isCurrent: () => true, ...patch });
+
+test("workspace client: exact read-only tuple, strict approved DTO and immutable actor", async () => {
+  const f = clientFixture({ respond: async () => reply({ success: true, data: approvedCompany }) });
+  const opts = workspaceOptions();
+  const value = await f.client.companyWorkspaceRequestForActor(actorA, () => true)(opts);
+  assert.deepEqual(JSON.parse(JSON.stringify(value)), approvedCompany);
+  assert.equal(Object.isFrozen(value), true); assert.equal(Object.isFrozen(value.company), true);
+  assert.equal(f.calls.length, 1);
+  const { path, init } = f.calls[0];
+  assert.deepEqual(Object.fromEntries(new URL(path, origin).searchParams), { view: "workspace", applicationId: requestId, revision: revisionId });
+  assert.equal(init.expectedUserId, actorA); assert.equal(init.method, "GET"); assert.equal(init.body, undefined);
+  assert.equal(init.signal, opts.signal); assert.equal(init.dispatchGuard(), true);
+  assert.equal(init.cache, "no-store"); assert.equal(init.mode, "same-origin"); assert.equal(init.credentials, "same-origin");
+});
+
+test("workspace client: invalid tuple cannot read configuration or dispatch", async () => {
+  for (const key of ["applicationId", "revision"]) for (const value of [null, undefined, [], {}, 42, "", "bad", `${requestId}&workspaceId=${workspaceId}`]) {
+    const f = clientFixture();
+    await assert.rejects(f.client.companyWorkspaceRequestForActor(actorA, () => true)(workspaceOptions({ [key]: value })),
+      error => error instanceof CrmApiError && error.status === 400);
+    assert.equal(f.calls.length, 0); assert.deepEqual(f.trace, []);
+  }
+});
+
+test("workspace client: no selectors, body or operation can widen the read", async () => {
+  const f = clientFixture({ respond: async () => reply({ success: true, data: approvedCompany }) });
+  await f.client.companyWorkspaceRequestForActor(actorA, () => true)(workspaceOptions({ actorId: actorB, workspaceId: sourceId,
+    email: "forged@example.invalid", operation: "close", body: { operation: "approve" } }));
+  assert.equal(f.calls[0].path, `/api/crm/partner-company?view=workspace&applicationId=${requestId}&revision=${revisionId}`);
+  assert.equal(f.calls[0].init.body, undefined);
+});
+
+for (const [name, patch] of [
+  ["pending", { state: "pending", workspaceId: null, sourceState: "captured", reviewedAt: null }],
+  ["rejected", { state: "rejected", workspaceId: null, sourceState: "captured" }],
+  ["wrong application", { id: sourceId }], ["wrong revision", { revision: sourceId }],
+  ["private extra field", { owner_email: "private@example.invalid" }], ["missing workspace", { workspaceId: null }],
+] as const) {
+  test(`workspace client: ${name} cannot be used for navigation`, async () => {
+    const f = clientFixture({ respond: async () => reply({ success: true, data: { ...approvedCompany, ...patch } }) });
+    await assert.rejects(f.client.companyWorkspaceRequestForActor(actorA, () => true)(workspaceOptions()),
+      error => error instanceof CrmApiError && error.status === 503);
+  });
+}
+
+test("workspace client: foreign API is refused before any token read", async () => {
+  const f = clientFixture({ apiUrl: path => `https://foreign.example.invalid${path}` });
+  await assert.rejects(f.client.companyWorkspaceRequestForActor(actorA, () => true)(workspaceOptions()),
+    error => error instanceof CrmApiError && error.code === "same_origin_required");
+  assert.equal(f.tokenReads(), 0);
+});
+
+test("page/client: fresh approved application is passed to the actor-bound workspace entry, never a generic dashboard link", async t => {
+  const f = pageFixture(t, { transport: { respond: async () => reply({ success: true, data: approvedCompany }) } });
+  await f.ready(actorA);
+  const scope = { signal: new AbortController().signal, isCurrent: () => true };
+  await f.inbox().props.onOpenWorkspace(approvedCompany, scope);
+  assert.equal(f.entries.length, 1); assert.equal(f.entries[0].workspaceId, workspaceId);
+  assert.equal(f.entries[0].options.expectedUserId, actorA); assert.equal(f.entries[0].options.signal, scope.signal);
+  assert.equal(f.entries[0].options.isCurrent(), true);
+  assert.equal(f.navigations.length, 0, "Only AuthProvider may navigate after freshly applying the target membership");
+  assert.equal(f.nodes().some(n => n.type === "a" && n.props.href === "/dashboard"), false);
+});
+
+for (const patch of [{ isLoading: true }, { isDemoMode: true }, { isImpersonation: true }, { isSigningOut: true },
+  { user: session(actorB)!.user }, { session: session(actorB) }]) {
+  test(`page/client: context ${Object.keys(patch).join()} cannot apply an approved company`, async t => {
+    const f = pageFixture(t, { transport: { respond: async () => reply({ success: true, data: approvedCompany }) } });
+    await f.ready(actorA); f.authPatch(patch); await f.flush();
+    await assert.rejects(f.inbox().props.onOpenWorkspace(approvedCompany, workspaceOptions()),
+      error => error instanceof CrmApiError && error.status === ('isLoading' in patch ? 503 : 403));
+    assert.equal(f.entries.length, 0); assert.equal(f.navigations.length, 0);
+  });
+}
+
+test("page/client: server returning a different valid workspace cannot select it", async t => {
+  const f = pageFixture(t, { transport: { respond: async () => reply({ success: true, data: { ...approvedCompany, workspaceId: sourceId } }) } });
+  await f.ready(actorA);
+  await assert.rejects(f.inbox().props.onOpenWorkspace(approvedCompany, workspaceOptions()),
+    error => error instanceof CrmApiError && error.status === 503);
+  assert.equal(f.entries.length, 0);
+});
+
+test("page/client: failed fresh membership entry is an error, not a fallback navigation", async t => {
+  const f = pageFixture(t, { transport: { respond: async () => reply({ success: true, data: approvedCompany }) } });
+  await f.ready(actorA); f.entryResult(false);
+  await assert.rejects(f.inbox().props.onOpenWorkspace(approvedCompany, workspaceOptions()),
+    error => error instanceof CrmApiError && error.status === 503);
+  assert.equal(f.entries.length, 1); assert.equal(f.navigations.length, 0);
+});
+
+for (const boundary of ["account ABA", "mode ABA", "blur guard", "abort", "unmount"]) {
+  test(`page/client: held workspace confirmation cannot survive ${boundary}`, async t => {
+    const gate = deferred<Reply>(), f = pageFixture(t, { transport: { respond: () => gate.promise } });
+    await f.ready(actorA); const old = f.inbox(); let current = true;
+    const controller = new AbortController();
+    const pending = old.props.onOpenWorkspace(approvedCompany, { signal: controller.signal, isCurrent: () => current });
+    const rejected = assert.rejects(pending, isAbort);
+    if (boundary === "account ABA") { f.emit(actorB); f.emit(actorA); }
+    if (boundary === "mode ABA") { f.navigate("/partner-company?new=1"); await f.flush(); f.navigate("/partner-company"); }
+    if (boundary === "blur guard") current = false;
+    if (boundary === "abort") controller.abort();
+    if (boundary === "unmount") f.dispose();
+    assert.equal(f.transport.calls[0].init.dispatchGuard(), false);
+    gate.resolve(reply({ success: true, data: approvedCompany })); await rejected; await f.flush();
+    assert.equal(f.entries.length, 0); assert.equal(f.navigations.filter(p => p === "/dashboard").length, 0);
+  });
+}
+
+test("page/client: retired actor workspace callback is rejected before a request", async t => {
+  const f = pageFixture(t); await f.ready(actorA); const old = f.inbox();
+  f.emit(actorB); f.emit(actorA);
+  await assert.rejects(old.props.onOpenWorkspace(approvedCompany, workspaceOptions()), isAbort);
+  assert.equal(f.transport.calls.length, 0); assert.equal(f.entries.length, 0);
 });

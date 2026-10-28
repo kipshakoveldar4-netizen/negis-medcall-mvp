@@ -38,7 +38,7 @@
 .partner-company-inbox ul { list-style: none; margin: 0; padding: 0; }
 .partner-company-inbox li { margin: 0; border-top: 1px solid var(--pci-line); }
 .partner-company-inbox .pci-row { display: grid; gap: 7px; width: 100%; min-width: 0; min-height: 82px; padding: 14px 12px; border: 0; border-left: 3px solid transparent; border-radius: 0; background: var(--pci-surface); color: var(--pci-ink); font: inherit; letter-spacing: 0; text-align: left; cursor: pointer; }
-.partner-company-inbox .pci-row:hover { background: var(--negis-surface-2, #f8faf9); }
+.partner-company-inbox .pci-row:hover:not(:disabled) { background: var(--negis-surface-2, #f8faf9); }
 .partner-company-inbox .pci-row[aria-pressed="true"] { border-left-color: var(--pci-accent); background: var(--negis-mint-soft, #cff3df); }
 .partner-company-inbox .pci-row:focus-visible { position: relative; outline-offset: -3px; }
 .partner-company-inbox .pci-row-top { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 6px 10px; min-width: 0; }
@@ -57,10 +57,17 @@
 .partner-company-inbox dd { margin: 4px 0 0; overflow-wrap: anywhere; }
 .partner-company-inbox .pci-wide { grid-column: 1 / -1; }
 .partner-company-inbox .pci-identifier { font-size: 12px; }
-.partner-company-inbox .pci-dashboard { margin-top: 24px; }
+.partner-company-inbox .pci-dashboard { display: grid; justify-items: start; gap: 12px; margin-top: 24px; }
+.partner-company-inbox .pci-open-workspace { width: min(100%, 240px); }
+.partner-company-inbox .pci-workspace-error { display: flex; align-items: flex-start; gap: 9px; color: #a4212d; }
+.partner-company-inbox .pci-workspace-error svg { margin-top: 2px; }
 .partner-company-inbox .pci-pagination { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; min-height: 70px; padding-top: 14px; border-top: 1px solid var(--pci-line); }
 .partner-company-inbox .pci-range { min-width: 0; color: var(--pci-muted); font-size: 12px; overflow-wrap: anywhere; }
 .partner-company-inbox .pci-pagination nav { display: flex; flex: 0 0 auto; gap: 8px; margin-left: auto; }
+@keyframes pci-open-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: no-preference) {
+  .partner-company-inbox .pci-open-spinner { animation: pci-open-spin 1s linear infinite; }
+}
 @media (max-width: 900px) {
   .partner-company-inbox .pci-content { grid-template-columns: minmax(220px, 1fr) minmax(0, 1fr); }
   .partner-company-inbox .pci-detail { padding-left: 18px; }

@@ -313,7 +313,8 @@ test("W6 selecting a workspace is refused unless the server listed it", async ()
     "the candidate must be looked up in the memberships the server returned",
   );
   assert.ok(
-    body.includes("if (!selected") && body.includes("return;"),
+    /if \([^\n]*!selected/.test(body) && body.includes("return;")
+      && body.indexOf("!selected") < body.indexOf("applyMembership("),
     "anything not in that list must be refused",
   );
 });
@@ -508,7 +509,7 @@ test("W13 a collection refetches when the clinic changes, without relying on the
     "the workspace must be read where the hook can depend on it, not inside the effect",
   );
   assert.ok(
-    hook.includes("productionMode, workspaceId]"),
+    /productionMode, workspaceId(?:, [^\]]+)?\]/.test(hook),
     "and must be in the fetch effect's dependencies, so a switch refetches",
   );
 

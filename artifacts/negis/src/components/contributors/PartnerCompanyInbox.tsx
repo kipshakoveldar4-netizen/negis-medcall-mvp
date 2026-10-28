@@ -1,5 +1,5 @@
 import { useId, useLayoutEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, CircleAlert, ClipboardList, LoaderCircle, Plus, RefreshCw } from "lucide-react";
+import { ArrowLeft, ArrowRight, CircleAlert, ClipboardList, LoaderCircle, LogIn, Plus, RefreshCw } from "lucide-react";
 import {
   parsePartnerCompanyPage,
   type PartnerCompanyApplication, type PartnerCompanyPage, type PartnerCompanyState,
@@ -19,9 +19,14 @@ export type PartnerCompanyInboxProps = {
   request: PartnerCompanyInboxRequest;
   onAccessDenied(): void;
   onNewApplication(): void;
+  onOpenWorkspace?: (application: PartnerCompanyApplication, scope: {
+    signal: AbortSignal;
+    isCurrent(): boolean;
+  }) => Promise<void>;
 };
 
 type Ticket = Readonly<{ controller: AbortController; offset: number; state: PartnerCompanyState | null }>;
+type OpenTicket = Readonly<{ controller: AbortController; frame: object; page: PartnerCompanyPage; selected: PartnerCompanyApplication }>;
 type Lifetime = PartnerCompanyInboxProps & {
   origin: string;
   expired: boolean;
@@ -31,10 +36,12 @@ type Lifetime = PartnerCompanyInboxProps & {
   offset: number;
   state: PartnerCompanyState | null;
   ticket: Ticket | null;
+  openTicket: OpenTicket | null;
   page: PartnerCompanyPage | null;
   selected: PartnerCompanyApplication | null;
   phase: "loading" | "ready" | "hidden" | "error";
   error: string;
+  openError: string;
 };
 
 const pageSize = 20;
@@ -52,13 +59,17 @@ const visible = (owner: Lifetime) => owner.focused && document.visibilityState !
 
 function hide(owner: Lifetime) {
   const ticket = owner.ticket;
+  const openTicket = owner.openTicket;
   owner.ticket = null;
+  owner.openTicket = null;
   owner.page = null;
   owner.selected = null;
   owner.frame = {};
   owner.phase = "hidden";
   owner.error = "";
+  owner.openError = "";
   ticket?.controller.abort();
+  openTicket?.controller.abort();
 }
 
 function retire(owner: Lifetime) {
@@ -66,7 +77,7 @@ function retire(owner: Lifetime) {
   hide(owner);
 }
 
-export function PartnerCompanyInbox({ actorId, isSessionCurrent, request, onAccessDenied, onNewApplication }: PartnerCompanyInboxProps) {
+export function PartnerCompanyInbox({ actorId, isSessionCurrent, request, onAccessDenied, onNewApplication, onOpenWorkspace }: PartnerCompanyInboxProps) {
   const [lifetime, setLifetime] = useState<Lifetime | null>(null);
   const [, render] = useState(0);
   const live = useRef<Lifetime | null>(null);
@@ -84,10 +95,14 @@ export function PartnerCompanyInbox({ actorId, isSessionCurrent, request, onAcce
     return false;
   }
 
-  function publish(owner: Lifetime) {
+  function update(owner: Lifetime) {
     if (live.current !== owner) return;
-    owner.frame = {};
     render(value => value + 1);
+  }
+
+  function publish(owner: Lifetime) {
+    owner.frame = {};
+    update(owner);
   }
 
   function active(owner: Lifetime): boolean {
@@ -152,10 +167,10 @@ export function PartnerCompanyInbox({ actorId, isSessionCurrent, request, onAcce
   }
 
   useLayoutEffect(() => {
-    // Snapshot callbacks for the actor lifetime; later renders cannot rebind an old read.
-    const owner: Lifetime = { actorId, isSessionCurrent, request, onAccessDenied, onNewApplication,
+    // Snapshot callbacks for the actor lifetime; later renders cannot rebind an old read or action.
+    const owner: Lifetime = { actorId, isSessionCurrent, request, onAccessDenied, onNewApplication, onOpenWorkspace,
       origin: window.location.origin, expired: false, denied: false, focused: true, frame: {},
-      offset: 0, state: null, ticket: null, page: null, selected: null, phase: "loading", error: "" };
+      offset: 0, state: null, ticket: null, openTicket: null, page: null, selected: null, phase: "loading", error: "", openError: "" };
     live.current = owner;
     setLifetime(owner);
     void load(owner);
@@ -186,7 +201,9 @@ export function PartnerCompanyInbox({ actorId, isSessionCurrent, request, onAcce
   const frame = owner?.frame;
   const page = owner && visible(owner) && owner.phase === "ready" ? owner.page : null;
   const selected = page && owner?.selected && page.items.includes(owner.selected) ? owner.selected : null;
-  const busy = Boolean(owner?.ticket);
+  const loading = Boolean(owner?.ticket);
+  const opening = Boolean(owner?.openTicket);
+  const busy = loading || opening;
   const enabled = Boolean(owner && visible(owner));
 
   function samePage(): boolean {
@@ -197,8 +214,40 @@ export function PartnerCompanyInbox({ actorId, isSessionCurrent, request, onAcce
     return samePage() && Boolean(selected && owner?.selected === selected);
   }
 
+  async function openWorkspace() {
+    if (!owner || !frame || !page || !selected || !sameSelection() || owner.ticket || owner.openTicket
+      || selected.state !== "approved" || !selected.workspaceId || !owner.onOpenWorkspace) return;
+    const ticket: OpenTicket = Object.freeze({ controller: new AbortController(), frame, page, selected });
+    owner.openTicket = ticket;
+    owner.openError = "";
+    // Busy-only rendering preserves the exact frame that authorized this action.
+    update(owner);
+    const valid = () => {
+      if (owner.openTicket !== ticket || ticket.controller.signal.aborted || !active(owner)) return false;
+      if (!visible(owner)) { hide(owner); publish(owner); return false; }
+      return owner.frame === ticket.frame && owner.page === ticket.page && owner.selected === ticket.selected
+        && owner.phase === "ready" && ticket.page.items.includes(ticket.selected)
+        && ticket.selected.state === "approved" && Boolean(ticket.selected.workspaceId);
+    };
+    try {
+      if (!valid()) return;
+      await owner.onOpenWorkspace(ticket.selected, Object.freeze({ signal: ticket.controller.signal, isCurrent: valid }));
+      if (!valid()) return;
+    } catch (error) {
+      if (!valid()) return;
+      if ([401, 403, 404].includes(status(error))) { refuse(owner); return; }
+      owner.openError = "Не удалось проверить доступ к CRM. Попробуйте открыть CRM ещё раз или обновите список.";
+    } finally {
+      if (owner.openTicket === ticket) {
+        owner.openTicket = null;
+        ticket.controller.abort();
+        if (active(owner)) publish(owner);
+      }
+    }
+  }
+
   function changePage(direction: -1 | 1) {
-    if (!owner || !page || !samePage() || owner.ticket) return;
+    if (!owner || !page || !samePage() || owner.ticket || owner.openTicket) return;
     const offset = page.offset + direction * pageSize;
     if (offset < 0 || offset > maxOffset || (direction === 1 && !page.hasMore)) return;
     void load(owner, offset, page.state);
@@ -208,15 +257,15 @@ export function PartnerCompanyInbox({ actorId, isSessionCurrent, request, onAcce
     <header className="pci-heading">
       <div className="pci-title"><ClipboardList size={21} aria-hidden="true" /><h2>Мои заявки компаний</h2></div>
       <button type="button" className="pci-button pci-primary" disabled={!enabled || busy} onClick={() => {
-        if (!owner || !frame || !sameFrame(owner, frame) || owner.ticket) return;
+        if (!owner || !frame || !sameFrame(owner, frame) || owner.ticket || owner.openTicket) return;
         publish(owner);
         owner.onNewApplication();
       }}><Plus size={17} aria-hidden="true" /><span>Новая заявка</span></button>
     </header>
     <div className="pci-toolbar">
-      <label className="pci-filter"><span>Статус</span><select aria-label="Статус заявки" value={owner?.state ?? "all"} disabled={!enabled}
+      <label className="pci-filter"><span>Статус</span><select aria-label="Статус заявки" value={owner?.state ?? "all"} disabled={!enabled || opening}
         onChange={event => {
-          if (!owner || !frame || !sameFrame(owner, frame)) return;
+          if (!owner || !frame || !sameFrame(owner, frame) || owner.openTicket) return;
           const value = event.target.value;
           if (value !== "all" && value !== "pending" && value !== "approved" && value !== "rejected") return;
           const state = value === "all" ? null : value;
@@ -227,7 +276,7 @@ export function PartnerCompanyInbox({ actorId, isSessionCurrent, request, onAcce
         <option value="approved">Одобрена</option>
         <option value="rejected">Отклонена</option>
       </select></label>
-      <button type="button" className="pci-button pci-icon" title="Обновить заявки" aria-label="Обновить заявки" disabled={!enabled || busy}
+      <button type="button" className="pci-button pci-icon" title="Обновить заявки" aria-label="Обновить заявки" disabled={!enabled || loading}
         onClick={() => { if (owner && frame && sameFrame(owner, frame) && !owner.ticket) void load(owner); }}>
         <RefreshCw size={18} aria-hidden="true" />
       </button>
@@ -236,7 +285,7 @@ export function PartnerCompanyInbox({ actorId, isSessionCurrent, request, onAcce
       {lifetime?.denied ? <CircleAlert size={18} aria-hidden="true" /> : <LoaderCircle size={18} aria-hidden="true" />}
       <span>{lifetime?.denied ? deniedMessage : "Проверяем доступ к заявкам…"}</span>
     </p> : <>
-      {busy && <p className="pci-note" role="status"><LoaderCircle size={18} aria-hidden="true" /><span>Загружаем заявки…</span></p>}
+      {loading && <p className="pci-note" role="status"><LoaderCircle size={18} aria-hidden="true" /><span>Загружаем заявки…</span></p>}
       {owner.phase === "hidden" && <p className="pci-note" role="status">Данные скрыты до повторной проверки доступа.</p>}
       {owner.error && <p className="pci-note pci-error" role="alert"><CircleAlert size={18} aria-hidden="true" /><span>{owner.error}</span></p>}
       {page && (page.items.length === 0 ? <p className="pci-note" role="status">
@@ -245,9 +294,10 @@ export function PartnerCompanyInbox({ actorId, isSessionCurrent, request, onAcce
         <section className="pci-list" aria-label="Список заявок">
           <h3>Заявки</h3>
           <ul>{page.items.map(item => <li key={item.id}>
-            <button type="button" className="pci-row" aria-pressed={selected === item} aria-controls={detailId} onClick={() => {
-              if (!owner || !samePage() || owner.ticket || !page.items.includes(item) || owner.selected === item) return;
+            <button type="button" className="pci-row" aria-pressed={selected === item} aria-controls={detailId} disabled={opening} onClick={() => {
+              if (!owner || !samePage() || owner.ticket || owner.openTicket || !page.items.includes(item) || owner.selected === item) return;
               owner.selected = item;
+              owner.openError = "";
               publish(owner);
             }}>
               <span className="pci-row-top"><span className="pci-company">{item.company.name}</span><span className={`pci-state pci-state-${item.state}`}>{states[item.state]}</span></span>
@@ -268,6 +318,14 @@ export function PartnerCompanyInbox({ actorId, isSessionCurrent, request, onAcce
             <div><dt>Срок партнёрского перехода</dt><dd><time dateTime={selected.expiresAt}>{displayDate(selected.expiresAt, selected.company.timeZone)}</time></dd></div>
             <div className="pci-wide"><dt>Номер заявки</dt><dd className="pci-identifier">{selected.id}</dd></div>
           </dl>
+          {selected.state === "approved" && selected.workspaceId && owner.onOpenWorkspace && <div className="pci-dashboard">
+            <button type="button" className="pci-button pci-primary pci-open-workspace" disabled={!enabled || busy}
+              aria-busy={opening} onClick={() => { void openWorkspace(); }}>
+              {opening ? <LoaderCircle size={18} className="pci-open-spinner" aria-hidden="true" /> : <LogIn size={18} aria-hidden="true" />}
+              <span aria-live="polite">{opening ? "Проверяем доступ…" : "Открыть CRM"}</span>
+            </button>
+            {owner.openError && <p className="pci-workspace-error" role="alert"><CircleAlert size={18} aria-hidden="true" /><span>{owner.openError}</span></p>}
+          </div>}
         </section>}
       </div>)}
     </>}

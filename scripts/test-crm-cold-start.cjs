@@ -163,6 +163,12 @@ try {
             assert.deepEqual(Object.keys(args).sort(),['p_actor','p_offset','p_state']);
             return {data:{items:[],offset:args.p_offset,state:args.p_state,hasMore:false},error:null};
           }
+          if (name === 'read_growth_partner_company') {
+            assert.deepEqual(args,{p_actor:actor,p_application:applicationId});
+            return {data:{id:applicationId,revision,state:'approved',workspaceId:sourceId,sourceState:'pending_payment',
+              company:{name:'Fixture company',ownerName:'Fixture owner',purpose:'marketing',vertical:null,timeZone:'UTC'},
+              submittedAt:'2026-10-28T01:00:00Z',reviewedAt:'2026-10-28T02:00:00Z',expiresAt:'2026-11-01T01:00:00Z'},error:null};
+          }
           assert.equal(name,'read_growth_partner_company_review');
           assert.deepEqual(args,{p_owner:actor,p_application:applicationId,p_revision:revision,
             p_request:requestId,p_action:'approve',p_close:true});
@@ -195,6 +201,12 @@ try {
         await companyCheck('partner-company','GET',400,{query:{view:'list',requestId,sourceId}});
         await companyCheck('partner-company','GET',400,{query:{view:'list',workspaceId:sourceId}});
         await companyCheck('partner-company','POST',400,{query:{view:'list'}});
+        await companyCheck('partner-company','GET',200,{query:{view:'workspace',applicationId,revision},rpc:'read_growth_partner_company'});
+        await companyCheck('partner-company','GET',401,{query:{view:'workspace',applicationId,revision},token:null});
+        await companyCheck('partner-company','GET',400,{query:{view:'workspace',applicationId,revision,workspaceId:sourceId}});
+        await companyCheck('partner-company','GET',400,{query:{view:'workspace',applicationId,revision,requestId}});
+        await companyCheck('partner-company','GET',400,{query:{view:'workspace',applicationId}});
+        await companyCheck('partner-company','POST',400,{query:{view:'workspace',applicationId,revision}});
         await companyCheck('partner-company','POST',200,{body:{operation:'close',requestId,sourceId},rpc:'read_growth_partner_company_submission'});
         await companyCheck('platform-partner-companies','GET',200,{rpc:'list_growth_partner_companies'});
         await companyCheck('platform-partner-companies','POST',200,{body:{operation:'close',requestId,applicationId,revision,action:'approve'},rpc:'read_growth_partner_company_review'});

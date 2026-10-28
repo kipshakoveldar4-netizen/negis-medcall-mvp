@@ -55,12 +55,23 @@ export function writeDemoStorage<TValue>(key: string, value: TValue) {
  * Security-2B made the server the sole tenant authority, and the bootstrap no
  * longer writes the old negis_staff_user / negis_staff_session blobs. Reading
  * those first therefore fell through to "demo-workspace" for a signed-in user
- * and every CRM request came back 403. The verified selector is checked first;
- * the legacy keys stay only so demo mode keeps working.
+ * and every CRM request came back 403. The mounted provider now binds the live
+ * read scope first. Storage is only a bootstrap convenience or standalone demo.
  */
 export const WORKSPACE_SELECTOR_KEY = "negis_workspace_selector";
+let workspaceReadScope: { owner: object; workspaceId: string | null } | null = null;
+
+/** The mounted provider's current choice wins over shared, best-effort storage. */
+export function bindWorkspaceReadScope(owner: object, workspaceId: string | null): void {
+  workspaceReadScope = { owner, workspaceId };
+}
+
+export function clearWorkspaceReadScope(owner: object): void {
+  if (workspaceReadScope?.owner === owner) workspaceReadScope = { owner, workspaceId: null };
+}
 
 export function readWorkspaceId(): string {
+  if (workspaceReadScope) return workspaceReadScope.workspaceId ?? "";
   if (typeof window === "undefined") return "demo-workspace";
 
   try {
@@ -152,6 +163,7 @@ async function safeJson<TData>(response: globalThis.Response): Promise<ApiRespon
  */
 type CachedList = { rows: unknown[]; at: number };
 const listReadCache = new Map<string, CachedList>();
+let listReadEpoch = 0;
 
 /**
  * Кэш переживал ВЫХОД из аккаунта: ключ — эндпоинт и клиника, без пользователя,
@@ -162,6 +174,7 @@ const listReadCache = new Map<string, CachedList>();
  */
 export function clearListReadCache(): void {
   listReadCache.clear();
+  listReadEpoch++;
 }
 const LIST_READ_TTL_MS = 60_000;
 
@@ -213,13 +226,16 @@ export function useDemoCollection<TItem extends { id: string }>(
   // component two files away, and not something this hook should be relying on
   // to keep one clinic's records off another clinic's page.
   const workspaceId = strictAccess?.workspaceId ?? readWorkspaceId();
-  const isCurrent = () => !strictAccess || strictAccess.isCurrent();
+  const readScope = workspaceReadScope;
+  const isCurrent = () => strictAccess ? strictAccess.isCurrent()
+    : !readScope || (workspaceReadScope === readScope && Boolean(readScope.workspaceId));
   const request = strictAccess?.request ?? crmFetch;
 
   // Production = UUID workspace with an API-backed collection: never render demo
   // seeds, never read/write the negis_demo_* localStorage cache, and never fall
   // back to demo data. Demo workspaces keep the original behavior untouched.
-  const [productionMode] = useState(() => Boolean(strictAccess) || (Boolean(endpoint) && isRealWorkspace()));
+  const [productionMode] = useState(() => Boolean(strictAccess)
+    || (Boolean(endpoint) && (isRealWorkspace() || readScope?.workspaceId === null)));
   const [items, setItems] = useState<TItem[]>(() => {
     if (!productionMode) return stable.seed;
     const cached = endpoint && !strictAccess ? readFreshListCache(endpoint, workspaceId) : null;
@@ -267,11 +283,18 @@ export function useDemoCollection<TItem extends { id: string }>(
 
   useEffect(() => {
     if (!endpoint) return;
+    if (!strictAccess && readScope && !readScope.workspaceId) {
+      setItems([]);
+      setLoaded(true);
+      return;
+    }
 
     let cancelled = false;
 
     const loadFromApi = async () => {
+      const cacheEpoch = listReadEpoch;
       try {
+        if (!isCurrent()) return;
         const response = await request(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`);
         const body = await safeJson<Record<string, unknown>>(response);
 
@@ -288,7 +311,7 @@ export function useDemoCollection<TItem extends { id: string }>(
 
         // Only a confirmed supabase answer is worth remembering; the raw rows
         // go in so every consumer keeps applying its own fromApi.
-        if (productionMode && !strictAccess) {
+        if (productionMode && !strictAccess && cacheEpoch === listReadEpoch) {
           listReadCache.set(listCacheKey(endpoint, workspaceId), { rows: rawItems, at: Date.now() });
         }
 
@@ -315,7 +338,7 @@ export function useDemoCollection<TItem extends { id: string }>(
     // recreated on each render must not be able to re-arm this effect: that
     // is exactly the refetch loop this hook once had.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endpoint, key, productionMode, workspaceId]);
+  }, [endpoint, key, productionMode, workspaceId, strictAccess ? null : readScope]);
 
   /**
    * Security-2F: an optimistic row that the server refused must not stay.
@@ -361,6 +384,7 @@ export function useDemoCollection<TItem extends { id: string }>(
    * открытой. Прежние вызывающие без await продолжают работать как раньше.
    */
   const addItem = (item: TItem): Promise<boolean> => {
+    if (!isCurrent()) return Promise.resolve(false);
     if (strictAccess && (!allowScopedCreate || !endpoint || !isCurrent())) return Promise.resolve(false);
     setStoredItems((current) => [item, ...current]);
 

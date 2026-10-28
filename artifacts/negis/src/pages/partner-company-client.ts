@@ -1,6 +1,6 @@
 import { apiUrl, crmFetch, CrmApiError } from "@/lib/api";
 import type { PartnerCompanyApplicationRequest } from "@/components/contributors/PartnerCompanyApplication";
-import type { PartnerCompanyState } from "../../../../lib/crm/partner-company-contracts";
+import { parsePartnerCompanyApplication, type PartnerCompanyState } from "../../../../lib/crm/partner-company-contracts";
 
 type Scope = { signal: AbortSignal; isCurrent(): boolean };
 
@@ -49,5 +49,21 @@ export function companyInboxRequestForActor(actorId: string, isActorCurrent: () 
     const query = new URLSearchParams({ view: "list", offset: String(options.offset) });
     if (options.state !== null) query.set("state", options.state);
     return requestCompany(actorId, isActorCurrent, options, "/api/crm/partner-company?" + query, "GET");
+  };
+}
+
+export function companyWorkspaceRequestForActor(actorId: string, isActorCurrent: () => boolean) {
+  return async (options: Scope & { applicationId: string; revision: string }) => {
+    const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+    if (typeof options.applicationId !== "string" || typeof options.revision !== "string"
+      || !uuid.test(options.applicationId) || !uuid.test(options.revision))
+      throw new CrmApiError(400, "invalid_partner_company_query", "Проверьте выбранную заявку.");
+    const query = new URLSearchParams({ view: "workspace", applicationId: options.applicationId, revision: options.revision });
+    const value = await requestCompany(actorId, isActorCurrent, options, "/api/crm/partner-company?" + query, "GET");
+    const application = parsePartnerCompanyApplication(value);
+    if (!application || application.state !== "approved" || application.id.toLowerCase() !== options.applicationId.toLowerCase()
+      || application.revision.toLowerCase() !== options.revision.toLowerCase())
+      throw new CrmApiError(503, "partner_company_unconfirmed", "Не удалось подтвердить выбранную компанию.");
+    return application;
   };
 }

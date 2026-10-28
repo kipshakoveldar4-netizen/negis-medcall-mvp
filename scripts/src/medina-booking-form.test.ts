@@ -242,15 +242,17 @@ test("BF17 все активные CRM-маршруты записи испол�
   const protectedPage = app.match(/function ProtectedPage\([\s\S]*?\n\}(?=\r?\n|$)/)?.[0];
   assert.ok(protectedPage, "both booking branches must retain the underlying access guard");
   assert.match(protectedPage, /^function ProtectedPage\(\{\s*component: Component,\s*permission,/);
-  assert.match(protectedPage, /const \{ isLoading, userRole, rolePermissions,[^}]*\} = useAuth\(\);/);
+  assert.match(protectedPage, /const \{ isLoading, user, clinicId, userRole, rolePermissions,[^}]*\} = useAuth\(\);/);
   assert.match(protectedPage, /const \[location, setLocation\] = useLocation\(\);/);
   const roleAllowed = protectedPage.match(/const roleAllowed = ([\s\S]*?);/)?.[1].replace(/\s+/g, " ");
   assert.equal(roleAllowed,
     "userRole === 'lead_manager' ? permission === 'crm' && (location === '/leads' || (workspacePurpose === 'mortgage_leads' && workspaceAllowsRoute(workspacePurpose, userRole, location)))"
     + " : userRole === 'owner' || userRole === 'manager' || !!rolePermissions[permission]");
   assert.match(protectedPage, /const allowed = roleAllowed && workspaceAllowsRoute\(workspacePurpose, userRole, location\);/);
-  assert.match(protectedPage, /if \(isLoading\) return null;[\s\S]*if \(!allowed\) return null;[\s\S]*return <Component \/>;/);
-  assert.equal((protectedPage.match(/return <Component \/>;/g) || []).length, 1);
+  assert.match(protectedPage, /if \(isLoading\) return null;[\s\S]*if \(!allowed\) return null;[\s\S]*return <Component key=/);
+  assert.ok(protectedPage.includes("return <Component key={`${user?.id ?? ''}:${clinicId ?? ''}:${userRole ?? ''}:${workspacePurpose ?? ''}`} />;"),
+    "a changed verified actor, company, role or purpose must remount the protected booking branch");
+  assert.equal((protectedPage.match(/return <Component key=/g) || []).length, 1);
   assert.ok(!app.includes("DemoAppointments"), "демонстрационная форма не должна быть доступна из маршрутизатора");
 });
 

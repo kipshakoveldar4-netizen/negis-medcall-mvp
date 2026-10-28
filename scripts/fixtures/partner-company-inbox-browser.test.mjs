@@ -18,12 +18,13 @@ async function until(check) {
   assert.fail('Owned read-only inbox transport did not settle');
 }
 
-test('actual PartnerCompanyInbox and PortalShell in owned Chromium; synthetic read-only identity/transport, not API/SQL proof', { timeout: 300000 }, async t => {
+test('actual PartnerCompanyInbox and PortalShell in owned Chromium; synthetic identity/read/workspace callbacks, not Auth/navigation/API/SQL proof', { timeout: 300000 }, async t => {
   const base = path.join(root, 'node_modules/.cache/partner-company-inbox-browser');
   await mkdir(base, { recursive: true });
   const output = await mkdtemp(path.join(base, 'run-'));
   const report = { actualComponent: component, actualShell: true, syntheticIdentity: true, syntheticTransport: true,
     selectedWorkspaceNavigation: false, genericShellTeamHref: '/login',
+    syntheticWorkspaceCallback: true, actualAuthOrParentNavigation: false, originalTestCountIncludingParent: 15,
     nativeApiOrSqlProof: false, viewports: [375, 1440], passed: [], failed: [], captures: [], layouts: [], scenarios: [], sourceHashes: {},
     requests: [], exceptions: [], serverClosed: false, browserClosed: false };
   let server, browser;
@@ -36,7 +37,10 @@ test('actual PartnerCompanyInbox and PortalShell in owned Chromium; synthetic re
         await writeFile(path.join(output, 'last-state.png'), await browser.screenshot()).catch(() => {});
       }
     } finally {
-      try { await browser?.close(); report.browserClosed = true; }
+      try {
+        await browser?.evaluate('f?.unmount?.();f?.workspace?.release();').catch(() => {});
+        await browser?.close(); report.browserClosed = true;
+      }
       finally {
         try { await server?.close(); report.serverClosed = true; }
         finally {
@@ -72,6 +76,7 @@ test('actual PartnerCompanyInbox and PortalShell in owned Chromium; synthetic re
     fresh: action('/Новая заявка/'),
   };
   const row = item => `(${buttons}.find(e=>e.textContent.includes(${encode(item.company.name)})||e.getAttribute('aria-label')?.includes(${encode(item.company.name)})))`;
+  const workspaceButton = `${rootExpression}?.querySelector('.pci-detail button')`;
   const click = expression => ev(`const e=${expression};if(!e||e.disabled)throw Error('Missing enabled inbox control');e.click();`);
   const setFilter = value => ev(`const e=${rootExpression}.querySelector('select');if(!e||e.disabled)throw Error('Missing enabled native filter');
     Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(e,${encode(value || 'all')});e.dispatchEvent(new Event('change',{bubbles:true}));`);
@@ -93,6 +98,14 @@ test('actual PartnerCompanyInbox and PortalShell in owned Chromium; synthetic re
     assert.equal(await ev(`return !!${rootExpression}?.querySelector('.pci-detail button,.pci-detail [role="link"],.pci-detail [role="button"]');`), false,
       'Selected application detail is read-only, not a targeted workspace launcher');
   };
+  const assertWorkspaceControl = async () => {
+    const state = await ev(`const detail=${rootExpression}?.querySelector('.pci-detail');return {
+      links:${rootExpression}?.querySelectorAll('a[href],[role="link"]').length??0,
+      approved:!!detail?.querySelector('.pci-state-approved'),
+      controls:detail?.querySelectorAll('button,[role="button"]').length??0};`);
+    assert.equal(state.links, 0, 'No href or generic previously selected workspace shortcut');
+    assert.equal(state.controls, state.approved ? 1 : 0, 'Only approved detail has the optional guarded workspace button');
+  };
   const assertNoPrivate = async () => {
     assert.equal(/SYNTHETIC [AB] (?:COMPANY|OWNER)/.test(await body()), false, 'Unavailable scope must not show private rows or details');
     await assertNoWorkspaceShortcut();
@@ -103,17 +116,39 @@ test('actual PartnerCompanyInbox and PortalShell in owned Chromium; synthetic re
     assert.deepEqual(state.networkRefusals, []);
     assert.equal(await ev('return sessionStorage.length+localStorage.length;'), 0, 'No browser storage persistence');
     assert.ok(state.calls.every(call => call.unchanged), 'Actual inbox must not mutate received transport objects');
+    assert.ok(state.workspace.calls.every(call => call.unchanged), 'Workspace action must not mutate its captured application');
+    assert.ok(state.workspace.calls.every(call => call.guardAtDispatch), 'Synthetic callback is only invoked with a current guard');
+    assert.deepEqual(state.workspace.held, [], 'No synthetic workspace action left held after a scenario');
     assert.deepEqual(controls.errors, []); assert.deepEqual(controls.refusals, []);
     assert.ok(controls.requests.every(record => record.method === 'GET'));
     assert.equal(await ev(`return !!${rootExpression}?.querySelector('form,input,textarea');`), false, 'Read-only inbox does not create a form or editable PII');
-    assert.equal((await body()).includes('PRIVATE SYNTHETIC REFUSAL'), false, 'Private error body is never rendered');
-    await assertNoWorkspaceShortcut();
+    assert.equal(/PRIVATE SYNTHETIC/.test(await body()), false, 'Private read/action error bodies are never rendered');
+    assert.equal(await ev('return location.href;'), server.origin + '/', 'Synthetic callback never actually navigates');
+    if (state.workspaceEnabled) await assertWorkspaceControl();
+    else {
+      assert.deepEqual(state.workspace.calls, [], 'An omitted optional callback cannot open a workspace');
+      await assertNoWorkspaceShortcut();
+    }
   };
   async function start(configure = () => {}) {
-    await ev('f.unmount();'); await controls.reset(); configure();
+    await ev('f.unmount();f.workspace.release();'); await controls.reset(); configure();
     const boot = await ev('return f.bootId;');
     await browser.load(); await wait(`f.bootId!==${encode(boot)}&&!!${rootExpression}`);
   }
+  const startWorkspace = (configure = () => {}) => start(() => { controls.workspaceCallback = true; configure(); });
+  const workspaceState = () => ev('return f.workspace.snapshot();');
+  const workspaceSettled = async () => {
+    await wait('f.workspace.calls.length>0&&f.workspace.calls.every(call=>call.settled)');
+    await ev('await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));');
+  };
+  const holdWorkspace = plan => ev(`f.workspace.queue(${encode({ hold: true, ...plan })});`);
+  const releaseWorkspace = async () => { await ev('f.workspace.release();'); await workspaceSettled(); };
+  const assertRetiredWorkspace = async () => {
+    const state = await workspaceState();
+    assert.equal(state.calls[0].aborted, true, 'UI aborts an obsolete workspace action');
+    assert.equal(state.calls[0].current, false, 'Guard remains false for the obsolete action');
+    assert.deepEqual(state.successes, [], 'No synthetic success from an obsolete action');
+  };
   async function fit(name) {
     for (const width of [375, 1440]) {
       await browser.viewport(width, 1050);
@@ -124,7 +159,10 @@ test('actual PartnerCompanyInbox and PortalShell in owned Chromium; synthetic re
           inter:getComputedStyle(document.body).fontFamily.includes('Inter')&&[...document.fonts].some(font=>font.family.includes('Inter')&&font.status==='loaded'),
           brokenImages:[...document.images].filter(e=>!e.complete||!e.naturalWidth).map(e=>e.src),
           offscreen:[...s.querySelectorAll('button,select,a')].filter(visible).filter(e=>{const r=e.getBoundingClientRect();return r.left<0||r.right>innerWidth+1;}).map(e=>e.outerHTML),
-          clipped:[...s.querySelectorAll('button,select,h2,h3,dd')].filter(visible).filter(e=>e.scrollWidth>e.clientWidth+2).map(e=>e.textContent.trim())};`);
+          clipped:[...s.querySelectorAll('button,select,h2,h3,dd')].filter(visible).filter(e=>e.scrollWidth>e.clientWidth+2).map(e=>e.textContent.trim()),
+          workspaceButton:(()=>{const e=s.querySelector('.pci-detail button');if(!e)return null;const r=e.getBoundingClientRect();
+            return {text:e.textContent.trim(),disabled:e.disabled,left:r.left,right:r.right,width:r.width,height:r.height,
+              scrollWidth:e.scrollWidth,clientWidth:e.clientWidth,hasIcon:!!e.querySelector('svg')};})()};`);
       report.layouts.push({ name, ...layout });
       const filename = `${name}-${width}.png`, bytes = await browser.screenshot();
       assert.equal(bytes.subarray(1, 4).toString(), 'PNG'); assert.ok(bytes.length > 5000, 'Nonblank actual shell/component capture');
@@ -132,6 +170,12 @@ test('actual PartnerCompanyInbox and PortalShell in owned Chromium; synthetic re
       assert.ok(layout.scrollWidth <= width, 'No page overflow: ' + JSON.stringify(layout));
       assert.equal(layout.shell, true); assert.equal(layout.inter, true, 'Actual local Inter font loaded');
       assert.deepEqual(layout.brokenImages, []); assert.deepEqual(layout.offscreen, []); assert.deepEqual(layout.clipped, []);
+      if (name.startsWith('workspace-approved')) {
+        assert.ok(layout.workspaceButton?.hasIcon, 'Actual approved action includes its icon');
+        assert.ok(layout.workspaceButton.width > 0 && layout.workspaceButton.height >= 44, 'Approved button has usable stable dimensions');
+        assert.ok(layout.workspaceButton.text.length > 0, 'Approved button has a visible accessible label');
+        assert.ok(layout.workspaceButton.scrollWidth <= layout.workspaceButton.clientWidth + 2, 'Approved action label fits');
+      }
       if (width === 375 && name.endsWith('-detail')) {
         await ev(`document.querySelector('.pci-detail').scrollIntoView({block:'start'});
           await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));`);
@@ -140,9 +184,9 @@ test('actual PartnerCompanyInbox and PortalShell in owned Chromium; synthetic re
       }
     }
   }
-  const scenario = (name, run) => t.test(name, async () => {
+  const scenario = (name, run, workspace = false) => t.test(name, async () => {
     try {
-      await start(); await run(); await assertClean();
+      await start(() => { controls.workspaceCallback = workspace; }); await run(); await assertClean();
       report.scenarios.push({ name, transport: controls.snapshot(), browser: await ev('return f.snapshot();') });
       report.passed.push(name);
     }
@@ -349,6 +393,155 @@ test('actual PartnerCompanyInbox and PortalShell in owned Chromium; synthetic re
     assert.equal(controls.requests.length, count); assert.deepEqual(await ev('return f.newApplications;'), []);
     assert.equal(await ev(`return !!${rootExpression};`), false);
   });
+
+  await scenario('optional synthetic workspace callback exposes a fitted approved button only, never pending/rejected links', async () => {
+    await ready();
+    for (const index of [0, 1, 2, 4]) {
+      await click(row(a[index])); await assertWorkspaceControl();
+      assert.ok((await body()).includes(a[index].company.ownerName));
+      if (index === 1) await fit('workspace-approved-detail');
+      if (index === 2) await assertNoWorkspaceShortcut();
+    }
+    assert.deepEqual((await workspaceState()).calls, [], 'Selection alone does not invoke the synthetic callback');
+    assert.equal(controls.requests.length, 1, 'Displaying the optional action does not add reads or mutations');
+  }, true);
+
+  await scenario('busy duplicate DOM clicks and retained callback dispatch once; delayed synthetic success captures the exact target and guard', async () => {
+    await ready(); await click(row(a[1])); await holdWorkspace();
+    await remember('retainedOpen', workspaceButton);
+    const reads = controls.requests.length;
+    await ev(`const e=${workspaceButton};e.click();e.click();f.retainedOpen();f.retainedOpen();`);
+    await wait('f.workspace.held.length===1');
+    let state = await workspaceState();
+    assert.equal(state.calls.length, 1); assert.equal(state.calls[0].settled, false);
+    assert.deepEqual(state.calls[0].target, { applicationId: a[1].id, workspaceId: a[1].workspaceId });
+    assert.equal(state.calls[0].current, true); assert.equal(state.calls[0].aborted, false);
+    assert.deepEqual(state.successes, [], 'Held callback is not a successful workspace open');
+    assert.equal(await ev(`return ${workspaceButton}.disabled;`), true, 'Actual workspace button is disabled while pending');
+    await fit('workspace-approved-busy-detail');
+    await releaseWorkspace(); state = await workspaceState();
+    assert.equal(state.calls[0].guardAtSettlement, true); assert.equal(state.calls[0].outcome, 'success');
+    assert.deepEqual(state.successes, [{ syntheticOnly: true, actorId: inboxIds.a, revision: 0,
+      applicationId: a[1].id, workspaceId: a[1].workspaceId }]);
+    await replay('retainedOpen'); await replay('retainedOpen');
+    assert.equal((await workspaceState()).calls.length, 1, 'Old pre-busy closure cannot dispatch after completion');
+    assert.equal(controls.requests.length, reads, 'The synthetic callback does not call any workspace/API transport');
+  }, true);
+
+  await scenario('delayed workspace failures never record synthetic success, expose private errors or prevent an explicit retry', async () => {
+    for (const status of [409, 503]) {
+      await startWorkspace(); await ready(); await click(row(a[1])); await holdWorkspace({ status });
+      await click(workspaceButton); await wait('f.workspace.held.length===1');
+      assert.deepEqual((await workspaceState()).successes, []);
+      await releaseWorkspace();
+      let state = await workspaceState();
+      assert.equal(state.calls[0].outcome, 'failure'); assert.deepEqual(state.successes, []);
+      assert.deepEqual(state.failures, [{ id: 1, status, current: true }]);
+      assert.deepEqual(await ev('return f.denials;'), []);
+      assert.ok(await ev(`return !!${rootExpression}.querySelector('[role="alert"]');`), 'Real component shows a safe action failure');
+      assert.equal(/PRIVATE SYNTHETIC/.test(await body()), false);
+      assert.ok((await body()).includes(a[1].company.ownerName), 'Non-access failure preserves the current selection');
+      assert.equal(await ev(`return ${workspaceButton}.disabled;`), false, 'Explicit retry is enabled after failure');
+      await fit('workspace-failure-' + status + '-detail');
+      await click(workspaceButton); await workspaceSettled(); state = await workspaceState();
+      assert.equal(state.calls.length, 2); assert.equal(state.successes.length, 1, 'Only the explicit successful retry is recorded');
+      assert.equal(await ev(`return !!${rootExpression}.querySelector('[role="alert"]');`), false, 'Retry clears obsolete error');
+    }
+  }, true);
+
+  await scenario('switching selection retires the old action closure; the busy target stays pinned to the newly selected application', async () => {
+    await ready(); await click(row(a[1])); await remember('retainedOpen', workspaceButton);
+    await click(row(a[4])); await replay('retainedOpen');
+    assert.deepEqual((await workspaceState()).calls, [], 'Old action cannot retarget itself to the newer selection');
+    await holdWorkspace(); await click(workspaceButton); await wait('f.workspace.held.length===1');
+    assert.equal(await ev(`return ${row(a[1])}.disabled;`), true, 'Busy selection controls keep the captured target pinned');
+    await ev(`${row(a[1])}.click();`); await replay('retainedOpen');
+    assert.ok((await body()).includes(a[4].company.ownerName));
+    assert.equal((await workspaceState()).calls.length, 1);
+    await releaseWorkspace();
+    assert.deepEqual((await workspaceState()).successes, [{ syntheticOnly: true, actorId: inboxIds.a, revision: 0,
+      applicationId: a[4].id, workspaceId: inboxIds.otherWorkspace }]);
+    await click(row(a[1])); await replay('retainedOpen');
+    assert.equal((await workspaceState()).calls.length, 1, 'Selecting the original row again does not revive its old closure');
+    await click(workspaceButton); await workspaceSettled();
+    assert.deepEqual((await workspaceState()).calls.map(call => call.target), [
+      { applicationId: a[4].id, workspaceId: inboxIds.otherWorkspace },
+      { applicationId: a[1].id, workspaceId: inboxIds.workspace },
+    ]);
+  }, true);
+
+  await scenario('blur aborts the action and hides private detail; neither late success nor late 403 can revive it', async () => {
+    for (const status of [null, 403]) {
+      await startWorkspace(); await ready(); await click(row(a[1]));
+      await remember('retainedOpen', workspaceButton); await holdWorkspace({ status }); await click(workspaceButton);
+      await wait('f.workspace.held.length===1'); await ev('window.dispatchEvent(new Event("blur"));');
+      await assertNoPrivate(); await assertRetiredWorkspace(); await replay('retainedOpen');
+      await releaseWorkspace(); await assertNoPrivate(); await assertRetiredWorkspace();
+      assert.equal((await workspaceState()).calls.length, 1); assert.deepEqual(await ev('return f.denials;'), []);
+      const reads = controls.requests.length;
+      await ev('window.dispatchEvent(new Event("focus"));'); await ready();
+      assert.equal(controls.requests.length, reads + 1);
+      assert.equal((await body()).includes(a[1].company.ownerName), false);
+      await assertNoWorkspaceShortcut();
+      await click(row(a[4])); await click(workspaceButton); await workspaceSettled();
+      assert.equal((await workspaceState()).successes.length, 1, 'A fresh post-focus action is independently usable');
+    }
+  }, true);
+
+  await scenario('account A-B-A permanently retires old workspace callback and late success/403/failure without affecting the current actor', async () => {
+    for (const status of [null, 403, 503]) {
+      await startWorkspace(); await ready(); await click(row(a[1]));
+      await remember('retainedOpen', workspaceButton); await holdWorkspace({ status }); await click(workspaceButton);
+      await wait('f.workspace.held.length===1'); await ev('f.switch("b");'); await ready();
+      await assertRetiredWorkspace();
+      assert.deepEqual(await shownNames(b), b.slice(0, 20).map(item => item.company.name));
+      assert.equal((await shownNames(a)).length, 0);
+      await ev('f.switch("a");'); await ready(); await click(row(a[4]));
+      await replay('retainedOpen'); assert.equal((await workspaceState()).calls.length, 1);
+      await releaseWorkspace(); await assertRetiredWorkspace();
+      assert.deepEqual(await ev('return f.denials;'), []);
+      assert.ok((await body()).includes(a[4].company.ownerName));
+      assert.equal(await ev(`return !!${rootExpression}.querySelector('[role="alert"]');`), false);
+      await click(workspaceButton); await workspaceSettled();
+      assert.deepEqual((await workspaceState()).successes, [{ syntheticOnly: true, actorId: inboxIds.a, revision: 0,
+        applicationId: a[4].id, workspaceId: inboxIds.otherWorkspace }]);
+    }
+  }, true);
+
+  await scenario('current workspace 403 hides all private content and retires action/new/refresh callbacks without a fake success', async () => {
+    await ready(); await click(row(a[1]));
+    await remember('retainedOpen', workspaceButton); await remember('oldNew', actions.fresh); await remember('oldRefresh', actions.refresh);
+    await holdWorkspace({ status: 403 }); await click(workspaceButton); await wait('f.workspace.held.length===1');
+    await releaseWorkspace();
+    assert.deepEqual(await ev('return f.denials;'), [{ actorId: inboxIds.a, revision: 0 }]);
+    await assertNoPrivate(); await assertRetiredWorkspace();
+    const reads = controls.requests.length;
+    for (const key of ['retainedOpen', 'oldNew', 'oldRefresh']) await replay(key);
+    await ev('window.dispatchEvent(new Event("focus"));'); await delay(60);
+    assert.equal(controls.requests.length, reads); assert.equal((await workspaceState()).calls.length, 1);
+    assert.deepEqual(await ev('return f.newApplications;'), []); await assertNoPrivate(); await fit('workspace-denied-403');
+  }, true);
+
+  await scenario('raw invalid session and unmount fence delayed synthetic workspace completion and retained action callbacks', async () => {
+    for (const invalidate of ['f.gate(false);f.retainedOpen();', 'f.unmount();']) {
+      await startWorkspace(); await ready(); await click(row(a[1]));
+      await remember('retainedOpen', workspaceButton); await holdWorkspace(); await click(workspaceButton);
+      await wait('f.workspace.held.length===1'); await ev(invalidate);
+      await assertNoPrivate(); await assertRetiredWorkspace(); await replay('retainedOpen');
+      await releaseWorkspace(); await assertRetiredWorkspace(); await assertNoPrivate();
+      assert.equal((await workspaceState()).calls.length, 1); assert.deepEqual(await ev('return f.denials;'), []);
+    }
+  }, true);
+
+  await scenario('optional synthetic workspace callback remains captured to its original actor lifetime across callback churn', async () => {
+    await ready(); await ev('f.swapCallbacks();'); await click(row(a[1]));
+    await holdWorkspace(); await click(workspaceButton); await wait('f.workspace.held.length===1');
+    await ev('f.swapCallbacks();'); await releaseWorkspace();
+    const state = await workspaceState();
+    assert.equal(state.calls[0].revision, 0); assert.equal(state.calls[0].actorId, inboxIds.a);
+    assert.deepEqual(state.successes, [{ syntheticOnly: true, actorId: inboxIds.a, revision: 0,
+      applicationId: a[1].id, workspaceId: inboxIds.workspace }]);
+  }, true);
 
   assert.deepEqual(browser.exceptions, []);
   assert.ok(browser.requests.every(url => url.startsWith(server.origin + '/') || /^(about:|data:)/.test(url)), 'Only owned loopback browser requests');

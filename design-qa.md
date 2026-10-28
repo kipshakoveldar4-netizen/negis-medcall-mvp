@@ -1,6 +1,6 @@
 # Contributor Portal Design QA
 
-Date: 2026-10-28. Scope: local implementation only. No Production/Preview release,
+Date: 2026-10-29. Scope: local implementation only. No Production/Preview release,
 cloud migration, provider request, real payment or working workspace modification.
 
 ## Visual Truth And Evidence
@@ -165,7 +165,13 @@ onboarding; this is not a full-parity handoff. No separate mobile source exists.
   Company submission/recovery and protected review now have separate local
   364/364 contract/module/HTTP, 23/23 native/HTTP and 22+16 browser receipts.
   Cross-session own discovery now has separate local 147/147 module/HTTP,
-  23/23 native/HTTP and 15/15 actual inbox/shell browser receipts. Real isolated
+  23/23 native/HTTP and 15/15 actual inbox/shell browser receipts. The later selected
+  company entry adds 262/262 focused, 13/13 native HTTP and 19/19 composed browser
+  evidence; the styled inbox now passes 24/24 at 375/1440. The composed fixture
+  runs actual provider, client, ProtectedPage and Dashboard queries; SDK/HTTP and
+  PageLayout remain explicitly synthetic/replaced. See the exact
+  [2026-10-29 acceptance](docs/PARTNER-COMPANY-WORKSPACE-ACCEPTANCE-2026-10-29.md).
+  Real isolated
   Auth/Turnstile and approved applicant entry acceptance still remain. The canonical consent registry is empty;
   unavailable config/consent cannot expose a usable live link. This is not public
   activation or completed company onboarding; full partner-mock parity stays open.
@@ -238,7 +244,8 @@ local layers do not establish real Auth, cloud or commercial acceptance.
 - [x] Local server-issued own link and explicit public source-capture UI.
 - [x] Local applicant submission/recovery and platform-only company review.
 - [x] Local cross-session own application discovery, without tab metadata/cookie.
-- [ ] Verified selected-company handoff and complete approved real entry acceptance.
+- [x] Local exact selected-company handoff, cancellation and destination read binding.
+- [ ] Complete approved real applicant entry/Auth acceptance in an isolated deployment.
 - [ ] Define authoritative initial-contact/next-contact events without invented metrics.
 - [x] Selected browser-to-native stage/booking submission and recovery from Explorer.
 - [ ] Separately authorize and verify an isolated cloud Preview; no release here.

@@ -266,7 +266,7 @@ function setup(options: Options = {}) {
     wouter: { useLocation: () => [options.pathname ?? "/dashboard", (location: string) => locations.push(location)] },
     sonner: { toast: new Proxy({}, { get: (_target, kind) => (message: string) => toasts.push({ kind: String(kind), message }) }) },
     "@/lib/permissions": permissions,
-    "@/lib/demoStorage": { WORKSPACE_SELECTOR_KEY: selectorKey,
+    "@/lib/demoStorage": { WORKSPACE_SELECTOR_KEY: selectorKey, bindWorkspaceReadScope() {}, clearWorkspaceReadScope() {},
       clearListReadCache() { cacheClears.push("lists"); caches.lists.clear(); } },
     "@/lib/api": {
       apiUrl: (url: string) => url,

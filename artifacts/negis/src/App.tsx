@@ -202,7 +202,7 @@ function ImpersonationBanner() {
   );
 }
 
-function ProtectedPage({
+export function ProtectedPage({
   component: Component,
   permission,
   demoFallbackTitle,
@@ -211,7 +211,7 @@ function ProtectedPage({
   permission: string;
   demoFallbackTitle?: string;
 }) {
-  const { isLoading, userRole, rolePermissions, isDemoMode, workspacePurpose, signOut } = useAuth();
+  const { isLoading, user, clinicId, userRole, rolePermissions, isDemoMode, workspacePurpose, signOut } = useAuth();
   const [location, setLocation] = useLocation();
   const roleAllowed = userRole === 'lead_manager'
     ? permission === 'crm' && (location === '/leads' || (workspacePurpose === 'mortgage_leads' && workspaceAllowsRoute(workspacePurpose, userRole, location)))
@@ -238,7 +238,7 @@ function ProtectedPage({
   );
   if (!allowed) return null;
   if (isDemoMode && demoFallbackTitle) return <DemoPlaceholder title={demoFallbackTitle} />;
-  return <Component />;
+  return <Component key={`${user?.id ?? ''}:${clinicId ?? ''}:${userRole ?? ''}:${workspacePurpose ?? ''}`} />;
 }
 
 /* ── Router ── */

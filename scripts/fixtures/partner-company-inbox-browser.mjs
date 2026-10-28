@@ -9,6 +9,7 @@ export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 export const inboxIds = Object.freeze({
   a: '11111111-1111-4111-8111-111111111111', b: '22222222-2222-4222-8222-222222222222',
   revision: '33333333-3333-4333-8333-333333333333', workspace: '44444444-4444-4444-8444-444444444444',
+  otherWorkspace: '55555555-5555-4555-8555-555555555555',
 });
 const frontend = path.join(root, 'artifacts/negis');
 const require = createRequire(path.join(frontend, 'package.json'));
@@ -29,7 +30,7 @@ export function syntheticInboxItems(actorId = inboxIds.a) {
         + (index === 0 ? ' - OWNED LOCAL PRIVACY AND RESPONSIVE LAYOUT CHECK' : ''),
       ownerName: `SYNTHETIC ${actor} OWNER ${String(index + 1).padStart(2, '0')}`,
       purpose, vertical: purpose === 'clinic_services' ? 'clinic' : null, timeZone: index % 2 ? 'UTC' : 'Asia/Almaty' },
-      workspaceId: state === 'approved' ? inboxIds.workspace : null,
+      workspaceId: state === 'approved' ? (index === 1 ? inboxIds.workspace : inboxIds.otherWorkspace) : null,
       sourceState: state === 'approved' ? 'pending_payment' : 'captured',
       submittedAt: new Date(Date.UTC(2026, 9, 28, 12) - index * 60_000).toISOString(),
       expiresAt: '2026-11-28T12:00:00.000Z', reviewedAt: state === 'pending' ? null : '2026-10-28T13:00:00.000Z',
@@ -37,7 +38,7 @@ export function syntheticInboxItems(actorId = inboxIds.a) {
   });
 }
 
-// Only identity and read transport are synthetic. Neither component nor shell is replaced.
+// Identity, read transport and optional workspace callback are synthetic; both UI components are real.
 const entry = `
 import React,{useState} from 'react';
 import {createRoot} from 'react-dom/client';
@@ -48,8 +49,20 @@ import {PortalShell} from './src/components/portals/PortalShell';
 const ids=${JSON.stringify(inboxIds)};
 const originalFetch=window.fetch.bind(window);
 const q={ids,bootId:crypto.randomUUID(),session:{actor:ids.a,epoch:0},valid:true,calls:[],denials:[],newApplications:[],
+  workspaceEnabled:document.getElementById('root').dataset.syntheticWorkspace==='enabled',
+  workspace:{calls:[],plans:[],held:[],successes:[],failures:[],
+    queue(plan){this.plans.push({...plan});},
+    release(id){for(const held of this.held.filter(h=>id===undefined||h.id===id)){
+      this.held.splice(this.held.indexOf(held),1);held.resolve();
+    }},
+    snapshot(){return{syntheticOnly:true,held:this.held.map(h=>h.id),successes:this.successes,failures:this.failures,
+      calls:this.calls.map(c=>({id:c.id,actorId:c.actorId,revision:c.revision,target:c.target,
+        aborted:c.signal.aborted,current:c.isCurrent(),guardAtDispatch:c.guardAtDispatch,guardAtSettlement:c.guardAtSettlement,
+        settled:c.settled,outcome:c.outcome,unchanged:JSON.stringify(c.application)===c.applicationJson}))};}
+  },
   storageCalls:[],networkRefusals:[],revision:0,key:0,view:{isCurrentMutationScope:()=>true},
   snapshot(){return{bootId:this.bootId,session:this.session,valid:this.valid,denials:this.denials,newApplications:this.newApplications,
+    workspaceEnabled:this.workspaceEnabled,workspace:this.workspace.snapshot(),
     calls:this.calls.map(c=>({actorId:c.actorId,revision:c.revision,offset:c.offset,state:c.state,aborted:c.signal.aborted,current:c.isCurrent(),
       settled:c.settled,unchanged:c.raw===undefined||JSON.stringify(c.raw)===c.rawJson})),
     storageCalls:this.storageCalls,networkRefusals:this.networkRefusals,body:document.body.innerText};}
@@ -92,11 +105,32 @@ function Harness(){
       const raw=await response.json();call.raw=raw;call.rawJson=JSON.stringify(raw);return raw;
     }finally{call.settled=true;}
   };
+  const openWorkspace=async(application,{signal,isCurrent})=>{
+    if(!(signal instanceof AbortSignal)||typeof isCurrent!=='function')throw Error('Missing synthetic workspace guard');
+    const call={id:q.workspace.calls.length+1,actorId:session.actor,revision,application,applicationJson:JSON.stringify(application),
+      target:{applicationId:application.id,workspaceId:application.workspaceId},signal,isCurrent,
+      guardAtDispatch:!signal.aborted&&isCurrent(),guardAtSettlement:null,settled:false,outcome:'pending'};
+    q.workspace.calls.push(call);
+    const plan=q.workspace.plans.shift()||{};
+    try{
+      // Deliberately settle even after abort: the real UI and supplied guard must fence stale completions.
+      if(plan.hold)await new Promise(resolve=>q.workspace.held.push({id:call.id,resolve}));
+      call.guardAtSettlement=!signal.aborted&&isCurrent()&&q.valid&&q.session===session;
+      if(plan.status){
+        call.outcome='failure';q.workspace.failures.push({id:call.id,status:plan.status,current:call.guardAtSettlement});
+        throw Object.assign(Error('PRIVATE SYNTHETIC WORKSPACE REFUSAL MUST NOT BE DISPLAYED'),{status:plan.status});
+      }
+      call.outcome=call.guardAtSettlement?'success':'stale';
+      if(call.guardAtSettlement)q.workspace.successes.push({syntheticOnly:true,actorId:session.actor,revision,...call.target});
+      // A record above is synthetic evidence only: no Auth, workspace selection, navigation or provider call occurs.
+    }finally{call.settled=true;}
+  };
   return <PortalShell title="Заявки компаний" homeHref="/partner" roleLabel="Партнёр" displayName="SYNTHETIC LOCAL ACTOR"
     items={[{id:'companies',label:'Заявки компаний',icon:ClipboardList},
       {id:'team',label:'Вход для команды',icon:Users,href:'/login'}]} activeId="companies" onNavigate={()=>{}}>
     {shown&&<PartnerCompanyInbox key={key} actorId={session.actor} isSessionCurrent={()=>q.valid&&q.session===session} request={request}
       onAccessDenied={()=>q.denials.push({actorId:session.actor,revision})}
+      onOpenWorkspace={q.workspaceEnabled?openWorkspace:undefined}
       onNewApplication={()=>q.newApplications.push({actorId:session.actor,revision})}/>}
   </PortalShell>;
 }
@@ -130,7 +164,7 @@ export async function createPartnerCompanyInboxBrowser() {
 body{margin:0;font-family:Inter,sans-serif;}` });
   const controls = {
     requests: [], errors: [], refusals: [], plans: [], held: [], tasks: new Set(), nextId: 0,
-    items: new Map(),
+    items: new Map(), workspaceCallback: false,
     queue(plan) { this.plans.push({ ...plan }); },
     release(id) { for (const held of this.held.filter(h => id === undefined || h.id === id)) {
       this.held.splice(this.held.indexOf(held), 1); held.resolve();
@@ -138,6 +172,7 @@ body{margin:0;font-family:Inter,sans-serif;}` });
     async reset() {
       this.release(); await Promise.allSettled([...this.tasks]);
       this.requests.length = 0; this.errors.length = 0; this.refusals.length = 0; this.plans.length = 0;
+      this.workspaceCallback = false;
       this.items = new Map([[inboxIds.a, syntheticInboxItems(inboxIds.a)], [inboxIds.b, syntheticInboxItems(inboxIds.b)]]);
     },
     snapshot() { return { requests: copy(this.requests), errors: [...this.errors], refusals: copy(this.refusals),
@@ -186,7 +221,8 @@ body{margin:0;font-family:Inter,sans-serif;}` });
       'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self'; connect-src 'self'; frame-src 'none'; base-uri 'none'; form-action 'none'" })
       .end('<!doctype html><html lang="ru"><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">'
         + '<link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/built.css"><link rel="stylesheet" href="/frame.css">'
-        + '<link rel="stylesheet" href="/bundle.css"></head><body><div id="root"></div><script src="/bundle.js"></script></body></html>');
+        + '<link rel="stylesheet" href="/bundle.css"></head><body><div id="root" data-synthetic-workspace="'
+        + (controls.workspaceCallback ? 'enabled' : 'disabled') + '"></div><script src="/bundle.js"></script></body></html>');
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   origin = `http://127.0.0.1:${server.address().port}`;

@@ -29,9 +29,15 @@ type Harness = {
   elements(value: Child): Element[]; text(value: Child): string;
 };
 type Options = { offset: number; state: State | null; signal: AbortSignal; isCurrent(): boolean };
+type WorkspaceOptions = Pick<Options, "signal" | "isCurrent">;
 type InboxProps = {
   actorId: string; isSessionCurrent(): boolean; request(options: Options): Promise<unknown>;
   onAccessDenied(): void; onNewApplication(): void;
+  onOpenWorkspace?(application: Application, options: WorkspaceOptions): Promise<void>;
+};
+type WorkspacePending = {
+  application: Application; options: WorkspaceOptions; actor: string; claimed: boolean; settled: boolean;
+  reply(): void; fail(error?: unknown): void;
 };
 type Pending = {
   options: Options; actor: string; claimed: boolean; settled: boolean;
@@ -95,14 +101,25 @@ function application(n = 80, state: State = "pending", name = `Synthetic Company
 }
 const fullPage = (state: State = "pending") => Array.from({ length: 20 }, (_, i) => application(100 - i, state));
 
-function fixture(t: TestContext, withClient = false) {
+function fixture(t: TestContext, withClient = false, withWorkspace = false) {
   const render = host.renderer(), windowEvents = eventTarget(), documentEvents = eventTarget();
   const requests: Pending[] = [], forbiddenCalls: string[] = [], parserCalls: { expected?: { offset: number; state: State | null } }[] = [];
+  const workspaceRequests: WorkspacePending[] = [], parsedPages: Page[] = [];
   const responseGates = new Map<Pending, ReturnType<typeof deferred<ResponseDouble>>>();
   let actor = A, epoch = 1, denied = 0, newApplications = 0;
   const forbidden = (name: string): never => { forbiddenCalls.push(name); assert.fail(`Forbidden capability: ${name}`); };
   const document = { ...documentEvents, visibilityState: "visible", hasFocus: () => true };
   const window = { ...windowEvents, location: { origin: "https://synthetic-inbox.invalid" } };
+  for (const name of ["href", "pathname", "search", "hash"]) {
+    Object.defineProperty(window.location, name, { get: () => forbidden(`location.${name}`), set: () => forbidden(`location.${name}`) });
+  }
+  Object.assign(window.location, { assign: () => forbidden("location.assign"), replace: () => forbidden("location.replace"),
+    reload: () => forbidden("location.reload") });
+  const location = window.location;
+  Object.defineProperty(window, "location", { get: () => location, set: () => forbidden("window.location") });
+  Object.defineProperty(document, "location", { get: () => forbidden("document.location"), set: () => forbidden("document.location") });
+  Object.defineProperty(window, "history", { get: () => forbidden("history") });
+  Object.assign(window, { open: () => forbidden("window.open") });
   for (const target of [window, document]) {
     for (const name of ["localStorage", "sessionStorage", "indexedDB", "cookie"]) {
       Object.defineProperty(target, name, { get: () => forbidden(name), set: () => forbidden(name) });
@@ -155,10 +172,14 @@ function fixture(t: TestContext, withClient = false) {
           },
         };
         if (name === "./partner-company-inbox.css") return {};
-        if (name === "../../../../../lib/crm/partner-company-contracts") {
+        if (name === "../../../../../lib/crm/partner-company-contracts"
+          || file === clientFile && name === "../../../../lib/crm/partner-company-contracts") {
           const actual = load(contractsFile);
           return { ...actual, parsePartnerCompanyPage(value: unknown, expected?: { offset: number; state: State | null }) {
-            parserCalls.push({ expected }); return actual.parsePartnerCompanyPage(value, expected);
+            parserCalls.push({ expected });
+            const page = actual.parsePartnerCompanyPage(value, expected);
+            if (page) parsedPages.push(page);
+            return page;
           } };
         }
         return forbidden(`import ${name}`);
@@ -208,12 +229,31 @@ function fixture(t: TestContext, withClient = false) {
       },
       onAccessDenied() { denied++; }, onNewApplication() { newApplications++; },
     };
+    if (withWorkspace) props.onOpenWorkspace = (application, options) => {
+      assert.equal(isSessionCurrent(), true, "Workspace action cannot borrow a different actor lifetime");
+      assert.deepEqual(Object.keys(options).sort(), ["isCurrent", "signal"], "Only action cancellation and freshness are delegated");
+      assert.equal(application.state, "approved");
+      assert.ok(Object.isFrozen(application)); assert.ok(Object.isFrozen(application.company));
+      assert.ok(options.signal instanceof AbortSignal); assert.equal(options.signal.aborted, false);
+      assert.equal(options.isCurrent(), true, "Actual action guard must be valid at dispatch");
+      const gate = deferred<void>();
+      const request: WorkspacePending = { application, options, actor: capturedActor, claimed: false, settled: false,
+        reply() { assert.equal(request.settled, false); request.settled = true; gate.resolve(); },
+        fail(error = Error("Synthetic workspace unavailable")) {
+          assert.equal(request.settled, false); request.settled = true; gate.reject(error);
+        },
+      };
+      workspaceRequests.push(request);
+      // Deliberately deliver even after abort; freshness belongs to the component.
+      return gate.promise;
+    };
     render.mount(host.jsx(component, props as unknown as Props));
   }
   mount();
   t.after(async () => {
     render.dispose(); const writes = render.writes();
     for (const request of requests) if (!request.settled) request.fail();
+    for (const request of workspaceRequests) if (!request.settled) request.fail();
     for (let i = 0; i < 32; i++) await Promise.resolve();
     assert.equal(render.writes(), writes, "No state publication after disposal");
     assert.equal(windowEvents.count() + documentEvents.count(), 0, "All actual browser listeners are removed");
@@ -221,6 +261,10 @@ function fixture(t: TestContext, withClient = false) {
   });
   function take() {
     const request = requests.find(r => !r.claimed); assert.ok(request, "Expected an actual inbox list read");
+    request.claimed = true; return request;
+  }
+  function takeWorkspace() {
+    const request = workspaceRequests.find(r => !r.claimed); assert.ok(request, "Expected an actual workspace callback invocation");
     request.claimed = true; return request;
   }
   function page(request: Pending, items = [application()], hasMore = false): Page {
@@ -244,6 +288,19 @@ function fixture(t: TestContext, withClient = false) {
       ? node.props["aria-label"] === label || host.text(node) === label
       : label.test(String(node.props["aria-label"] ?? host.text(node)))));
   }
+  function workspaceButtons() {
+    return render.nodes().filter(node => node.type === "button" && (String(node.props.className).split(" ").includes("pci-open-workspace")
+      || /Открыть.*(?:CRM|пространств)/i.test(String(node.props["aria-label"] ?? host.text(node)))));
+  }
+  function workspaceButton() {
+    const buttons = workspaceButtons(); assert.equal(buttons.length, 1, `Expected one workspace action: ${render.content()}`);
+    return buttons[0]!;
+  }
+  function noNavigation() {
+    assert.equal(render.nodes().some(node => node.type === "a" || node.type === "form"
+      || ["href", "to", "action", "formAction"].some(name => node.props[name] !== undefined)), false,
+    "Only the parent callback may authorize navigation; the inbox cannot navigate or submit a form");
+  }
   function click(label: string | RegExp) {
     const node = button(label); assert.notEqual(node.props.disabled, true); callback(node)();
   }
@@ -259,7 +316,8 @@ function fixture(t: TestContext, withClient = false) {
       assert.equal(render.content().includes(item.company.ownerName), false, "Private owner must not display");
     }
   }
-  return { render, requests, parserCalls, document, window: windowEvents, take, page, reply, callback, find, button, click,
+  return { render, requests, parserCalls, parsedPages, workspaceRequests, workspaceButtons, workspaceButton, takeWorkspace, noNavigation,
+    document, window: windowEvents, take, page, reply, callback, find, button, click,
     filter, filterNode, row, ready, noPrivate, denied: () => denied, newApplications: () => newApplications,
     switchActor(next: string) { actor = next; epoch++; mount(); },
     invalidate() { epoch++; }, remount: mount,
@@ -534,3 +592,296 @@ test("unmounted inbox aborts its read and permanently retires all captured callb
   assert.equal(h.render.writes(), writes); assert.equal(h.requests.length, count);
   assert.equal(h.newApplications(), 0); assert.equal(h.denied(), 0);
 });
+
+for (const state of ["pending", "approved", "rejected"] as const) {
+  for (const withWorkspace of [false, true]) {
+    test(`actual inbox workspace action: ${state}, callback ${withWorkspace ? "present" : "absent"}`, async t => {
+      const h = fixture(t, false, withWorkspace), item = application(80, state);
+      assert.equal(h.workspaceButtons().length, 0, "Loading cannot offer a workspace action");
+      await h.ready([item]);
+      assert.equal(h.workspaceButtons().length, state === "approved" && withWorkspace ? 1 : 0);
+      assert.equal(h.workspaceRequests.length, 0, "Displaying approved data never invokes a callback automatically");
+      assert.equal(h.requests.length, 1); h.noNavigation();
+    });
+  }
+}
+
+for (const outcome of ["empty", "error"] as const) {
+  test(`workspace callback presence cannot offer an action on an ${outcome} inbox`, async t => {
+    const h = fixture(t, false, true); await h.render.flush(); const read = h.take();
+    if (outcome === "empty") h.reply(read, []); else read.fail();
+    await h.render.flush(); assert.equal(h.workspaceButtons().length, 0);
+    assert.equal(h.workspaceRequests.length, 0); h.noNavigation();
+  });
+}
+
+for (const trigger of ["filter", "page", "selection"] as const) {
+  test(`idle workspace callback cannot revive after ${trigger} A-B-A`, async t => {
+    const h = fixture(t, false, true), items = fullPage("approved"); await h.ready(items, true);
+    const oldOpen = h.callback(h.workspaceButton());
+    if (trigger === "filter") {
+      await h.filter("approved"); h.reply(h.take(), items, true); await h.render.flush();
+      await h.filter("all"); h.reply(h.take(), items, true); await h.render.flush();
+    } else if (trigger === "page") {
+      h.click(/Следующая/); await h.render.flush(); h.reply(h.take(), [application(60, "approved")]); await h.render.flush();
+      h.click(/Предыдущая/); await h.render.flush(); h.reply(h.take(), items, true); await h.render.flush();
+    } else {
+      h.callback(h.row(items[1].company.name))(); await h.render.flush();
+      h.callback(h.row(items[0].company.name))(); await h.render.flush();
+    }
+    const before = h.render.content(), writes = h.render.writes(); oldOpen(); await h.render.flush();
+    assert.equal(h.workspaceRequests.length, 0); assert.equal(h.render.content(), before); assert.equal(h.render.writes(), writes);
+    h.callback(h.workspaceButton())(); const current = h.takeWorkspace();
+    assert.equal(current.application.id, items[0].id); current.reply(); await h.render.flush();
+    assert.equal(h.denied(), 0); h.noNavigation();
+  });
+}
+
+test("workspace callback receives the exact immutable parsed selection, never a raw row, ID or another application", async t => {
+  const h = fixture(t, false, true), pending = application(82), first = application(81, "approved"), selected = application(80, "approved");
+  const expected = structuredClone(selected);
+  await h.ready([pending, first, selected]); assert.equal(h.workspaceButtons().length, 0);
+  h.callback(h.row(selected.company.name))(); await h.render.flush();
+  assert.equal(h.row(selected.company.name).props["aria-pressed"], true);
+  // Mutating the raw response must not change the validated action payload.
+  selected.company.name = "Synthetic raw response mutation"; selected.revision = uuid(9999); selected.workspaceId = uuid(9998);
+  const open = h.callback(h.workspaceButton()); open(); open();
+  const action = h.takeWorkspace();
+  assert.strictEqual(action.application, h.parsedPages[0].items[2], "Delegate the selected object from the actual parser");
+  assert.notStrictEqual(action.application, selected);
+  assert.deepEqual(JSON.parse(JSON.stringify(action.application)), expected);
+  assert.equal(Reflect.set(action.application, "workspaceId", uuid(9997)), false);
+  assert.equal(Reflect.set(action.application.company, "name", "Synthetic forbidden mutation"), false);
+  assert.equal(action.actor, A); assert.equal(h.workspaceRequests.length, 1, "Same-turn duplicate clicks are blocked");
+  await h.render.flush();
+  const busy = h.workspaceButton(); assert.equal(busy.props.disabled, true);
+  h.callback(busy)(); open(); await h.render.flush();
+  assert.equal(h.workspaceRequests.length, 1, "A retained or disabled busy callback cannot start another action");
+  assert.ok(h.render.nodes().some(node => node.props["aria-busy"] === true), "The delegated action has an accessible busy state");
+  assert.equal(action.options.isCurrent(), true); assert.equal(action.options.signal.aborted, false);
+  h.noNavigation(); action.reply(); await h.render.flush();
+  assert.notEqual(h.workspaceButton().props.disabled, true);
+  assert.equal(action.options.isCurrent(), false, "Completion permanently retires the action guard");
+  assert.equal(h.requests.length, 1, "Opening a workspace is delegated, not another inbox read");
+  assert.equal(h.newApplications(), 0); assert.equal(h.denied(), 0); h.noNavigation();
+});
+
+for (const status of [401, 403, 404]) {
+  test(`current workspace ${status} rejection hides private data and permanently denies the current lifetime`, async t => {
+    const h = fixture(t, false, true), item = application(80, "approved"); await h.ready([item]);
+    const oldOpen = h.callback(h.workspaceButton()), oldRow = h.callback(h.row(item.company.name));
+    oldOpen(); const action = h.takeWorkspace(); await h.render.flush();
+    action.fail(Object.assign(Error("SYNTHETIC_PRIVATE_WORKSPACE_REFUSAL"), { status })); await h.render.flush();
+    h.noPrivate([item]); assert.equal(h.workspaceButtons().length, 0);
+    assert.equal(h.denied(), 1); assert.equal(action.options.isCurrent(), false); assert.equal(action.options.signal.aborted, true);
+    assert.equal(h.render.content().includes("SYNTHETIC_PRIVATE_WORKSPACE_REFUSAL"), false, "Raw callback errors never display");
+    assert.ok(h.render.nodes().some(node => node.props.role === "alert"));
+    oldOpen(); oldRow(); h.window.dispatch("focus"); await h.render.flush();
+    assert.equal(h.workspaceRequests.length, 1); assert.equal(h.requests.length, 1); assert.equal(h.denied(), 1);
+    h.noPrivate([item]); h.noNavigation();
+  });
+}
+
+for (const status of [0, 409, 500]) {
+  test(`workspace ${status || "transport"} error is private, retryable and stays on the selected application`, async t => {
+    const h = fixture(t, false, true), items = [application(81, "approved"), application(80, "approved")];
+    await h.ready(items); h.callback(h.row(items[1].company.name))(); await h.render.flush();
+    const oldOpen = h.callback(h.workspaceButton()); oldOpen(); const first = h.takeWorkspace(); await h.render.flush();
+    first.fail(Object.assign(Error("SYNTHETIC_PRIVATE_WORKSPACE_FAILURE"), { status })); await h.render.flush();
+    assert.ok(h.render.nodes().some(node => node.props.role === "alert"), "A failed action has a visible error state");
+    assert.equal(h.render.content().includes("SYNTHETIC_PRIVATE_WORKSPACE_FAILURE"), false);
+    assert.ok(h.render.content().includes(items[1].company.ownerName)); assert.equal(h.denied(), 0);
+    assert.equal(h.row(items[1].company.name).props["aria-pressed"], true);
+    assert.equal(first.options.isCurrent(), false); oldOpen(); await h.render.flush();
+    assert.equal(h.workspaceRequests.length, 1, "The pre-error callback cannot become the retry");
+    const retryButton = h.workspaceButton(); assert.notEqual(retryButton.props.disabled, true);
+    h.callback(retryButton)(); const retry = h.takeWorkspace(); await h.render.flush();
+    assert.strictEqual(retry.application, first.application); assert.notStrictEqual(retry.options.signal, first.options.signal);
+    assert.equal(retry.options.isCurrent(), true); assert.equal(h.workspaceRequests.length, 2);
+    retry.reply(); await h.render.flush();
+    assert.equal(h.render.nodes().some(node => node.props.role === "alert"), false, "Successful retry clears the action error");
+    assert.notEqual(h.workspaceButton().props.disabled, true); assert.equal(h.requests.length, 1); h.noNavigation();
+  });
+}
+
+const workspaceInvalidations = ["blur", "hidden", "focus", "refresh"] as const;
+for (const trigger of workspaceInvalidations) {
+  for (const outcome of ["success", "refusal", "error"] as const) {
+    test(`workspace ${trigger} invalidation: late ${outcome} and retained callbacks cannot affect a fresh action`, async t => {
+      const h = fixture(t, false, true), items = fullPage("approved"); await h.ready(items, true);
+      const oldOpen = h.callback(h.workspaceButton()); oldOpen(); const oldAction = h.takeWorkspace(); await h.render.flush();
+      if (trigger === "blur") h.window.dispatch("blur");
+      else if (trigger === "hidden") { h.document.visibilityState = "hidden"; h.document.dispatch("visibilitychange"); }
+      else if (trigger === "focus") h.window.dispatch("focus");
+      else h.click(/Обновить/);
+      assert.equal(oldAction.options.isCurrent(), false, "Invalidation is synchronous, before the next render");
+      assert.equal(oldAction.options.signal.aborted, true);
+      await h.render.beforeEffects();
+      h.noPrivate(items); assert.equal(h.workspaceButtons().length, 0);
+      oldOpen(); await h.render.flush(); assert.equal(h.workspaceRequests.length, 1);
+      if (trigger === "blur") h.window.dispatch("focus");
+      if (trigger === "hidden") { h.document.visibilityState = "visible"; h.document.dispatch("visibilitychange"); }
+      await h.render.flush();
+      const read = h.take(); assert.equal(read.options.offset, 0); assert.equal(read.options.state, null);
+      h.reply(read, [application(60, "approved")]); await h.render.flush();
+      oldOpen(); await h.render.flush(); assert.equal(h.workspaceRequests.length, 1);
+      h.callback(h.workspaceButton())(); const current = h.takeWorkspace(); await h.render.flush();
+      const before = h.render.content(), writes = h.render.writes(), reads = h.requests.length;
+      if (outcome === "success") oldAction.reply();
+      else oldAction.fail(Object.assign(Error("SYNTHETIC_STALE_ACTION_ERROR"), { status: outcome === "refusal" ? 403 : 500 }));
+      await h.render.flush();
+      assert.equal(h.render.content(), before); assert.equal(h.render.writes(), writes, "Stale completion cannot publish or clear current busy state");
+      assert.equal(current.options.isCurrent(), true); assert.equal(current.options.signal.aborted, false);
+      assert.equal(h.workspaceButton().props.disabled, true); assert.equal(h.denied(), 0);
+      assert.equal(h.workspaceRequests.length, 2); assert.equal(h.requests.length, reads);
+      oldOpen(); await h.render.flush(); assert.equal(h.workspaceRequests.length, 2); h.noNavigation();
+      current.reply(); await h.render.flush(); assert.notEqual(h.workspaceButton().props.disabled, true);
+    });
+  }
+}
+
+for (const trigger of ["filter", "page", "selection"] as const) {
+  for (const outcome of ["success", "refusal", "error"] as const) {
+    const recovery = outcome === "refusal" ? "blur/focus" : "refresh";
+    test(`workspace ${trigger} is blocked while opening; ${recovery} and genuine changes retire callbacks before late ${outcome}`, async t => {
+      const h = fixture(t, false, true), items = fullPage("approved"); await h.ready(items, true);
+      const control = () => trigger === "filter" ? h.filterNode()
+        : trigger === "page" ? h.button(/Следующая/) : h.row(items[1].company.name);
+      const event = trigger === "filter" ? "onChange" : "onClick";
+      const change = { target: { value: "approved" }, currentTarget: { value: "approved" } };
+      const oldTransition = h.callback(control(), event), oldOpen = h.callback(h.workspaceButton());
+      assert.notEqual(control().props.disabled, true, "The attempted transition is available before opening");
+      oldOpen(); const oldAction = h.takeWorkspace(); await h.render.flush();
+      const busyControl = control(), busyOpen = h.callback(h.workspaceButton()), busyTransition = h.callback(busyControl, event);
+      assert.equal(busyControl.props.disabled, true, "Opening visibly locks this transition");
+      assert.equal(h.workspaceButton().props.disabled, true);
+      const blockedContent = h.render.content(), blockedWrites = h.render.writes();
+      oldTransition(change); busyTransition(change); oldOpen(); busyOpen(); await h.render.flush();
+      assert.equal(h.render.content(), blockedContent); assert.equal(h.render.writes(), blockedWrites, "Blocked callbacks cannot publish");
+      assert.equal(h.filterNode().props.value, "all");
+      assert.equal(h.row(items[0].company.name).props["aria-pressed"], true);
+      assert.equal(h.row(items[1].company.name).props["aria-pressed"], false);
+      assert.strictEqual(oldAction.application, h.parsedPages[0].items[0]);
+      assert.equal(oldAction.options.isCurrent(), true, "A prohibited transition does not cancel or rebind the current action");
+      assert.equal(oldAction.options.signal.aborted, false);
+      assert.equal(h.requests.length, 1); assert.equal(h.parsedPages.length, 1); assert.equal(h.workspaceRequests.length, 1);
+
+      assert.notEqual(h.button(/Обновить/).props.disabled, true, "Refresh remains available while opening");
+      if (recovery === "refresh") h.click(/Обновить/); else h.window.dispatch("blur");
+      assert.equal(oldAction.options.isCurrent(), false, "An allowed cancellation retires the action synchronously");
+      assert.equal(oldAction.options.signal.aborted, true);
+      await h.render.beforeEffects(); h.noPrivate(items); assert.equal(h.workspaceButtons().length, 0);
+      oldOpen(); busyOpen(); oldTransition(change); busyTransition(change); await h.render.flush();
+      assert.equal(h.workspaceRequests.length, 1);
+      if (recovery === "blur/focus") h.window.dispatch("focus");
+      await h.render.flush(); const refreshed = h.take();
+      assert.equal(refreshed.options.offset, 0); assert.equal(refreshed.options.state, null);
+      h.reply(refreshed, items, true); await h.render.flush();
+      assert.equal(h.requests.length, 2); assert.notEqual(control().props.disabled, true);
+      const refreshedOpen = h.callback(h.workspaceButton());
+      assert.notEqual(h.workspaceButton().props.disabled, true);
+      const retired = [oldOpen, busyOpen, oldTransition, busyTransition];
+      async function replay() {
+        const before = h.render.content(), writes = h.render.writes(), reads = h.requests.length;
+        // A different forged filter value would expose a callback that survived the transition.
+        for (const callback of retired) callback({ target: { value: "rejected" }, currentTarget: { value: "rejected" } });
+        await h.render.flush();
+        assert.equal(h.render.content(), before); assert.equal(h.render.writes(), writes);
+        assert.equal(h.requests.length, reads); assert.equal(h.workspaceRequests.length, 1);
+        assert.equal(oldAction.options.isCurrent(), false); assert.equal(oldAction.options.signal.aborted, true);
+      }
+      await replay();
+      // Real transitions after cancellation retire even callbacks from the refreshed view.
+      if (trigger === "filter") {
+        await h.filter("approved"); const read = h.take();
+        assert.equal(read.options.offset, 0); assert.equal(read.options.state, "approved");
+        h.reply(read, items, true); await h.render.flush(); assert.equal(h.filterNode().props.value, "approved");
+      } else if (trigger === "page") {
+        h.click(/Следующая/); await h.render.flush(); const read = h.take();
+        assert.equal(read.options.offset, 20); assert.equal(read.options.state, null);
+        h.reply(read, [application(60, "approved")]); await h.render.flush();
+        assert.equal(h.row(application(60, "approved").company.name).props["aria-pressed"], true);
+      } else {
+        h.callback(control(), event)(); await h.render.flush();
+        assert.equal(h.row(items[1].company.name).props["aria-pressed"], true);
+        assert.equal(h.row(items[0].company.name).props["aria-pressed"], false);
+      }
+      retired.push(refreshedOpen); await replay();
+      if (trigger === "filter") {
+        await h.filter("all"); const read = h.take(); assert.equal(read.options.state, null);
+        h.reply(read, items, true); await h.render.flush();
+      } else if (trigger === "page") {
+        h.click(/Предыдущая/); await h.render.flush(); const read = h.take(); assert.equal(read.options.offset, 0);
+        h.reply(read, items, true); await h.render.flush();
+      } else {
+        h.callback(h.row(items[0].company.name))(); await h.render.flush();
+      }
+      assert.equal(h.filterNode().props.value, "all");
+      assert.equal(h.row(items[0].company.name).props["aria-pressed"], true);
+      await replay(); assert.equal(h.requests.length, trigger === "selection" ? 2 : 4);
+      h.callback(h.workspaceButton())(); const current = h.takeWorkspace(); await h.render.flush();
+      assert.equal(current.actor, A); assert.equal(current.application.id, oldAction.application.id);
+      assert.notStrictEqual(current.application, oldAction.application, "Matching IDs must not revive the old parsed page or action");
+      const before = h.render.content(), writes = h.render.writes(), reads = h.requests.length;
+      if (outcome === "success") oldAction.reply();
+      else oldAction.fail(Object.assign(Error("SYNTHETIC_STALE_ACTION_ERROR"), { status: outcome === "refusal" ? 403 : 500 }));
+      await h.render.flush();
+      assert.equal(h.render.content(), before); assert.equal(h.render.writes(), writes, "Late completion cannot clear a newer action");
+      assert.equal(current.options.isCurrent(), true); assert.equal(current.options.signal.aborted, false);
+      assert.equal(h.workspaceButton().props.disabled, true); assert.equal(h.denied(), 0);
+      for (const callback of retired) callback(change);
+      await h.render.flush(); assert.equal(h.workspaceRequests.length, 2); assert.equal(h.requests.length, reads);
+      assert.equal(h.newApplications(), 0); h.noNavigation();
+      current.reply(); await h.render.flush(); assert.notEqual(h.workspaceButton().props.disabled, true);
+    });
+  }
+}
+
+for (const outcome of ["success", 401, 403, 404, 500] as const) {
+  test(`workspace account A-B-A: late ${outcome} cannot publish, deny or clear the new A action`, async t => {
+    const h = fixture(t, false, true), first = application(80, "approved"); await h.ready([first]);
+    const oldOpen = h.callback(h.workspaceButton()); oldOpen(); const oldAction = h.takeWorkspace(); await h.render.flush();
+    h.switchActor(B); assert.equal(oldAction.options.isCurrent(), false); assert.equal(oldAction.options.signal.aborted, true);
+    await h.render.beforeEffects(); h.noPrivate([first]); assert.equal(h.workspaceButtons().length, 0);
+    await h.render.flush(); h.reply(h.take(), [application(60, "approved", "Synthetic Workspace B")]); await h.render.flush();
+    oldOpen(); await h.render.flush(); assert.equal(h.workspaceRequests.length, 1);
+    h.switchActor(A); await h.render.flush(); h.reply(h.take(), [application(50, "approved", "Synthetic Workspace Current A")]);
+    await h.render.flush(); oldOpen(); await h.render.flush(); assert.equal(h.workspaceRequests.length, 1);
+    h.callback(h.workspaceButton())(); const current = h.takeWorkspace(); await h.render.flush();
+    assert.equal(current.actor, A); assert.equal(current.application.id, uuid(50));
+    const before = h.render.content(), writes = h.render.writes();
+    if (outcome === "success") oldAction.reply(); else oldAction.fail({ status: outcome });
+    await h.render.flush();
+    assert.equal(h.render.content(), before); assert.equal(h.render.writes(), writes);
+    assert.equal(oldAction.options.isCurrent(), false); assert.equal(current.options.isCurrent(), true);
+    assert.equal(h.workspaceButton().props.disabled, true); assert.equal(h.denied(), 0);
+    assert.equal(h.workspaceRequests.length, 2); assert.equal(h.requests.length, 3); h.noNavigation();
+    current.reply(); await h.render.flush();
+  });
+}
+
+for (const outcome of ["success", "refusal", "error"] as const) {
+  test(`workspace replaced-session guard retires the action and callback before late ${outcome}`, async t => {
+    const h = fixture(t, false, true), item = application(80, "approved"); await h.ready([item]);
+    const oldOpen = h.callback(h.workspaceButton()); oldOpen(); const action = h.takeWorkspace(); await h.render.flush();
+    h.invalidate(); h.remount(); await h.render.beforeEffects(); h.noPrivate([item]);
+    assert.equal(action.options.isCurrent(), false); assert.equal(action.options.signal.aborted, true);
+    assert.equal(h.workspaceButtons().length, 0); oldOpen(); await h.render.flush();
+    const writes = h.render.writes();
+    if (outcome === "success") action.reply(); else action.fail({ status: outcome === "refusal" ? 401 : 500 });
+    await h.render.flush(); assert.equal(h.render.writes(), writes); h.noPrivate([item]);
+    assert.equal(h.denied(), 0); assert.equal(h.workspaceRequests.length, 1); assert.equal(h.requests.length, 1); h.noNavigation();
+  });
+
+  test(`workspace unmount permanently aborts the action and ignores late ${outcome} without state writes`, async t => {
+    const h = fixture(t, false, true); await h.ready([application(80, "approved")]);
+    const oldOpen = h.callback(h.workspaceButton()); oldOpen(); const action = h.takeWorkspace(); await h.render.flush();
+    const busyOpen = h.callback(h.workspaceButton()); h.render.dispose(); const writes = h.render.writes();
+    assert.equal(action.options.signal.aborted, true); assert.equal(action.options.isCurrent(), false);
+    oldOpen(); busyOpen();
+    if (outcome === "success") action.reply(); else action.fail({ status: outcome === "refusal" ? 404 : 500 });
+    for (let i = 0; i < 32; i++) await Promise.resolve();
+    assert.equal(h.render.writes(), writes); assert.equal(h.workspaceRequests.length, 1);
+    assert.equal(h.denied(), 0); assert.equal(h.newApplications(), 0); assert.equal(h.requests.length, 1);
+  });
+}
