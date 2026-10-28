@@ -202,7 +202,7 @@ type Init = RequestInit & { accessToken?: string; expectedUserId?: string; dispa
 type PendingRequest = { url: string; init: Init; actor: string | undefined; reply: (body: unknown, status?: number) => void;
   resolve: (response: Response) => void; reject: (error: unknown) => void };
 type SignOutBoundary = { isSignOutPending(): boolean; getSignOutRevision(): number; markSignOutPending(): void; clearSignOutPending(): boolean };
-type Options = { initialActor?: string | null; deferSession?: boolean; storage?: Record<string, string>;
+type Options = { initialActor?: string | null; deferSession?: boolean; storage?: Record<string, string>; pathname?: string;
   sessionStorage?: Record<string, string>; deferSignOut?: boolean;
   sharedSignOut?: { storage: ReturnType<typeof memoryStorage>; sessionStorage: ReturnType<typeof memoryStorage>;
     boundary: SignOutBoundary } };
@@ -263,7 +263,7 @@ function setup(options: Options = {}) {
     "@/lib/authSignOut": signOutBoundary,
     "../../../../lib/vertical/terms": terms,
     "../../../../lib/crm/workspace-purpose": purposes,
-    wouter: { useLocation: () => ["/dashboard", (location: string) => locations.push(location)] },
+    wouter: { useLocation: () => [options.pathname ?? "/dashboard", (location: string) => locations.push(location)] },
     sonner: { toast: new Proxy({}, { get: (_target, kind) => (message: string) => toasts.push({ kind: String(kind), message }) }) },
     "@/lib/permissions": permissions,
     "@/lib/demoStorage": { WORKSPACE_SELECTOR_KEY: selectorKey,
@@ -288,7 +288,7 @@ function setup(options: Options = {}) {
   }, {
     localStorage: storage, sessionStorage,
     window: { localStorage: storage, sessionStorage,
-      location: { search: "", origin: "https://example.test", pathname: "/dashboard" }, history: { replaceState() {} } },
+      location: { search: "", origin: "https://example.test", pathname: options.pathname ?? "/dashboard" }, history: { replaceState() {} } },
     document: { title: "Local auth fixture" },
     fetch: () => { throw new Error("Network is forbidden in the local AuthProvider fixture"); },
   });
@@ -550,6 +550,20 @@ for (const batching of ["committed B", "raw ABA"] as const) {
       });
     });
   }
+}
+
+for (const pathname of ["/r/" + "A".repeat(32), "/r/invalid-code", "/r/" + "B".repeat(32) + "/"]) {
+  test(`public attribution ${pathname} does not require staff membership or show the unlinked-clinic warning`, async () => {
+    await withFixture(async fixture => {
+      await confirm(fixture, []);
+      assertUnselected(fixture);
+      assert.equal(fixture.snapshot().user?.id, actorA);
+      assert.equal(fixture.snapshot().isStaffMode, false);
+      assert.ok(fixture.toasts.every(({ message }) => !message.includes("Аккаунт не привязан")));
+      assert.equal(Boolean(fixture.snapshot().rolePermissions.admin), false);
+      assert.equal(fixture.sdkCalls().signOut, 0);
+    }, { pathname });
+  });
 }
 
 test("publication fence: verified empty membership still warns and removes confirmed permissions, caches and picker refs", async () => {

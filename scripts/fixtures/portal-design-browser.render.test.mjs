@@ -142,7 +142,13 @@ test('actual portals: owned headless screenshots, navigation, states and console
     if (t.signal.aborted) break;
     await t.test(`${view} ${state} ${width}`, async () => {
       await cdp.call('Emulation.setDeviceMetricsOverride', { width, height: width === 375 ? 900 : 1000, deviceScaleFactor: 1, mobile: width === 375 });
-      await navigate(view, state); await capture(`${view}-${state}-${width}`);
+      await navigate(view, state);
+      if (view === 'partner' && state === 'ready') {
+        await wait(`return !!document.querySelector('output[aria-label="Партнёрская ссылка"]');`);
+        assert.equal(await evaluate(`return document.querySelector('output[aria-label="Партнёрская ссылка"]').textContent;`), 'https://entry.fixture.invalid/r/' + 'A'.repeat(32));
+        if (width === 1440) assert.equal(await evaluate(`const row=document.querySelector('.ph-table tbody tr');return !!row&&row.getBoundingClientRect().bottom<innerHeight;`), true, 'Partner link must not push the whole history below the first desktop viewport');
+      }
+      await capture(`${view}-${state}-${width}`);
     });
   }
   await t.test('production brand links stay in the actor portal and reset its active section', async () => {

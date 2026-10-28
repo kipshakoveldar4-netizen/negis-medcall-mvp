@@ -2,6 +2,7 @@ import { createOperatorBrowserFixture } from "./operator-browser-store";
 import { parseCreatorCommandIdentity, parseCreatorJobAction, type CreatorJob, type CreatorSubmission } from "../../lib/crm/creator-job-contracts";
 import { parseContributorApplication, type ContributorProfile } from "../../lib/crm/contributor-contracts";
 import { partnerHistoryMonth, type PartnerHistoryItem } from "../../lib/crm/partner-history-contracts";
+import { PARTNER_LINK_POLICY } from "../../lib/crm/partner-link-contracts";
 import type { OperatorWorkdayReport } from "../../lib/crm/operator-workday-contracts";
 import { OPERATOR_LEAD_SEARCH_PAGE_SIZE, operatorLeadGroups, parseOperatorLeadSearchQuery, type OperatorLeadSearchReport, type OperatorSearchLead } from "../../lib/crm/operator-lead-search-contracts";
 import { normalizePhone } from "../../lib/crm/phone";
@@ -136,7 +137,7 @@ export function createPortalDesignStore(input: string | URL = "/contributors?mod
     if (contributor && route.startsWith("partner-")) {
       if (profile?.partnerStatus !== "approved") return fail(403);
       if (route === "partner-ledger" && method === "GET") return ok(state === "empty" ? { state: "not_activated" } : {
-        state: "ready", generatedAt: "2026-10-28T09:00:00.000Z", firstCommissionBps: null, renewalCommissionBps: null,
+        state: "ready", generatedAt: "2026-10-28T09:00:00.000Z", firstCommissionBps: 2000, renewalCommissionBps: 500,
         registrations: "5", paidCompanies: "5", firstPayments: "5", renewals: "3",
         balances: [{ currency: "KZT", earnedMinor: "7200000", paidMinor: "4800000", availableMinor: "2400000" }],
       });
@@ -156,7 +157,18 @@ export function createPortalDesignStore(input: string | URL = "/contributors?mod
           items: rows.slice(offset, offset + 20), hasMore: rows.length > offset + 20 });
       }
       if (route === "partner-terms" && method === "GET" && url.searchParams.get("profileId") === profile.id && !url.searchParams.has("requestId")) {
-        return ok({ state: "not_offered", profileId: profile.id, profileRevision: profile.revision, agreement: null });
+        return ok(state === "empty" ? { state: "not_offered", profileId: profile.id, profileRevision: profile.revision, agreement: null }
+          : { state: "managed", profileId: profile.id, profileRevision: profile.revision, agreement: {
+            revision: "99999999-9999-4999-8999-999999999999", state: "accepted", firstCommissionBps: 2000, renewalCommissionBps: 500,
+            terms: "Синтетические условия макета. Не рабочий договор и не подтверждение реального согласия.",
+            offeredAt: "2026-10-26T08:00:00.000000Z", decidedAt: "2026-10-27T08:00:00.000000Z", commercialStatus: "active", referralCode: "A".repeat(32),
+          } });
+      }
+      if (route === "partner-link" && method === "GET" && [...url.searchParams.keys()].length === 1
+        && url.searchParams.get("profileId") === profile.id) {
+        if (state === "empty") return fail(409);
+        return ok({ profileId: profile.id, profileRevision: profile.revision, agreementRevision: "99999999-9999-4999-8999-999999999999",
+          referralCode: "A".repeat(32), url: "https://entry.fixture.invalid/r/" + "A".repeat(32), policyVersion: PARTNER_LINK_POLICY });
       }
       return fail(403);
     }

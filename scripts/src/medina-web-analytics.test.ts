@@ -22,7 +22,7 @@ const allowedPaths = [
   "/ai-content-studio", "/content", "/studio", "/privacy", "/terms",
   "/data-deletion", "/ai-control-center", "/operator",
 ];
-const authPaths = ["/onboarding", "/join", "/join-request", "/reset-password"];
+const authPaths = ["/onboarding", "/join", "/join-request", "/reset-password", "/contributors", "/r/:code"];
 
 type Pageview = { type: "pageview"; url: string };
 type Policy = {
@@ -195,7 +195,7 @@ test("pageviews return new two-key objects without forwarding even hostile extra
 
 test("unknown, dynamic, credential, invitation and nonexistent section paths are dropped", () => {
   for (const pathname of [
-    ...authPaths, "/reset", "/forgot-password", "/auth/callback", "/invite", "/invitations/fixture-token",
+    ...authPaths, "/r/" + "A".repeat(32), "/reset", "/forgot-password", "/auth/callback", "/invite", "/invitations/fixture-token",
     "/join/fixture-token", "/leads/11111111-1111-4111-8111-111111111111", "/clients/Fixture-Person",
     "/booking/+77000000000", "/operator/fixture@example.invalid", "/ads-automation/history/fixture-id",
     "/unknown", "/directory", "/statistics", "/ai-control", "/api/crm/leads", "/_vercel/insights/event",
@@ -243,7 +243,7 @@ test("unsafe referrers drop the whole view because the SDK cannot redact raw ref
     "https://user:secret@foreign.invalid/", "https://user@medinaos.com/leads", "https://:secret@medinaos.com/",
     "https://foreign.invalid/private", "https://foreign.invalid/leads", "https://foreign.invalid/fixture@example.invalid",
     "http://medinaos.com/leads", origin + "/clients/11111111-1111-4111-8111-111111111111",
-    origin + "/unknown", ...authPaths.map((pathname) => origin + pathname),
+    origin + "/unknown", origin + "/r/" + "A".repeat(32), ...authPaths.map((pathname) => origin + pathname),
     ...["https://foreign.invalid/", origin + "/", origin + "/leads"].flatMap((base) => [base + privateQuery, base + privateHash, base + privateQuery + privateHash]),
   ]) assert.equal(sanitize({ type: "pageview", url: origin + "/leads" }, referrer), null, referrer);
 });
@@ -371,7 +371,7 @@ test("the document declares one no-referrer policy in its head before scripts", 
 
 test("the filesystem-served public privacy page discloses the filtered analytics integration", async () => {
   const html = await readFile(path.join(frontend, "public/privacy/index.html"), "utf8");
-  assert.match(html, /Last updated: October 20, 2026/);
+  assert.match(html, /Last updated: October 24, 2026/);
   assert.match(html, /Vercel Web Analytics/);
   assert.match(html, /stripped of query parameters and fragments/);
   assert.match(html, /do not measure employee productivity/);

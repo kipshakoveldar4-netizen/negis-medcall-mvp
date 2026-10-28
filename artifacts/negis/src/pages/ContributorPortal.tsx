@@ -9,6 +9,7 @@ import { isSyntheticEmail, loginOrEmailToAuthEmail } from "../../../../lib/auth/
 import { contributorStatusLabels, parseContributorApplication, parseContributorProfile, type ContributorProfile } from "../../../../lib/crm/contributor-contracts";
 import { PartnerLedger } from "@/components/contributors/PartnerLedger";
 import { PartnerHistory } from "@/components/contributors/PartnerHistory";
+import { PartnerLink } from "@/components/contributors/PartnerLink";
 import { PartnerTerms } from "@/components/contributors/PartnerTerms";
 import { CreatorJobs } from "@/components/contributors/CreatorJobs";
 
@@ -171,6 +172,9 @@ function Application({ userId, isActorCurrent }: { userId: string; isActorCurren
         return <article key={role} className="min-w-0 rounded-lg border p-4"><div className="flex items-center gap-2 font-medium"><Icon size={18} />{role === "partner" ? "Партнёр" : "Автор контента"}</div><p className="mt-3 text-sm">{status ? contributorStatusLabels[status] : "Заявка не подана"}</p></article>;
       })}</div></>}
       {!isProfile && activeMode === "partner" && profile.partnerStatus === "approved" && <>
+        {(section === "overview" || section === "terms") && <PartnerLink key={`link:${profile.revision}:${partnerLedgerRevision}`} actorId={userId} profileId={profile.id} isSessionCurrent={current}
+          onAccessDenied={() => denyAccess("Доступ партнёра изменился. Обновите профиль.")}
+          request={options => operatorApi<unknown>("partner-link?profileId=" + profile.id, undefined, "GET", options.signal, userId, () => current() && options.isCurrent())} />}
         {section === "terms" && <PartnerTerms actorId={userId} profileId={profile.id} side="partner" isSessionCurrent={current}
         onResolved={() => { if (current()) setPartnerLedgerRevision(n => n + 1); }}
         onAccessDenied={() => denyAccess("Доступ партнёра изменился. Обновите профиль.")}

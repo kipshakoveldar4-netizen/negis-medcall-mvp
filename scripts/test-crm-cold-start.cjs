@@ -66,7 +66,7 @@ try {
         ...(method === 'GET' || method === 'HEAD' ? {} : { body: {} }),
         query: { path: [resource] }, headers: authorization ? { authorization } : {} }, res);
       assert.equal(status, expected, resource);
-      if (['creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command',
+      if (['partner-link','creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command',
         'creator-job-detail','clinic-creator-job-detail','creator-directory'].includes(resource)) assert.equal(headers['Cache-Control'],'no-store');
       if (expected === 401) assert.equal(body.success, false);
       assert.ok(!JSON.stringify(body).includes('SIMULATED_PRIVATE_RENDERER_FAILURE'));
@@ -86,6 +86,9 @@ try {
         await check(route,route.startsWith('platform-')?404:401,'Bearer invalid-test-token');
         await check(route,route.startsWith('platform-')?404:401,undefined,'POST');
       }
+      await check('partner-link',401);
+      await check('partner-link',401,'Bearer invalid-test-token');
+      await check('partner-link',405,undefined,'POST');
       await check('partner-entry',503,undefined,'POST');
       await check('partner-entry',503,'Bearer invalid-test-token','POST');
       for (const route of ['creator-jobs','creator-job-command','clinic-creator-jobs','clinic-creator-job-command',

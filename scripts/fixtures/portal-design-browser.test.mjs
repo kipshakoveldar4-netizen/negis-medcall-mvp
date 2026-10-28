@@ -33,11 +33,12 @@ const compiled = await bundle({ write: false, bundle: true, format: 'esm', platf
     export { parseOperatorWorkday } from '../../lib/crm/operator-workday-contracts.ts';
     export { parseOperatorLeadSearchQuery, parseOperatorLeadSearchReport, operatorLeadSearchPath, operatorLeadGroups } from '../../lib/crm/operator-lead-search-contracts.ts';
     export { parsePartnerTermsSnapshot } from '../../lib/crm/partner-terms-contracts.ts';
+    export { parsePartnerLink } from '../../lib/crm/partner-link-contracts.ts';
     export { parseOperatorCommandResult } from '../../lib/crm/operator-contracts.ts';`,
 } });
 const { createPortalDesignStore, portalDesignIds: ids, portalDesignLocation, portalDesignHref, portalDesignStates,
   parseContributorProfile, parseCreatorJobPage, parseCreatorJobDetail, parseCreatorCommandResult,
-  parsePartnerLedger, parsePartnerHistory, parseOperatorWorkday, parsePartnerTermsSnapshot, parseOperatorCommandResult,
+  parsePartnerLedger, parsePartnerHistory, parseOperatorWorkday, parsePartnerTermsSnapshot, parsePartnerLink, parseOperatorCommandResult,
   parseOperatorLeadSearchQuery, parseOperatorLeadSearchReport, operatorLeadSearchPath, operatorLeadGroups,
 } = await import('data:text/javascript;base64,' + Buffer.from(compiled.outputFiles[0].text).toString('base64'));
 const url = route => new URL('/api/crm/' + route, 'http://fixture.invalid');
@@ -76,16 +77,21 @@ test('URL modes preserve one approved contributor actor and isolate the operator
   }
 });
 
-test('approved partner read-only synthetic ledger never fabricates an agreement or executes payments/referrals', async () => {
+test('approved partner fixture has matching synthetic terms/link/rates and never executes payments/referrals', async () => {
   const store = createPortalDesignStore();
   const profile = await data(request(store, 'contributor-account'));
   const terms = await data(request(store, `partner-terms?profileId=${profile.id}`));
-  assert.ok(parsePartnerTermsSnapshot(terms)); assert.equal(terms.state, 'not_offered'); assert.equal(terms.agreement, null);
+  assert.ok(parsePartnerTermsSnapshot(terms)); assert.equal(terms.state, 'managed'); assert.equal(terms.agreement.state, 'accepted');
+  const link = await data(request(store, `partner-link?profileId=${profile.id}`));
+  assert.ok(parsePartnerLink(link)); assert.equal(link.referralCode, terms.agreement.referralCode);
+  assert.equal(link.profileRevision, profile.revision); assert.equal(link.agreementRevision, terms.agreement.revision);
+  assert.equal((await request(store, `partner-link?profileId=${crypto.randomUUID()}`)).status, 403);
+  assert.equal((await request(store, `partner-link?profileId=${profile.id}&actorId=${ids.contributor}`)).status, 403);
   const ledger = await data(request(store, 'partner-ledger'));
   assert.ok(parsePartnerLedger(ledger)); assert.equal(ledger.state, 'ready');
   assert.equal(ledger.registrations, '5'); assert.equal(ledger.firstPayments, '5'); assert.equal(ledger.renewals, '3');
   assert.deepEqual(ledger.balances, [{ currency: 'KZT', earnedMinor: '7200000', paidMinor: '4800000', availableMinor: '2400000' }]);
-  assert.equal(ledger.firstCommissionBps, null); assert.equal(ledger.renewalCommissionBps, null);
+  assert.equal(ledger.firstCommissionBps, terms.agreement.firstCommissionBps); assert.equal(ledger.renewalCommissionBps, terms.agreement.renewalCommissionBps);
   const history = await data(request(store, 'partner-history?offset=0'));
   assert.ok(parsePartnerHistory(history, { offset: 0, month: null }));
   assert.deepEqual(history.items.map(item => item.kind), ['renewal', 'payout', 'first_payment']);
@@ -105,6 +111,7 @@ test('approved partner read-only synthetic ledger never fabricates an agreement 
   assert.deepEqual(await data(request(store, 'partner-ledger')), ledger);
   assert.equal((await request(store, `partner-terms?profileId=${crypto.randomUUID()}`)).status, 403);
   store.setState('empty'); assert.deepEqual(await data(request(store, 'partner-ledger')), { state: 'not_activated' });
+  assert.equal((await request(store, `partner-link?profileId=${profile.id}`)).status, 409);
   assert.deepEqual(await data(request(store, 'partner-history?offset=0')), { state: 'not_activated' });
 });
 

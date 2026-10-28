@@ -10,7 +10,7 @@ import { Script } from "node:vm";
 // Local, bounded host-tree regression, not React DOM/StrictMode or SDK acceptance.
 // The complete production root/Application and pure contracts execute unchanged.
 // Auth, operatorApi, Shell and private child boundaries are synthetic. No child
-// ledger/history/jobs/terms internals, HTTP, database, CSS/layout or real Auth are tested.
+// link/ledger/history/jobs/terms internals, HTTP, database, CSS/layout or real Auth are tested.
 // Run: node scripts/node_modules/tsx/dist/cli.mjs --test scripts/src/medina-contributor-design-navigation.test.ts
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const ts = createRequire(path.join(root, "package.json"))("typescript") as typeof import("typescript");
@@ -203,6 +203,7 @@ async function runtime(t: TestContext, delayInitialSession = false) {
   }
   function PartnerLedger(_props: Props) { boundaryRenders.push("PartnerLedger"); return jsx("section", { "data-private-panel": "ledger" }); }
   function PartnerHistory(_props: Props) { boundaryRenders.push("PartnerHistory"); return jsx("section", { "data-private-panel": "history" }); }
+  function PartnerLink(_props: Props) { boundaryRenders.push("PartnerLink"); return jsx("section", { "data-private-panel": "link" }); }
   function CreatorJobs(_props: Props) { boundaryRenders.push("CreatorJobs"); return jsx("section", { "data-private-panel": "jobs" }); }
   function PartnerTerms(_props: Props) { boundaryRenders.push("PartnerTerms"); return jsx("section", { "data-private-panel": "terms" }); }
   const modules = new Map<string, Record<string, unknown>>();
@@ -222,6 +223,7 @@ async function runtime(t: TestContext, delayInitialSession = false) {
       if (dependency === "@/components/portals/PortalShell") return { PortalShell };
       if (dependency === "@/components/contributors/PartnerLedger") return { PartnerLedger };
       if (dependency === "@/components/contributors/PartnerHistory") return { PartnerHistory };
+      if (dependency === "@/components/contributors/PartnerLink") return { PartnerLink };
       if (dependency === "@/components/contributors/PartnerTerms") return { PartnerTerms };
       if (dependency === "@/components/contributors/CreatorJobs") return { CreatorJobs };
       if (dependency === "../../../../lib/crm/contributor-contracts") return load("contracts");
@@ -255,7 +257,7 @@ async function runtime(t: TestContext, delayInitialSession = false) {
     const request = matches[0]!; request.claimed = true;
     return request;
   }
-  function boundary(name: "PartnerLedger" | "PartnerHistory" | "CreatorJobs" | "PartnerTerms") {
+  function boundary(name: "PartnerLedger" | "PartnerHistory" | "CreatorJobs" | "PartnerTerms" | "PartnerLink") {
     const instances = render.instances(name);
     assert.equal(instances.length, 1, `${name} must actually render through Application`);
     return instances[0]!.input.props;
@@ -286,7 +288,7 @@ async function runtime(t: TestContext, delayInitialSession = false) {
 type Ui = Awaited<ReturnType<typeof runtime>>;
 function assertNoPrivate(ui: Ui) {
   assert.equal(ui.render.nodes().filter(node => node.props["data-private-panel"] !== undefined).length, 0);
-  for (const name of ["PartnerLedger", "PartnerHistory", "CreatorJobs", "PartnerTerms"]) assert.equal(ui.render.instances(name).length, 0, name);
+  for (const name of ["PartnerLedger", "PartnerHistory", "CreatorJobs", "PartnerTerms", "PartnerLink"]) assert.equal(ui.render.instances(name).length, 0, name);
 }
 function assertActorGone(ui: Ui, previous: ContributorProfile) {
   assertNoPrivate(ui);
@@ -311,6 +313,9 @@ test("actual approved-both Application switches partner -> creator -> profile an
   assert.equal((ui.boundary("PartnerLedger").isActorCurrent as () => boolean)(), true);
   assert.equal(ui.boundary("PartnerHistory").userId, A);
   assert.equal((ui.boundary("PartnerHistory").isActorCurrent as () => boolean)(), true);
+  assert.equal(ui.boundary("PartnerLink").actorId, A);
+  assert.equal(ui.boundary("PartnerLink").profileId, value.id);
+  assert.equal((ui.boundary("PartnerLink").isSessionCurrent as () => boolean)(), true);
   const historyInstance = ui.render.instances("PartnerHistory")[0]!.id;
   assert.equal(ui.render.instances("CreatorJobs").length, 0);
   assert.equal(ui.nav("operator").props.href, "/operator");
@@ -321,6 +326,7 @@ test("actual approved-both Application switches partner -> creator -> profile an
   assert.equal((ui.boundary("CreatorJobs").isSessionCurrent as () => boolean)(), true);
   assert.equal(ui.render.instances("PartnerLedger").length, 0);
   assert.equal(ui.render.instances("PartnerHistory").length, 0);
+  assert.equal(ui.render.instances("PartnerLink").length, 0);
   assert.equal(ui.render.nodes().some(node => node.props["data-nav-id"] === "terms"), false);
   await ui.navigate("profile");
   assertNoPrivate(ui);
@@ -364,7 +370,7 @@ for (const status of [null, "pending", "suspended"] as const) {
     await ui.navigate("terms"); assertNoPrivate(ui);
     await ui.navigate("profile"); assertNoPrivate(ui);
     await ui.navigate("overview"); assertNoPrivate(ui);
-    for (const name of ["PartnerLedger", "PartnerHistory", "PartnerTerms"]) {
+    for (const name of ["PartnerLedger", "PartnerHistory", "PartnerTerms", "PartnerLink"]) {
       assert.equal(ui.boundaryRenders.includes(name), false, `No hidden or transient ${name} invocation`);
     }
     await ui.mode("creator"); ui.boundary("CreatorJobs");
@@ -438,12 +444,12 @@ test("actual explicit refresh removes partner history before passive effects and
   assert.equal(ui.requests.length, 2);
 });
 
-test("actual PartnerHistory denial clears all private UI and invalidates a late profile read until explicit refresh", async t => {
+for (const privatePanel of ["PartnerHistory", "PartnerLink"] as const) test(`actual ${privatePanel} denial clears all private UI and invalidates a late profile read until explicit refresh`, async t => {
   const value = profile(), ui = await populated(t, value);
-  const history = ui.boundary("PartnerHistory");
+  const history = ui.boundary(privatePanel);
   const historyInstance = ui.render.instances("PartnerHistory")[0]!.id;
-  assert.equal(history.userId, A);
-  assert.equal((history.isActorCurrent as () => boolean)(), true);
+  assert.equal(privatePanel === "PartnerLink" ? history.actorId : history.userId, A);
+  assert.equal((privatePanel === "PartnerLink" ? history.isSessionCurrent as () => boolean : history.isActorCurrent as () => boolean)(), true);
   assert.equal(typeof history.onAccessDenied, "function");
   ui.dispatchFocus(); await ui.render.flush();
   const late = ui.take();
@@ -467,6 +473,23 @@ test("actual PartnerHistory denial clears all private UI and invalidates a late 
   assert.equal(ui.boundary("PartnerHistory").userId, A);
   assert.notEqual(ui.render.instances("PartnerHistory")[0]!.id, historyInstance);
   assert.equal(ui.render.nodes().some(node => node.props.role === "alert"), false);
+});
+
+test("actual own-link request preserves profile, verified actor selector, child guard and original session lifetime", async t => {
+  const value = profile(), ui = await populated(t, value), link = ui.boundary("PartnerLink");
+  const request = link.request as (options: { signal: AbortSignal; isCurrent(): boolean }) => Promise<unknown>;
+  const controller = new AbortController(); let childCurrent = true;
+  const loading = request({ signal: controller.signal, isCurrent: () => childCurrent });
+  const read = ui.take("partner-link?profileId=" + value.id);
+  assert.equal(read.actor, A); assert.equal(read.method, "GET"); assert.equal(read.body, undefined);
+  assert.strictEqual(read.signal, controller.signal); assert.equal(read.valid(), true);
+  childCurrent = false; assert.equal(read.valid(), false);
+  childCurrent = true; ui.emit(B); ui.emit(A);
+  assert.equal(read.valid(), false, "An A-B-A transition cannot revive the previous link request");
+  await ui.render.flush(); assertActorGone(ui, value);
+  const marker = Object.freeze({ fixture: "retired-only" }); read.succeed(marker);
+  assert.strictEqual(await loading, marker, "Child owns response publication; original guard is permanently false");
+  assert.equal(read.valid(), false);
 });
 
 test("actual terms navigation and request/resolve/denial callbacks retain actor, body, signal and lifetime guards", async t => {

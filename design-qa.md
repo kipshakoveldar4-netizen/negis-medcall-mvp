@@ -127,6 +127,22 @@ in that cycle; the existing same-input visual comparisons remain applicable.
 
 ## Fidelity Surfaces
 
+Partner-link iteration: local server-confirmed issuance and explicit anonymous
+entry now exist; neither is public activation. Current evidence is in
+`output/design-qa/contributors-2026-10-28/partner-entry/`. The first desktop
+iteration pushed history entirely below the fold. Removed redundant adjacent
+lines and empty feedback space, compacted the rates, and raised the new link
+icons to 44px. The frozen full-portal run is 31/31 and requires the first desktop
+history row inside the initial viewport. Focused link/entry/recovery run is 11/11,
+with actual 375/1440 layouts and synthetic transport/challenge only.
+
+`partner-comparison.png` compares the same October 2026 overview state: source
+normalized to 1440 wide, actual 1440x1000 minus 59px fixture toolbar, unscaled,
+8px gutter and bottom padding on a 2888x1040 canvas. Both individual viewports,
+native-sized focused captures, initial failure and source hashes are retained.
+The full source still includes different demo history and unfinished company
+onboarding; this is not a full-parity handoff. No separate mobile source exists.
+
 - Typography: existing local Inter, restrained 400/500/600 weights, no viewport
   font scaling or negative spacing. Long mobile title wraps, not clipped.
 - Layout: dark 236 px sidebar, unframed workspace bands, white repeated rows,
@@ -144,10 +160,12 @@ in that cycle; the existing same-input visual comparisons remain applicable.
 
 ## Findings And Remaining Work
 
-- [P1] Partner mock includes an issued referral URL. A verified working public
-  entry/link resource is still absent; the canonical consent registry is empty.
-  The local UI exposes actual agreement/code operations, not a fabricated URL.
-  Finish protected public entry/link issuance before claiming full mock parity.
+- [P1] Local server-issued link and explicit protected entry/source capture now
+  have 222/222 contracts/HTTP, 5/5 native HTTP and 11/11 focused browser evidence.
+  Complete company submission/recovery, protected review and real isolated
+  Auth/Turnstile acceptance still remain. The canonical consent registry is empty;
+  unavailable config/consent cannot expose a usable live link. This is not public
+  activation or completed company onboarding; full partner-mock parity stays open.
   Event history is now implemented through private local SQL 122 and verified
   HTTP, with UTC filtering and exact amounts; it has no cloud release receipt.
 - Resolved locally: operator cross-company totals and combined Today agenda now
@@ -214,7 +232,8 @@ local layers do not establish real Auth, cloud or commercial acceptance.
 - [x] Creator actual assignments, responsive rows, page filters and original commands.
 - [x] Current-page nearest deadline and existing detail open/close at 375/1440.
 - [x] Desktop/mobile ready-state screenshots and same-page comparisons.
-- [ ] Complete verified partner-link entry and company onboarding.
+- [x] Local server-issued own link and explicit public source-capture UI.
+- [ ] Complete company onboarding/recovery/review and approved real entry acceptance.
 - [ ] Define authoritative initial-contact/next-contact events without invented metrics.
 - [x] Selected browser-to-native stage/booking submission and recovery from Explorer.
 - [ ] Separately authorize and verify an isolated cloud Preview; no release here.
