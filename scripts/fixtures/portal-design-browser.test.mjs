@@ -30,12 +30,13 @@ const compiled = await bundle({ write: false, bundle: true, format: 'esm', platf
     export { parseCreatorJobPage, parseCreatorJobDetail, parseCreatorCommandResult } from '../../lib/crm/creator-job-contracts.ts';
     export { parsePartnerLedger } from '../../lib/crm/partner-contracts.ts';
     export { parsePartnerHistory } from '../../lib/crm/partner-history-contracts.ts';
+    export { parseOperatorWorkday } from '../../lib/crm/operator-workday-contracts.ts';
     export { parsePartnerTermsSnapshot } from '../../lib/crm/partner-terms-contracts.ts';
     export { parseOperatorCommandResult } from '../../lib/crm/operator-contracts.ts';`,
 } });
 const { createPortalDesignStore, portalDesignIds: ids, portalDesignLocation, portalDesignHref, portalDesignStates,
   parseContributorProfile, parseCreatorJobPage, parseCreatorJobDetail, parseCreatorCommandResult,
-  parsePartnerLedger, parsePartnerHistory, parsePartnerTermsSnapshot, parseOperatorCommandResult,
+  parsePartnerLedger, parsePartnerHistory, parseOperatorWorkday, parsePartnerTermsSnapshot, parseOperatorCommandResult,
 } = await import('data:text/javascript;base64,' + Buffer.from(compiled.outputFiles[0].text).toString('base64'));
 const url = route => new URL('/api/crm/' + route, 'http://fixture.invalid');
 const request = (store, route, body, method = 'POST') => store.request(url(route), {
@@ -122,6 +123,31 @@ test('empty, error, denial, pending and suspended scenarios recover only by expl
   store.setState('signed-out'); assert.equal(store.session(), null); assert.equal((await request(store, 'operator-account')).status, 401);
   store.setState('ready'); store.failNext('operator-inbox'); assert.equal((await request(store, 'operator-inbox')).status, 503);
   assert.equal((await request(store, 'operator-inbox')).status, 200);
+});
+
+test('synthetic complete workday is parser-valid, read-only and removes an ended cooperation from totals and Today', async () => {
+  const store = createPortalDesignStore('/operator');
+  const report = await data(request(store, 'operator-workday?offset=0'));
+  assert.ok(parseOperatorWorkday(report, 0)); assert.equal(report.companies.length, 1);
+  assert.equal(report.summary.availableLeads, '1'); assert.equal(report.today.total, '2'); assert.equal(report.today.actionable, '1');
+  assert.equal(report.summary.contacts, 'not_tracked');
+  store.expandWorkday();
+  const expanded = await data(request(store, 'operator-workday?offset=0'));
+  assert.ok(parseOperatorWorkday(expanded, 0)); assert.equal(expanded.today.total, '21');
+  assert.equal(expanded.today.items.length, 20); assert.equal(expanded.today.hasMore, true);
+  const page = await data(request(store, 'operator-workday?offset=20'));
+  assert.ok(parseOperatorWorkday(page, 20)); assert.equal(page.today.items.length, 1);
+  assert.equal(page.today.hasMore, false); assert.deepEqual(page.summary, expanded.summary);
+  assert.ok(!expanded.today.items.some(item => item.appointmentId === page.today.items[0].appointmentId));
+  store.setWorkdayZoneMissing();
+  const unavailable = await data(request(store, 'operator-workday?offset=20'));
+  assert.ok(parseOperatorWorkday(unavailable, 20)); assert.equal(unavailable.today.state, 'unavailable_timezone');
+  assert.deepEqual(unavailable.today.items, []); assert.deepEqual(unavailable.summary, expanded.summary);
+  store.setWorkdayZoneMissing(false);
+  for (const query of ['workspaceId=foreign', 'offset=00', 'offset=-1', 'offset=1000001', 'offset=0&offset=20']) assert.equal((await request(store, 'operator-workday?' + query)).status, 400);
+  store.endCooperation(); const empty = await data(request(store, 'operator-workday?offset=0'));
+  assert.ok(parseOperatorWorkday(empty, 0)); assert.deepEqual(empty.companies, []); assert.equal(empty.today.total, '0');
+  store.suspendOperator(); assert.equal((await request(store, 'operator-workday')).status, 403);
 });
 
 test('synthetic auth rejects foreign, old-session, unauthenticated and aborted dispatches', async () => {

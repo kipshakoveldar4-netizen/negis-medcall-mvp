@@ -15,8 +15,11 @@ resolving the eight earlier fixture failures, combined UI 126/126, browser
 24/24 and final capture/navigation 9/9 at 375/1440 with synthetic Auth/API.
 The full build exited 0. These overlapping suites are not added together;
 they do not prove real Auth, payments, cloud acceptance or overall readiness.
-Full mockup parity remains blocked (`design-qa.md`: `blocked`): confirmed partner
-link and shared operator analytics/agenda are still absent. The next local cycle
+Full mockup parity remains blocked (`design-qa.md`: `blocked`): the confirmed partner
+link is still absent. At that checkpoint shared operator analytics/agenda were
+also absent; the current local 123/API/UI cycle implements them with complete
+server authority, not inbox-page sums. See [current workday evidence and gates](OPERATOR-WORKDAY-ACCEPTANCE-2026-10-28.md).
+The preceding local cycle
 adds protected own history (SQL 122) and the creator's current-page nearest
 deadline: 25/25 native/HTTP, 186/186 parser/isolation, 25/25 root boundary and
 28/28 actual browser cases at 375/1440. These overlapping suites are not summed.

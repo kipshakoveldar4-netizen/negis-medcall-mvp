@@ -33,6 +33,7 @@
     "test:operator-cooperation-native-http": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:operator-cooperation-native-http",
     "test:partner-ledger-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-ledger-postgres",
     "test:partner-history-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-history-postgres",
+    "test:operator-workday-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:operator-workday-postgres",
     "test:partner-source-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-source-postgres",
     "test:partner-first-paid-window": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-first-paid-window",
     "test:partner-company-approval": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:partner-company-approval",

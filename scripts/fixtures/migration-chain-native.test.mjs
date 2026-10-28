@@ -30,6 +30,8 @@ import { exerciseFirstPaidWindow } from './partner-first-paid-window-cases.mjs';
 import { exercisePartnerCompanyApproval } from './partner-company-approval-cases.mjs';
 import { exercisePartnerHistory } from './partner-history-cases.mjs';
 import { exercisePartnerHistoryHttp } from './partner-history-native-http-cases.mjs';
+import { exerciseOperatorWorkday } from './operator-workday-cases.mjs';
+import { exerciseOperatorWorkdayHttp } from './operator-workday-native-http-cases.mjs';
 import { exerciseAppointmentActor,exerciseAppointmentActorDependencies } from './appointment-actor-cases.mjs';
 import { exerciseAppointmentReadiness,exerciseAppointmentReadinessBeforeCutover,exerciseAppointmentPatchReadinessBeforeCutover,exerciseAppointmentVersionReadinessBeforeCutover,exerciseAppointmentEntryReadinessBeforeCutover,exerciseAppointmentJournalReadinessBeforeCutover } from './appointment-actor-readiness-cases.mjs';
 import { exerciseAppointmentVersionEntryBefore,exerciseAppointmentVersionEntry } from './appointment-version-entry-cases.mjs';
@@ -293,6 +295,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       legacyPurge:chain.find(e=>e.file.startsWith('113_')).evidence.functions.find(f=>f.name==='public.purge_growth_partner_sources').body,
     });
     if(entry.file==='122_partner_history_read.sql'){await exercisePartnerHistory(db,fixture,entry.source,t);await exercisePartnerHistoryHttp(db,fixture,t);}
+    if(entry.file==='123_operator_workday_read.sql'){await exerciseOperatorWorkday(db,fixture,entry.source,t);await exerciseOperatorWorkdayHttp(db,fixture,t);}
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
       await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{
@@ -414,6 +417,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'public.confirm_growth_subscription_payment_052(uuid,uuid,bigint,text,timestamptz,uuid,uuid)',
       'public.valid_partner_company(jsonb)','public.guard_partner_company_application()',
       'public.partner_company_result(public.growth_partner_company_applications)',
+      'public.operator_workday_zone(text)','public.operator_workday_day_start(date,text)',
       'public.create_crm_appointment_with_new_client(uuid,jsonb,jsonb)',
       'public.operator_command_result_v2(uuid,uuid,text,uuid,uuid,text,uuid)',
       'public.site_deletion_operation_receipt(public.site_deletion_operations,boolean)']) {
@@ -423,7 +427,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'read_lead_team_analytics', 'read_generated_video_workflow', 'read_platform_subscription_operation',
       'prepare_site_deletion_operation', 'read_site_deletion_operations', 'execute_site_deletion_operation', 'close_site_deletion_operation',
       'apply_growth_contributor', 'review_growth_contributor','execute_clinic_operator_command_v2','execute_growth_operator_command_v2',
-      'read_operator_request_command_v2','close_operator_request_command_v2','read_growth_partner_ledger','read_growth_partner_history',
+      'read_operator_request_command_v2','close_operator_request_command_v2','read_growth_partner_ledger','read_growth_partner_history','read_growth_operator_workday',
       'read_growth_creator_jobs','execute_growth_creator_job_v2','read_growth_creator_command_v2','close_growth_creator_command_v2',
       'read_growth_creator_directory','read_growth_creator_job_detail',
       'capture_growth_partner_source_v2','purge_growth_partner_sources','claim_growth_partner_source','read_growth_partner_source',

@@ -230,6 +230,11 @@ export default function OperatorPortal() {
     <PortalShell homeHref="/operator" title={section === "profile" ? "Мой профиль" : section === "terms" ? "Условия работы" : "Мой рабочий день"}
       roleLabel="Кабинет оператора" displayName={profile?.displayName}
       activeId={section} onNavigate={setSection} onSignOut={userId ? () => void supabase.auth.signOut() : undefined}
+      actions={userId ? <button type="button" className="neu-btn" disabled={busy}
+        title={section === "work" ? "Обновить рабочий день" : "Обновить статус профиля"}
+        aria-label={section === "work" ? "Обновить рабочий день" : "Обновить статус профиля"} onClick={refreshProfile}>
+        <RefreshCw size={18} aria-hidden="true" />
+      </button> : undefined}
       items={[
         { id: "work", label: "Мои заявки", icon: ClipboardList },
         { id: "cooperations", label: "Сотрудничество", icon: Users },
@@ -299,17 +304,6 @@ export default function OperatorPortal() {
           <p role="status" className="break-words text-sm">
             {message}
           </p>
-        )}
-        {userId && (
-          <button
-            type="button"
-            className="neu-btn"
-            disabled={busy}
-            onClick={refreshProfile}
-          >
-            <RefreshCw size={16} />
-            Обновить статус
-          </button>
         )}
         {userId && loaded && !profile && (
           <form

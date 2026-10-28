@@ -8,12 +8,22 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-122, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 114);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 114 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-123, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 115);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 115 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
+});
+
+test('123 adds only a complete own-workday reader and private native-zone helper without business writes',()=>{
+  const e=chain.find(v=>v.file.startsWith('123_'));
+  assert.deepEqual(e.evidence.tables,[]);assert.deepEqual(e.evidence.functions.map(f=>f.name),['public.operator_workday_zone','public.operator_workday_day_start','public.read_growth_operator_workday']);
+  assert.deepEqual(e.evidence.dynamicSqlLines,[]);assert.deepEqual(e.evidence.storageCatalogueLines,[]);assert.deepEqual(e.evidence.extensions,[]);
+  assert.match(e.source,/report_clock as materialized/);assert.match(e.source,/cardinality\(v_locked\)/);
+  assert.match(e.source,/join accessible x/);assert.match(e.source,/s\.is_active/);assert.match(e.source,/d\.is_active/);
+  assert.match(e.source,/revoke all on function public\.operator_workday_day_start\(date,text\) from public,anon,authenticated,service_role/);
+  assert.doesNotMatch(e.source,/(?:insert into|update|delete from) public\./i);
 });
 
 test('122 adds a single authority-locked journal reader without business writes or browser grants',()=>{

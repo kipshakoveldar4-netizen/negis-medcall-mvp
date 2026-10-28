@@ -2,6 +2,7 @@ import { createOperatorBrowserFixture } from "./operator-browser-store";
 import { parseCreatorCommandIdentity, parseCreatorJobAction, type CreatorJob, type CreatorSubmission } from "../../lib/crm/creator-job-contracts";
 import { parseContributorApplication, type ContributorProfile } from "../../lib/crm/contributor-contracts";
 import { partnerHistoryMonth, type PartnerHistoryItem } from "../../lib/crm/partner-history-contracts";
+import type { OperatorWorkdayReport } from "../../lib/crm/operator-workday-contracts";
 
 export const portalDesignIds = {
   contributor: "33333333-3333-4333-8333-333333333333",
@@ -40,6 +41,7 @@ export function createPortalDesignStore(input: string | URL = "/contributors?mod
   let actor: string | null = state === "signed-out" ? null : actorForView();
   let denied = false, lose = false, failBefore = false, acceptingRequests = false;
   let operator = createOperatorBrowserFixture();
+  let expandedWorkday = false, missingWorkdayZone = false;
   const authListeners = new Set<(event: string, session: ReturnType<typeof session>) => void>();
   const listeners = new Set<() => void>();
   const calls: { path: string; method: string; actor: string | null; epoch: number; body: unknown }[] = [];
@@ -185,6 +187,41 @@ export function createPortalDesignStore(input: string | URL = "/contributors?mod
       }
       const operatorProfile = (await operator.request(new URL("http://fixture.invalid/api/crm/operator-account")).json()).data;
       if (["pending", "suspended"].includes(state) || operatorProfile.status !== "approved") return fail(403);
+      if (route === "operator-workday" && method === "GET") {
+        const rawOffset = url.searchParams.get("offset") ?? "0";
+        if ([...url.searchParams.keys()].some(key => key !== "offset") || url.searchParams.getAll("offset").length > 1
+          || !/^(?:0|[1-9]\d{0,6})$/.test(rawOffset) || Number(rawOffset) > 1000000) return fail(400);
+        const inbox = (await operator.request(new URL("http://fixture.invalid/api/crm/operator-inbox")).json()).data;
+        const accepted = state === "empty" ? [] : inbox.items.filter((item: any) => item.status === "accepted");
+        const offset = Number(rawOffset), ready = accepted.length > 0;
+        const items: OperatorWorkdayReport["today"]["items"] = ready ? [
+          { appointmentId: "99999999-9999-4999-8999-999999999991", requestId: accepted[0].id, startsAt: "2026-10-28T08:00:00Z", endsAt: "2026-10-28T08:30:00Z", status: "arrived", clientName: "ТЕСТ O1 контакт", clientPhone: "+70000000991", service: "ТЕСТ O1 услуга", doctorName: "ТЕСТ O1 специалист", clinicConfirmedAt: "2026-10-28T08:30:00Z", operatorCheckResult: null },
+          { appointmentId: "99999999-9999-4999-8999-999999999992", requestId: accepted[0].id, startsAt: "2026-10-28T10:00:00Z", endsAt: "2026-10-28T11:00:00Z", status: "scheduled", clientName: "ТЕСТ O1 контакт", clientPhone: "+70000000991", service: "ТЕСТ O1 услуга", doctorName: "ТЕСТ O1 специалист", clinicConfirmedAt: null, operatorCheckResult: null },
+        ] : [];
+        if (ready && expandedWorkday) {
+          const first = items[0];
+          items.splice(1);
+          for (let index = 1; index < 21; index++) {
+            const starts = new Date(Date.UTC(2026, 9, 28, 8, index * 30));
+            items.push({ ...first, appointmentId: `99999999-9999-4999-8999-${String(100000000000 + index)}`,
+              startsAt: starts.toISOString(), endsAt: new Date(starts.getTime() + 1800000).toISOString(),
+              status: "scheduled", clinicConfirmedAt: null });
+          }
+        }
+        const bookings = String(items.length), scheduled = String(Math.max(0, items.length - 1));
+        const report: OperatorWorkdayReport = {
+          generatedAt: "2026-10-28T09:00:00Z", offset,
+          companies: accepted.map((item: any) => ({ requestId: item.id, displayName: item.displayName, leadScope: item.leadScope,
+            timeZone: missingWorkdayZone ? null : "UTC", localDate: missingWorkdayZone ? null : "2026-10-28",
+            dayStart: missingWorkdayZone ? null : "2026-10-28T00:00:00Z", dayEnd: missingWorkdayZone ? null : "2026-10-29T00:00:00Z" })),
+          summary: { availableLeads: ready ? "1" : "0", assignedLeads: ready ? "1" : "0", clinicLeads: "0", attributedBookings: bookings, clinicConfirmedArrivals: ready ? "1" : "0", undatedBookings: "0", contacts: "not_tracked",
+            bookingStatuses: { scheduled, confirmed: "0", arrived: ready ? "1" : "0", no_show: "0", cancelled: "0", unknown: "0" } },
+          today: missingWorkdayZone && ready
+            ? { state: "unavailable_timezone", total: null, actionable: null, items: [], hasMore: false }
+            : { state: "ready", total: bookings, actionable: scheduled, items: items.slice(offset, offset + 20), hasMore: items.length > offset + 20 },
+        };
+        return ok(report);
+      }
       if (route === "operator-inbox") {
         const commandId = method === "GET" ? url.searchParams.get("commandId") : body?.commandId;
         if (commandId) {
@@ -224,6 +261,7 @@ export function createPortalDesignStore(input: string | URL = "/contributors?mod
     navigate(next: PortalDesignView) { view = next; switchActor(state === "signed-out" ? null : actorForView()); },
     setState(next: PortalDesignState) {
       state = next; denied = false; operator = createOperatorBrowserFixture(); acceptingRequests = false;
+      expandedWorkday = false; missingWorkdayZone = false;
       receipts.clear(); fences.clear(); seed(); switchActor(state === "signed-out" ? null : actorForView());
     },
     deny(value = true) { denied = value; },
@@ -235,6 +273,8 @@ export function createPortalDesignStore(input: string | URL = "/contributors?mod
     clearProfile() { profile = null; },
     suspendOperator() { operator.suspend(); },
     endCooperation() { operator.endCooperation(); },
+    expandWorkday() { expandedWorkday = true; },
+    setWorkdayZoneMissing(value = true) { missingWorkdayZone = value; },
     async request(url: URL, init: RequestInit = {}): Promise<Response> {
       init.signal?.throwIfAborted();
       if (url.origin !== "http://fixture.invalid" || !url.pathname.startsWith("/api/crm/")) throw Error("Only isolated fixture API routes are permitted");

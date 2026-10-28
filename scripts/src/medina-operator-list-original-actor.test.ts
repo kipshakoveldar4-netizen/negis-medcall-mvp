@@ -46,6 +46,11 @@ function compile(source: string, filename: string) {
   return result.outputText;
 }
 
+const workdayContractFile = "lib/crm/operator-workday-contracts.ts";
+const workdayContracts = {} as { parseOperatorWorkday(value: unknown, expectedOffset: number): unknown };
+new Script(compile(await readFile(path.join(root, workdayContractFile), "utf8"), workdayContractFile),
+  { filename: workdayContractFile }).runInNewContext({ exports: workdayContracts });
+
 // Reuse only the reconciled hook renderer, not its tests or mocked transport.
 // Actual components, operatorApi, crmFetch, serverAuth and sign-out fencing run
 // in a VM with synthetic SDK/fetch/storage. No browser, app env, server or DB runs.
@@ -90,7 +95,7 @@ const prefixComponents: Record<string, string> = {
 for (const [key, filename] of Object.entries(files)) {
   let source = sourceRef === undefined ? await readFile(path.join(root, filename), "utf8")
     : execFileSync("git", ["show", `${sourceRef}:${filename}`], { cwd: root, encoding: "utf8" });
-  if (Object.hasOwn(prefixComponents, key)) {
+  if (Object.hasOwn(prefixComponents, key) && key !== "workday") {
     // These views use the actual component prefix through its
     // list hook, with a narrow observer instead of unrelated mutation forms.
     // This proves their call binding/transport, not their complete rendered UI.
@@ -145,6 +150,10 @@ async function fixture(t: TestContext, target: Target, guarded = true, actorId =
     document: { ...eventTarget(), visibilityState: "visible" },
     fetch(url: string, init: RequestInit) {
       assert.equal(init.method, "GET", "Selection regressions must never write");
+      if (target === "workday") {
+        assert.equal(url, "/api/crm/operator-workday?offset=0", "Workday must read the complete summary, not an inbox page");
+        assert.equal(init.cache, "no-store");
+      }
       const response = deferred<unknown>();
       const pending: Pending = { url, init, jsonReads: 0, respond(data, status = 200) {
         response.resolve({ ok: status >= 200 && status < 300, status,
@@ -168,6 +177,11 @@ async function fixture(t: TestContext, target: Target, guarded = true, actorId =
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: Symbol("Fragment") };
       if (name === "lucide-react") return icons;
       if (name.endsWith("/crm/operator-contracts")) return load("contracts");
+      if (name.endsWith("/crm/operator-workday-contracts")) return workdayContracts;
+      // Run the complete Workday component and its read hook. Its leads child
+      // is an opaque boundary here; the leads target still executes real leads.
+      if (key === "workday" && name === "./OperatorLeads") return { OperatorLeads: Symbol("OperatorLeadsBoundary") };
+      if (key === "workday" && name === "./OperatorWorkday.css") return {};
       if (name === "@/lib/api") {
         const crm = load("crm") as { crmFetch(url: string, init: Init): Promise<Response> };
         return { ...crm, crmFetch(url: string, init: Init) {
@@ -197,7 +211,8 @@ async function fixture(t: TestContext, target: Target, guarded = true, actorId =
     const captured = lifetime;
     return { actorId, requestId: REQUEST, leadId: LEAD, leadScope: "assigned",
       ...(target === "directory" ? { workspaceId: REQUEST } : {}),
-      ...(guarded ? { isSessionCurrent: () => captured.current } : {}),
+      ...(guarded ? { isSessionCurrent: () => captured.current }
+        : target === "workday" ? { isSessionCurrent: () => true } : {}),
       onAccessDenied: () => { denied++; }, onBooked: () => assert.fail("Read-only fixture must not book") };
   }
   render.mount(jsx(Component, props(actorId)));
@@ -240,7 +255,25 @@ async function fixture(t: TestContext, target: Target, guarded = true, actorId =
   };
 }
 
-const rows = (target: Target, marker: string) => ({ success: true, data: {
+function workdayRows(marker: string) {
+  const data = {
+    generatedAt: "2026-10-28T07:00:00.000Z", offset: 0,
+    companies: [{ requestId: REQUEST, displayName: marker, leadScope: "assigned", timeZone: "UTC",
+      localDate: "2026-10-28", dayStart: "2026-10-28T00:00:00.000Z", dayEnd: "2026-10-29T00:00:00.000Z" }],
+    summary: { availableLeads: "3", assignedLeads: "2", clinicLeads: "1", attributedBookings: "1",
+      clinicConfirmedArrivals: "0", undatedBookings: "0", contacts: "not_tracked",
+      bookingStatuses: { scheduled: "1", confirmed: "0", arrived: "0", no_show: "0", cancelled: "0", unknown: "0" } },
+    today: { state: "ready", total: "1", actionable: "1", hasMore: false, items: [{
+      appointmentId: LEAD, requestId: REQUEST, startsAt: "2026-10-28T08:00:00.000Z", endsAt: "2026-10-28T08:30:00.000Z",
+      status: "scheduled", clientName: marker, clientPhone: "+70000000000", service: "Synthetic service",
+      doctorName: "Synthetic doctor", clinicConfirmedAt: null, operatorCheckResult: null,
+    }] },
+  };
+  assert.ok(workdayContracts.parseOperatorWorkday(data, 0), "Workday actor proofs require a valid complete report");
+  return { success: true, data };
+}
+
+const rows = (target: Target, marker: string) => target === "workday" ? workdayRows(marker) : ({ success: true, data: {
   items: [{ id: LEAD, name: marker, ...(target === "leads" ? { phone: marker, status: "new" } : { specialty: "Synthetic" }) }],
   hasMore: true, stageEditingAvailable: false,
 } });

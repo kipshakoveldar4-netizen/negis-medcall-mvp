@@ -79,7 +79,7 @@ const jsx = (type: unknown, props: Props, key?: unknown): Element => ({ type, pr
 function elements(child: Child): Element[] {
   if (Array.isArray(child)) return child.flatMap(elements);
   if (child === null || typeof child !== "object") return [];
-  return [child, ...elements(child.props.children)];
+  return [child, ...(child.type === PortalShell ? elements(child.props.actions as Child) : []), ...elements(child.props.children)];
 }
 
 function text(child: Child): string {

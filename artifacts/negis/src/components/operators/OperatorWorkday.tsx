@@ -1,9 +1,94 @@
-import { useRef, useState } from "react";
-import { Building2, ChevronLeft, ChevronRight, RefreshCw, Users } from "lucide-react";
-import { useOperatorList } from "@/lib/operatorApi";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  ArrowRight, Building2, CalendarCheck2, CalendarClock, ChevronLeft, ChevronRight,
+  CircleAlert, CircleCheck, ClipboardList, Clock3, LoaderCircle, Phone,
+  RefreshCw, UserCheck, Users,
+} from "lucide-react";
+import { operatorApi, OperatorApiError } from "@/lib/operatorApi";
 import { OperatorLeads } from "./OperatorLeads";
-import { OPERATOR_PAGE_SIZE, operatorLeadScopeLabels, type OperatorRequest } from "../../../../../lib/crm/operator-contracts";
+import {
+  operatorArrivalCheckLabels, operatorBookingStatusLabels, operatorLeadScopeLabels,
+} from "../../../../../lib/crm/operator-contracts";
+import {
+  OPERATOR_WORKDAY_PAGE_SIZE, parseOperatorWorkday,
+  type OperatorWorkdayCompany, type OperatorWorkdayReport, type OperatorWorkdayVisit,
+} from "../../../../../lib/crm/operator-workday-contracts";
 import "./OperatorWorkday.css";
+
+type WorkdayScope = {
+  actorId: string;
+  isSessionCurrent: () => boolean;
+  expired: boolean;
+  denied: boolean;
+};
+type WorkdayRequest = { scope: WorkdayScope; offset: number; revision: number };
+type WorkdayResponse = { request: WorkdayRequest; data: OperatorWorkdayReport | null; error: string };
+type SelectedScope = {
+  request: WorkdayRequest;
+  report: OperatorWorkdayReport;
+  requestId: string;
+  leadScope: OperatorWorkdayCompany["leadScope"];
+};
+
+const MAX_OFFSET = 1_000_000;
+const localDateFormat = new Intl.DateTimeFormat("ru-RU", {
+  day: "numeric", month: "long", year: "numeric", timeZone: "UTC",
+});
+
+function scopeCurrent(scope: WorkdayScope) {
+  if (scope.expired) return false;
+  if (!scope.actorId || !scope.isSessionCurrent()) {
+    scope.expired = true;
+    return false;
+  }
+  return true;
+}
+
+function countLabel(value: string) {
+  return BigInt(value).toLocaleString("ru-RU");
+}
+
+function CompanyDate({ company }: { company: OperatorWorkdayCompany }) {
+  return company.localDate && company.timeZone
+    ? <><time dateTime={company.localDate}>{localDateFormat.format(new Date(`${company.localDate}T00:00:00Z`))}</time><span>{company.timeZone}</span></>
+    : <span>Часовой пояс не подтверждён</span>;
+}
+
+function Visit({ item, company }: { item: OperatorWorkdayVisit; company: OperatorWorkdayCompany }) {
+  if (!company.timeZone || !company.localDate) return null;
+  const time = new Intl.DateTimeFormat("ru-RU", {
+    timeZone: company.timeZone, hour: "2-digit", minute: "2-digit", hour12: false,
+  });
+  const confirmation = item.clinicConfirmedAt && new Intl.DateTimeFormat("ru-RU", {
+    timeZone: company.timeZone, dateStyle: "short", timeStyle: "short",
+  }).format(new Date(item.clinicConfirmedAt));
+  return <li className="operator-workday__visit">
+    <div className="operator-workday__visit-heading">
+      <p className="operator-workday__visit-time"><CalendarClock size={17} aria-hidden="true" />
+        <time dateTime={item.startsAt}>{time.format(new Date(item.startsAt))}</time>
+      </p>
+      <span className={`operator-workday__status operator-workday__status--${item.status}`}
+        aria-label={`Текущий статус: ${item.status === "unknown" ? "Неизвестен" : operatorBookingStatusLabels[item.status]}`}>
+        {item.status === "unknown" ? "Неизвестен" : operatorBookingStatusLabels[item.status]}
+      </span>
+    </div>
+    <p className="operator-workday__client">{item.clientName.trim() || "Имя не указано"}</p>
+    <p className="operator-workday__phone"><Phone size={14} aria-hidden="true" />{item.clientPhone.trim() || "Телефон не указан"}</p>
+    <p className="operator-workday__company-name">{company.displayName}</p>
+    <p className="operator-workday__local-date"><CompanyDate company={company} /></p>
+    <p className={confirmation ? "operator-workday__confirmation" : "operator-workday__caption"}>
+      {confirmation && <CircleCheck size={14} aria-hidden="true" />}{confirmation ? "Приход подтверждён клиникой" : "Приход не подтверждён"}
+    </p>
+    <details className="operator-workday__visit-more"><summary>Подробности записи</summary><dl className="operator-workday__visit-details">
+      <div><dt>Услуга</dt><dd>{item.service.trim() || "Не указана"}</dd></div>
+      <div><dt>Специалист</dt><dd>{item.doctorName.trim() || "Не указан"}</dd></div>
+      <div><dt>Подтверждение клиники</dt><dd className={confirmation ? "operator-workday__confirmation" : undefined}>
+        {confirmation ? <><CircleCheck size={14} aria-hidden="true" /><span>Приход подтверждён<time dateTime={item.clinicConfirmedAt!}>{confirmation}</time></span></> : "Приход не подтверждён"}
+      </dd></div>
+      {item.operatorCheckResult && <div><dt>Проверка оператора</dt><dd>{operatorArrivalCheckLabels[item.operatorCheckResult]}</dd></div>}
+    </dl></details>
+  </li>;
+}
 
 export function OperatorWorkday({ actorId, isSessionCurrent, onAccessDenied, onCooperations }: {
   actorId: string;
@@ -11,39 +96,231 @@ export function OperatorWorkday({ actorId, isSessionCurrent, onAccessDenied, onC
   onAccessDenied: () => void;
   onCooperations: () => void;
 }) {
-  const list = useOperatorList<OperatorRequest>("operator-inbox", true, onAccessDenied, { actorId, isSessionCurrent });
-  const [selection, setSelection] = useState<string | null>(null);
-  const accepted = list.data?.items.filter(item => item.status === "accepted") ?? [];
-  const selected = accepted.find(item => item.id === selection) ?? accepted[0] ?? null;
-  const live = useRef({ actorId, data: list.data, selected: selected?.id });
-  if (live.current.actorId !== actorId || live.current.data !== list.data || live.current.selected !== selected?.id) {
-    live.current = { actorId, data: list.data, selected: selected?.id };
+  const scope = useRef<WorkdayScope>({ actorId, isSessionCurrent, expired: false, denied: false });
+  if (scope.current.actorId !== actorId) {
+    scope.current.expired = true;
+    scope.current = { actorId, isSessionCurrent, expired: false, denied: false };
   }
-  const frame = live.current;
-  const isCurrent = () => live.current === frame && isSessionCurrent();
-  return <section className="operator-workday" aria-label="Рабочие заявки оператора">
-    <header className="operator-workday__heading"><div><h2>Мои заявки</h2><p>Только подтверждённое сотрудничество</p></div>
-      <button type="button" className="neu-btn" title="Обновить компании" aria-label="Обновить компании" onClick={list.refresh}><RefreshCw size={17}/></button>
+  const renderedScope = scope.current;
+  if (!isSessionCurrent()) renderedScope.expired = true;
+
+  const [request, setRequest] = useState<WorkdayRequest>({ scope: renderedScope, offset: 0, revision: 0 });
+  const [response, setResponse] = useState<WorkdayResponse | null>(null);
+  const [selection, setSelection] = useState<{ scope: WorkdayScope; requestId: string } | null>(null);
+  const mounted = useRef(false);
+  const active = useRef<{ request: WorkdayRequest; controller: AbortController } | null>(null);
+  const selectedScope = useRef<SelectedScope | null>(null);
+  const live = useRef({ request, response, scope: renderedScope, isSessionCurrent, onAccessDenied });
+  live.current = { request, response, scope: renderedScope, isSessionCurrent, onAccessDenied };
+
+  // Returning to the same actor later must not revive an earlier lifetime.
+  if (request.scope !== renderedScope) {
+    setRequest({ scope: renderedScope, offset: 0, revision: request.revision + 1 });
+    setResponse(null);
+    setSelection(null);
+    selectedScope.current = null;
+  }
+
+  function current(original: WorkdayRequest) {
+    if (!mounted.current || original.scope !== renderedScope || live.current.scope !== original.scope
+      || live.current.request !== original || !scopeCurrent(original.scope)) return false;
+    if (!live.current.isSessionCurrent()) {
+      original.scope.expired = true;
+      return false;
+    }
+    return true;
+  }
+
+  function clearResponse() {
+    active.current?.controller.abort();
+    active.current = null;
+    selectedScope.current = null;
+    live.current.response = null;
+    setResponse(null);
+  }
+
+  function replaceRequest(next: WorkdayRequest) {
+    clearResponse();
+    live.current.request = next;
+    setRequest(next);
+  }
+
+  function refresh(original: WorkdayRequest, manual = false) {
+    if (live.current.scope !== renderedScope) return;
+    if (!current(original)) {
+      if (!manual && live.current.request === original) clearResponse();
+      return;
+    }
+    if (manual && live.current.response?.request !== original) return;
+    replaceRequest({ ...original, revision: original.revision + 1 });
+  }
+
+  function movePage(original: WorkdayRequest, direction: -1 | 1) {
+    const result = live.current.response;
+    if (!current(original) || result?.request !== original || result.data?.today.state !== "ready") return;
+    if (direction === 1 && (!result.data.today.hasMore || original.offset > MAX_OFFSET - OPERATOR_WORKDAY_PAGE_SIZE)) return;
+    const offset = Math.max(0, original.offset + direction * OPERATOR_WORKDAY_PAGE_SIZE);
+    if (offset !== original.offset) replaceRequest({ ...original, offset, revision: original.revision + 1 });
+  }
+
+  function deny(original: WorkdayRequest) {
+    if (!current(original)) return;
+    original.scope.denied = true;
+    original.scope.expired = true;
+    clearResponse();
+    setResponse({ request: original, data: null, error: "Доступ к рабочему дню изменился. Обновите профиль." });
+    setSelection(null);
+    live.current.onAccessDenied();
+  }
+
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      active.current?.controller.abort();
+      active.current = null;
+      selectedScope.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!current(request)) return;
+    const controller = new AbortController();
+    active.current = { request, controller };
+    const valid = () => !controller.signal.aborted && active.current?.controller === controller && current(request);
+    if (!valid()) return () => controller.abort();
+    void operatorApi<unknown>(
+      `operator-workday?offset=${request.offset}`, undefined, "GET", controller.signal, request.scope.actorId, valid,
+    ).then(value => {
+      if (!valid()) return;
+      const parsed = parseOperatorWorkday(value, request.offset);
+      if (!parsed) throw new Error("Не удалось подтвердить данные рабочего дня. Попробуйте обновить сводку.");
+      setResponse({ request, data: parsed, error: "" });
+    }).catch(error => {
+      if (!valid()) return;
+      if (error instanceof OperatorApiError && (error.status === 401 || error.status === 403)) {
+        deny(request);
+        return;
+      }
+      setResponse({ request, data: null, error: error instanceof Error ? error.message : "Не удалось загрузить рабочий день." });
+    });
+    return () => {
+      controller.abort();
+      if (active.current?.controller === controller) active.current = null;
+    };
+  }, [request]);
+
+  useEffect(() => {
+    const revalidate = () => refresh(live.current.request);
+    const visible = () => { if (document.visibilityState === "visible") revalidate(); };
+    window.addEventListener("focus", revalidate);
+    document.addEventListener("visibilitychange", visible);
+    return () => {
+      window.removeEventListener("focus", revalidate);
+      document.removeEventListener("visibilitychange", visible);
+    };
+  }, [renderedScope]);
+
+  const available = request.scope === renderedScope && scopeCurrent(renderedScope);
+  const result = available && response?.request === request ? response : null;
+  const report = result?.data ?? null;
+  const pending = available && result === null;
+  const error = !available
+    ? renderedScope.denied ? "Доступ к рабочему дню изменился. Обновите профиль." : "Рабочий день недоступен для текущего профиля."
+    : result?.error ?? "";
+  const selected = report?.companies.find(company => selection?.scope === renderedScope && company.requestId === selection.requestId)
+    ?? report?.companies[0] ?? null;
+  if (!report || !selected) selectedScope.current = null;
+  else if (selectedScope.current?.request !== request || selectedScope.current.report !== report
+    || selectedScope.current.requestId !== selected.requestId || selectedScope.current.leadScope !== selected.leadScope) {
+    selectedScope.current = { request, report, requestId: selected.requestId, leadScope: selected.leadScope };
+  }
+  const renderedSelection = selectedScope.current;
+  const selectionCurrent = () => renderedSelection !== null && selectedScope.current === renderedSelection
+    && current(renderedSelection.request) && live.current.response?.request === renderedSelection.request
+    && live.current.response.data === renderedSelection.report;
+  const companies = new Map(report?.companies.map(company => [company.requestId, company]));
+  const today = report?.today;
+
+  return <section className="operator-workday" aria-label="Рабочие заявки оператора" aria-busy={pending}>
+    <header className="operator-workday__heading">
+      <div><h2>Мой рабочий день</h2><p>Подтверждённое сотрудничество</p></div>
+      <button type="button" className="operator-workday__icon-button" title="Обновить рабочий день" aria-label="Обновить рабочий день"
+        disabled={!available || pending} onClick={() => refresh(request, true)}><RefreshCw size={18} aria-hidden="true" /></button>
     </header>
-    {list.error && <p role="alert">{list.error}</p>}
-    {!list.data && !list.error && <p role="status">Загружаем компании…</p>}
-    {list.data && <>
-      {selected ? <>
-        <div className="operator-workday__scope"><Building2 size={20} aria-hidden="true"/>
-          <label>Компания<select className="neu-input" value={selected.id} onChange={event => {
-            if (isCurrent() && accepted.some(item => item.id === event.target.value)) setSelection(event.target.value);
-          }}>{accepted.map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}</select></label>
-          <span className="portal-status">{operatorLeadScopeLabels[selected.leadScope || "assigned"]}</span>
+    {error && <p className="operator-workday__state operator-workday__error" role="alert"><CircleAlert size={20} aria-hidden="true" /><span>{error}</span></p>}
+    {pending && <p className="operator-workday__state" role="status"><LoaderCircle size={20} className="operator-workday__spinner" aria-hidden="true" /><span>Загружаем рабочий день…</span></p>}
+    {report && <>
+      <div className="operator-workday__summary">
+        <p className="operator-workday__caption">По всем подтверждённым компаниям</p>
+        <dl className="operator-workday__metrics" aria-label="Сводка рабочего дня">
+          <div><ClipboardList size={23} aria-hidden="true" /><dt>Доступные заявки</dt><dd className={report.summary.availableLeads.length > 12 ? "operator-workday__number--long" : undefined}>{countLabel(report.summary.availableLeads)}</dd></div>
+          <div><CalendarCheck2 size={23} aria-hidden="true" /><dt>Записей создано</dt><dd className={report.summary.attributedBookings.length > 12 ? "operator-workday__number--long" : undefined}>{countLabel(report.summary.attributedBookings)}</dd></div>
+          <div><UserCheck size={23} aria-hidden="true" /><dt>Приходов подтверждено</dt><dd className={report.summary.clinicConfirmedArrivals.length > 12 ? "operator-workday__number--long" : undefined}>{countLabel(report.summary.clinicConfirmedArrivals)}</dd></div>
+        </dl>
+        <div className="operator-workday__summary-notes">
+          <p><Phone size={14} aria-hidden="true" />Контакты: <span>Учёт не ведётся</span></p>
+          <p>Записи и приходы за всё время</p>
+          {report.summary.undatedBookings !== "0" && <p>Записей без времени: {countLabel(report.summary.undatedBookings)}</p>}
         </div>
-        <OperatorLeads key={selected.id} actorId={actorId} requestId={selected.id} leadScope={selected.leadScope || "assigned"}
-          isSessionCurrent={isCurrent} onAccessDenied={onAccessDenied}/>
-      </> : <div className="operator-workday__empty"><Users size={28} aria-hidden="true"/><h3>Пока нет подтверждённых компаний</h3>
-        <button type="button" className="neu-btn" onClick={onCooperations}>Предложения о сотрудничестве</button></div>}
-      {(list.offset > 0 || list.data.hasMore) && <nav className="operator-workday__pages" aria-label="Страницы компаний">
-        <button type="button" className="neu-btn" disabled={list.offset === 0} onClick={list.previous}><ChevronLeft size={17}/>Назад</button>
-        <span>Компании на странице {Math.floor(list.offset / OPERATOR_PAGE_SIZE) + 1}</span>
-        <button type="button" className="neu-btn" disabled={!list.data.hasMore} onClick={list.next}>Далее<ChevronRight size={17}/></button>
-      </nav>}
+      </div>
+      <div className="operator-workday__body">
+        <section className="operator-workday__leads" aria-label="Заявки по компании">
+          <h3>Мои заявки</h3>
+          {selected ? <>
+            <div className="operator-workday__scope"><Building2 size={20} aria-hidden="true" />
+              <label>Компания<select className="neu-input" value={selected.requestId} onChange={event => {
+                const requestId = event.target.value;
+                if (!selectionCurrent() || !report.companies.some(company => company.requestId === requestId) || requestId === selected.requestId) return;
+                selectedScope.current = null;
+                setSelection({ scope: renderedScope, requestId });
+              }}>{report.companies.map(company => <option key={company.requestId} value={company.requestId}>{company.displayName}</option>)}</select></label>
+              <span className="operator-workday__lead-scope">{operatorLeadScopeLabels[selected.leadScope]}</span>
+              <p className="operator-workday__selected-date"><Clock3 size={14} aria-hidden="true" /><CompanyDate company={selected} /></p>
+            </div>
+            <OperatorLeads key={`${actorId}:${request.revision}:${selected.requestId}:${selected.leadScope}`}
+              actorId={request.scope.actorId} requestId={selected.requestId} leadScope={selected.leadScope}
+              isSessionCurrent={selectionCurrent} onAccessDenied={() => { if (selectionCurrent()) deny(request); }} />
+          </> : <div className="operator-workday__empty"><Users size={28} aria-hidden="true" /><h4>Пока нет подтверждённых компаний</h4>
+            <button type="button" className="neu-btn" onClick={() => {
+              if (current(request) && live.current.response?.data === report) onCooperations();
+            }}>Предложения о сотрудничестве<ArrowRight size={16} aria-hidden="true" /></button>
+          </div>}
+        </section>
+        <aside className="operator-workday__today" aria-label="Записи на сегодня">
+          <header className="operator-workday__today-heading"><h3>Сегодня</h3><CalendarClock size={20} aria-hidden="true" /></header>
+          <p className="operator-workday__caption">Местное время компаний</p>
+          {report.companies.length > 0 && <details className="operator-workday__company-days"><summary>Даты компаний</summary>
+            <ul>{report.companies.map(company => <li key={company.requestId}><strong>{company.displayName}</strong><CompanyDate company={company} /></li>)}</ul>
+          </details>}
+          {today?.state === "unavailable_timezone" && <div className="operator-workday__unavailable" role="status">
+            <CircleAlert size={20} aria-hidden="true" /><div><p>Записи на сегодня недоступны</p><p>Нужен поддерживаемый часовой пояс компаний:</p>
+              <ul>{report.companies.filter(company => company.timeZone === null).map(company => <li key={company.requestId}>{company.displayName}</li>)}</ul>
+            </div>
+          </div>}
+          {today?.state === "ready" && <>
+            <dl className="operator-workday__today-totals" aria-label="Итоги за сегодня">
+              <div><dt>Всего записей</dt><dd>{countLabel(today.total)}</dd></div>
+              <div><dt>Требуют внимания</dt><dd>{countLabel(today.actionable)}</dd></div>
+            </dl>
+            {today.items.length > 0 ? <ol className="operator-workday__agenda">{today.items.map(item => {
+              const company = companies.get(item.requestId);
+              return company ? <Visit key={item.appointmentId} item={item} company={company} /> : null;
+            })}</ol> : <p className="operator-workday__state" role="status">{request.offset > 0 ? "На этой странице записей нет." : "На сегодня записей нет."}</p>}
+            <footer className="operator-workday__today-footer">
+              <p role="status">{today.items.length > 0
+                ? `Записи ${request.offset + 1}–${request.offset + today.items.length} из ${countLabel(today.total)}`
+                : `Страница ${Math.floor(request.offset / OPERATOR_WORKDAY_PAGE_SIZE) + 1}`}</p>
+              <nav className="operator-workday__pages" aria-label="Страницы записей на сегодня">
+                <button type="button" className="operator-workday__icon-button" title="Предыдущая страница" aria-label="Предыдущая страница записей на сегодня"
+                  disabled={request.offset === 0} onClick={() => movePage(request, -1)}><ChevronLeft size={18} aria-hidden="true" /></button>
+                <button type="button" className="operator-workday__icon-button" title="Следующая страница" aria-label="Следующая страница записей на сегодня"
+                  disabled={!today.hasMore || request.offset > MAX_OFFSET - OPERATOR_WORKDAY_PAGE_SIZE} onClick={() => movePage(request, 1)}><ChevronRight size={18} aria-hidden="true" /></button>
+              </nav>
+            </footer>
+          </>}
+        </aside>
+      </div>
     </>}
   </section>;
 }

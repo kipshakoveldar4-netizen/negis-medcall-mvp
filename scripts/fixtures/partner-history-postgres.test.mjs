@@ -8,7 +8,8 @@ import { exercisePartnerHistoryHttp } from './partner-history-native-http-cases.
 
 test('read-only partner journal on owned PostgreSQL; no external payment, Auth, provider or cloud', { timeout: 300000 }, async t=>{
   assert.equal(process.env.MEDINA_TEST_POSTGRES_NATIVE,'1');
-  const chain=await readReviewedChain(fileURLToPath(new URL('../../migrations/',import.meta.url))),last=chain.at(-1);
+  // Historical 122 protocol; full current-chain composition is tested separately.
+  const chain=(await readReviewedChain(fileURLToPath(new URL('../../migrations/',import.meta.url)))).filter(e=>Number(e.file.slice(0,3))<=122),last=chain.at(-1);
   assert.equal(last.file,'122_partner_history_read.sql');
   const fixture=await startNativePostgres();t.after(()=>fixture.close());const db=await fixture.connect();
   await db.query(`create role anon nologin;create role authenticated nologin;create role service_role nologin bypassrls;

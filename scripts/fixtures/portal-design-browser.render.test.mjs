@@ -207,6 +207,57 @@ test('actual portals: owned headless screenshots, navigation, states and console
       await wait(`return !document.querySelector('[aria-label="Карточка задания"]');`);
     }
   });
+  await t.test('operator complete totals, company dates, 20+1 paging and missing timezone at 375/1440', async () => {
+    for (const width of [375, 1440]) {
+      await cdp.call('Emulation.setDeviceMetricsOverride', { width, height: width === 375 ? 900 : 1000, deviceScaleFactor: 1, mobile: width === 375 });
+      await navigate('operator');
+      assert.equal(await evaluate(`return [...document.querySelectorAll('h1,h2')].filter(element=>element.textContent==='Мой рабочий день'&&element.getBoundingClientRect().width>10).length;`), 1);
+      assert.equal(await evaluate(`return document.querySelector('.operator-workday__visit-more').open;`), false);
+      await evaluate(`document.querySelector('.operator-workday__visit-more summary').click();`);
+      assert.equal(await evaluate(`const details=document.querySelector('.operator-workday__visit-more');return details.open&&details.querySelector('dl').getBoundingClientRect().height>0&&details.innerText.includes('ТЕСТ O1 услуга');`), true);
+      await evaluate(`document.querySelector('.operator-workday__visit-more summary').click();`);
+      await evaluate(`document.querySelector('.operator-workday__company-days summary').click();`);
+      assert.equal(await evaluate(`return document.querySelector('.operator-workday__company-days').open&&document.querySelector('.operator-workday__company-days li').innerText.includes('UTC');`), true);
+      await evaluate(`window.__portalDesignQA.expandWorkday();window.dispatchEvent(new Event('focus'));`);
+      await wait(`return document.querySelectorAll('.operator-workday__agenda > li').length===20;`);
+      const summary = await evaluate(`return document.querySelector('.operator-workday__metrics').innerText;`);
+      await evaluate(`document.querySelector('button[aria-label="Следующая страница записей на сегодня"]').click();`);
+      await wait(`return document.querySelectorAll('.operator-workday__agenda > li').length===1&&document.querySelector('.operator-workday__today-footer').innerText.includes('21–21');`);
+      assert.equal(await evaluate(`return document.querySelector('button[aria-label="Следующая страница записей на сегодня"]').disabled;`), true);
+      assert.equal(await evaluate(`return document.querySelector('.operator-workday__metrics').innerText;`), summary);
+      await capture(`operator-today-page2-${width}`);
+      await evaluate(`document.querySelector('button[aria-label="Предыдущая страница записей на сегодня"]').click();`);
+      await wait(`return document.querySelectorAll('.operator-workday__agenda > li').length===20;`);
+      await evaluate(`window.__portalDesignQA.setWorkdayZoneMissing();window.dispatchEvent(new Event('focus'));`);
+      await wait(`return document.body.innerText.includes('Записи на сегодня недоступны');`);
+      assert.equal(await evaluate(`return !!document.querySelector('.operator-workday__agenda')||!!document.querySelector('.operator-workday__today-totals');`), false);
+      assert.equal(await evaluate(`return document.querySelector('.operator-workday__metrics').innerText;`), summary);
+      await capture(`operator-timezone-unavailable-${width}`);
+    }
+  });
+  await t.test('operator reload, failed report, ended cooperation and denial remove private Today at 375/1440', async () => {
+    for (const width of [375, 1440]) {
+      await cdp.call('Emulation.setDeviceMetricsOverride', { width, height: width === 375 ? 900 : 1000, deviceScaleFactor: 1, mobile: width === 375 });
+      await navigate('operator');
+      await cdp.call('Page.reload');
+      await wait(`return document.querySelectorAll('.operator-workday__agenda > li').length===2;`);
+      await evaluate(`window.__portalDesignQA.failNext('operator-workday',503);document.querySelector('button[aria-label="Обновить рабочий день"]').click();`);
+      await wait(`return !!document.querySelector('.operator-workday [role="alert"]');`);
+      assert.equal(await evaluate(`return !!document.querySelector('.operator-workday__metrics')||!!document.querySelector('.operator-workday__agenda')||document.body.innerText.includes('+70000000991');`), false);
+      await evaluate(`document.querySelector('button[aria-label="Обновить рабочий день"]').click();`);
+      await wait(`return document.querySelectorAll('.operator-workday__agenda > li').length===2;`);
+      await evaluate(`window.__portalDesignQA.endCooperation();window.dispatchEvent(new Event('focus'));`);
+      await wait(`return document.body.innerText.includes('Пока нет подтверждённых компаний');`);
+      assert.equal(await evaluate(`return !!document.querySelector('.operator-workday__agenda')||!!document.querySelector('[aria-label="Заявки оператора"]')||document.body.innerText.includes('+70000000991');`), false);
+      await capture(`operator-cooperation-ended-${width}`);
+      await navigate('operator');
+      await evaluate(`window.__portalDesignQA.deny();document.querySelector('button[aria-label="Обновить рабочий день"]').click();`);
+      await wait(`return !document.querySelector('.operator-workday__agenda')&&!document.querySelector('[aria-label="Заявки оператора"]')&&!document.querySelector('.operator-workday__metrics');`);
+      assert.equal(await evaluate(`return document.body.innerText.includes('+70000000991');`), false);
+      await wait(`return !document.body.innerText.includes('Загружаем');`);
+      await capture(`operator-denied-${width}`);
+    }
+  });
   if (hotOnly) { assertIsolation(); return; }
   await t.test('production mode and sidebar navigation retain the same contributor identity', async () => {
     await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
