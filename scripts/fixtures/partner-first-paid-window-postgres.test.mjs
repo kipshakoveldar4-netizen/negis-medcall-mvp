@@ -8,7 +8,10 @@ import { seedPartnerLedger, seedReferral, partnerPayment, partnerReport } from '
 
 test('first paid subscription, not registration, qualifies the original seven-day source on owned native SQL', {timeout:300000},async t=>{
   assert.equal(process.env.MEDINA_TEST_POSTGRES_NATIVE,'1','Only explicit owned native opt-in, no DSN/provider fallback');
-  const chain=await readReviewedChain(fileURLToPath(new URL('../../migrations/',import.meta.url))),last=chain.at(-1);
+  const reviewed=await readReviewedChain(fileURLToPath(new URL('../../migrations/',import.meta.url)));
+  // This focused suite proves the 120 protocol before 121's approval-only cutover.
+  // The cumulative native suite separately applies and tests every current file.
+  const chain=reviewed.filter(e=>Number(e.file.slice(0,3))<=120),last=chain.at(-1);
   assert.equal(last.file,'120_partner_first_paid_window.sql');
   const fixture=await startNativePostgres();t.after(()=>fixture.close());const db=await fixture.connect();
   await db.query(`create role anon nologin;create role authenticated nologin;create role service_role nologin bypassrls;

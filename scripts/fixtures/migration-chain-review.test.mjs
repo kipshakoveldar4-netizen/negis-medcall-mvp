@@ -8,12 +8,20 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-120, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 112);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 112 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-121, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 113);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 113 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
+});
+
+test('121 creates only a private application and an explicitly approved company, without accounts or money',()=>{
+  const e=chain.find(v=>v.file.startsWith('121_'));
+  assert.deepEqual(e.evidence.tables,['public.growth_partner_company_applications']);assert.deepEqual(e.evidence.rls,e.evidence.tables);
+  assert.equal(e.evidence.functions.length,7);assert.deepEqual(e.evidence.dynamicSqlLines,[]);assert.deepEqual(e.evidence.storageCatalogueLines,[]);
+  assert.match(e.source,/revoke all on function public\.bind_growth_partner_source\(uuid,uuid,uuid\) from public,anon,authenticated,service_role/);
+  assert.doesNotMatch(e.source,/grant\s+(?:select|insert|update|delete)|on\s+delete\s+cascade|(?:insert into|update|delete from) public\.(?:platform_subscriptions|platform_subscription_payments|growth_referrals|growth_partner_commissions|growth_partner_payouts)/i);
 });
 
 test('120 stages the original source and creates paid attribution only through the private original financial writer',()=>{

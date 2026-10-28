@@ -27,6 +27,7 @@ import { exercisePartnerEntryHttp } from './partner-entry-native-http-cases.mjs'
 import { exercisePartnerTerms } from './partner-terms-cases.mjs';
 import { exercisePartnerTermsHttp } from './partner-terms-native-http-cases.mjs';
 import { exerciseFirstPaidWindow } from './partner-first-paid-window-cases.mjs';
+import { exercisePartnerCompanyApproval } from './partner-company-approval-cases.mjs';
 import { exerciseAppointmentActor,exerciseAppointmentActorDependencies } from './appointment-actor-cases.mjs';
 import { exerciseAppointmentReadiness,exerciseAppointmentReadinessBeforeCutover,exerciseAppointmentPatchReadinessBeforeCutover,exerciseAppointmentVersionReadinessBeforeCutover,exerciseAppointmentEntryReadinessBeforeCutover,exerciseAppointmentJournalReadinessBeforeCutover } from './appointment-actor-readiness-cases.mjs';
 import { exerciseAppointmentVersionEntryBefore,exerciseAppointmentVersionEntry } from './appointment-version-entry-cases.mjs';
@@ -286,6 +287,9 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       await exerciseAppointmentPatch(db,fixture,t,{versioned:true,journaled:true});await exerciseAppointmentReadiness(db,t);
     }
     if(entry.file==='120_partner_first_paid_window.sql')await exerciseFirstPaidWindow(db,fixture,entry.source,t);
+    if(entry.file==='121_partner_company_approval.sql')await exercisePartnerCompanyApproval(db,fixture,entry.source,t,{
+      legacyPurge:chain.find(e=>e.file.startsWith('113_')).evidence.functions.find(f=>f.name==='public.purge_growth_partner_sources').body,
+    });
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
       await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{
@@ -380,7 +384,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
 
   await t.test('RPC-only and read-only server boundaries survive later migrations', async () => {
     for (const table of ['platform_subscription_operations', 'content_telegram_deliveries', 'content_telegram_delivery_guards', 'site_deletion_operations','growth_operator_request_commands','growth_operator_command_fences',
-      'growth_creator_jobs','growth_creator_submissions','growth_creator_commands','growth_creator_events','growth_creator_command_fences','growth_partner_sources','growth_partner_payment_windows','crm_appointment_request_actors']) {
+      'growth_creator_jobs','growth_creator_submissions','growth_creator_commands','growth_creator_events','growth_creator_command_fences','growth_partner_sources','growth_partner_payment_windows','growth_partner_company_applications','crm_appointment_request_actors']) {
       const result = await one(db, `select has_table_privilege('service_role',$1,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') as tab,
         has_any_column_privilege('service_role',$1,'SELECT,INSERT,UPDATE,REFERENCES') as col`, [`public.${table}`]);
       assert.deepEqual(result, { tab: false, col: false }, `${table}: no direct service access may be restored`);
@@ -399,12 +403,14 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'public.execute_growth_creator_job(uuid,uuid,uuid,uuid,uuid,uuid,text,jsonb)','public.read_growth_creator_command(uuid,uuid,uuid,uuid)',
       'public.creator_command_result_v2(uuid,uuid,uuid,uuid,text,uuid)',
       'public.operator_request_command_receipt(public.growth_operator_request_commands)', 'public.confirm_operator_request_command(uuid,uuid,text,uuid,uuid,text)',
-      ...operatorLegacySignatures,...partnerSourceHelpers,'public.bind_growth_referral(uuid,text,text)','public.capture_growth_partner_source(uuid,text,text,text)',
+      ...operatorLegacySignatures,...partnerSourceHelpers,'public.bind_growth_referral(uuid,text,text)','public.bind_growth_partner_source(uuid,uuid,uuid)','public.capture_growth_partner_source(uuid,text,text,text)',
       'public.partner_terms_actor(uuid,text,uuid)','public.partner_terms_snapshot(public.growth_contributor_profiles)','public.lock_operator_command_reader(uuid,text,uuid,uuid)',
       'public.lock_crm_appointment_actor(uuid,uuid,uuid,text)','public.crm_appointment_targets_actor(jsonb,jsonb)',
       'public.read_crm_appointment_create_request(uuid,uuid,uuid,text)','public.create_crm_appointment_once(uuid,uuid,uuid,text,jsonb,jsonb,text)',
       'public.patch_crm_appointment_as_actor(uuid,uuid,uuid,text,uuid,jsonb,jsonb)','public.stamp_appointment_edit_version()',
       'public.confirm_growth_subscription_payment_052(uuid,uuid,bigint,text,timestamptz,uuid,uuid)',
+      'public.valid_partner_company(jsonb)','public.guard_partner_company_application()',
+      'public.partner_company_result(public.growth_partner_company_applications)',
       'public.create_crm_appointment_with_new_client(uuid,jsonb,jsonb)',
       'public.operator_command_result_v2(uuid,uuid,text,uuid,uuid,text,uuid)',
       'public.site_deletion_operation_receipt(public.site_deletion_operations,boolean)']) {
@@ -417,7 +423,8 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'read_operator_request_command_v2','close_operator_request_command_v2','read_growth_partner_ledger',
       'read_growth_creator_jobs','execute_growth_creator_job_v2','read_growth_creator_command_v2','close_growth_creator_command_v2',
       'read_growth_creator_directory','read_growth_creator_job_detail',
-      'capture_growth_partner_source_v2','purge_growth_partner_sources','claim_growth_partner_source','read_growth_partner_source','bind_growth_partner_source',
+      'capture_growth_partner_source_v2','purge_growth_partner_sources','claim_growth_partner_source','read_growth_partner_source',
+      'submit_growth_partner_company','read_growth_partner_company','review_growth_partner_company',
       'execute_growth_partner_terms','read_growth_partner_terms','confirm_growth_subscription_payment','read_crm_appointment_request_v2','create_crm_appointment_v2','patch_crm_appointment_journaled']) {
       const functions = (await db.query(`select p.oid::regprocedure::text as signature,has_function_privilege('service_role',p.oid,'EXECUTE') as allowed
         from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname=$1`, [name])).rows;
