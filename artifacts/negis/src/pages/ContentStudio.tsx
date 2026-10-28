@@ -2300,8 +2300,10 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   };
 
   useEffect(() => {
-    if (!localDraftsOnly || isRealWorkspace(workspaceId) || readWorkspaceId() !== workspaceId) return;
+    const session = sessionRef.current;
+    if (!localDraftsOnly || isRealWorkspace(workspaceId) || readWorkspaceId() !== workspaceId || !isHandoffSessionAlive(session)) return;
     const saved = readVideos(libraryStorageKey);
+    if (!isHandoffSessionAlive(session)) return;
     if (saved.length > 0) {
       librarySnapshotRef.current = { ...librarySnapshotRef.current, videos: saved, activeId: saved[0].id };
       setVideos(saved);
