@@ -1,129 +1,109 @@
-# Mint Office Design QA
+# Contributor Portal Design QA
 
-Date: 2026-10-20. Scope: selected first concept, applied to the existing CRM.
-Acceptance is visual-system consistency, not copying invented mock data or features.
+Date: 2026-10-28. Scope: local implementation only. No Production/Preview release,
+cloud migration, provider request, real payment or working workspace modification.
 
-## Evidence
+## Visual Truth And Evidence
 
-- Source visual truth: `C:/Users/Lenovo/.codex/generated_images/019ec72b-1070-7dc3-9f17-305d3ba80a93/exec-803026f4-5592-4f65-82e7-2f65fdea06cf.png`.
-- Evidence directory: `C:/Users/Lenovo/Documents/Codex/medina-os/node_modules/.cache/baspana-overview-20261020/mint-office/`.
-- Implementation screenshots: `dashboard-1440.png`, `leads-1440.png`, `appointments-1440.png`, `analytics-1440.png`; corresponding `360`, `390`, `768` files also cover clients, tasks and team.
-- Combined comparison input: `full-comparison.png`, with the selected source and all four implemented views side by side. Focused comparison: `focused-comparison.png`.
-- Source is a 1448x1086 raster board, four approximately 724x543 frames, not a CSS viewport specification. Desktop was captured at 1440x1000 CSS pixels; screenshots are 1425x990 or 1440x1000 because of the browser capture/scrollbar bounds. Each was aspect-fitted into a 724x543 comparison tile without stretching. Mobile was checked at 360x740 and 390x844; tablet at 768x1024.
-- State: synthetic mortgage-profile admin, selected overview task segment; week calendar at its existing current-time scroll position; analytics at 30 days. Additional manager fixture checked own-work metrics and absence of team links.
-- Local URL: `http://127.0.0.1:5198/dashboard?fixturePurpose=mortgage_leads&fixtureRole=admin`.
+Base path: `C:/Users/Lenovo/Documents/Codex/medina-os/`.
 
-## Findings And Comparison History
+Approved source images (each 1487 x 1058):
+- `output/design-concepts/contributors-2026-10-28/operator-workspace.png`
+- `output/design-concepts/contributors-2026-10-28/blogger-partner.png`
+- `output/design-concepts/contributors-2026-10-28/content-creator.png`
 
-- Initial P2: mortgage lead source column consumed 23% while the responsible-person column had 13%, splitting a long surname and making rows unnecessarily tall. Evidence: `leads-desktop-before.png` versus the source lead screen.
-- Fixed: mortgage columns now use 26/12/12/21/13/16%; desktop notes clamp to two lines with full text available through title/detail. Clinical content and full mobile notes remain. Post-fix evidence: `leads-1440.png` and the rebuilt combined comparison. No remaining P2 at that location.
-- Mobile review also tightened task filters into two columns and three metrics into one row, making the task list visible earlier. Evidence: final `tasks-390.png`.
-- Portaled activity/contact forms use the same black primary action and neutral fields. Phone inputs are 16px/44px, action height is 44px, and shared dialog/backdrop layers are 80/79 above navigation 70. Evidence: `task-form-390.png` and browser DOM measurements.
-- An early overview capture caught the entry animation at zero opacity. It was rejected and recaptured after the agenda reached opacity 1; the final comparison uses the settled view.
-- Final full and focused visual comparisons found no open P0/P1/P2 issues for the agreed style scope.
+Individual final browser-rendered screenshots:
+- `output/design-qa/contributors-2026-10-28/final/operator-desktop.png`
+- `output/design-qa/contributors-2026-10-28/final/operator-mobile.png`
+- `output/design-qa/contributors-2026-10-28/final/partner-desktop.png`
+- `output/design-qa/contributors-2026-10-28/final/partner-mobile.png`
+- `output/design-qa/contributors-2026-10-28/final/creator-desktop.png`
+- `output/design-qa/contributors-2026-10-28/final/creator-mobile.png`
 
-## Required Fidelity Surfaces
+Screenshots: CSS/pixel viewport 1440 x 1000 and 375 x 900, deviceScaleFactor 1.
+Synthetic ready data, actual production React portals/transport; Auth and API data
+are doubles. The visible test toolbar is fixture-only, not application UI.
+IAB attachment repeatedly timed out. The fallback evidence is the repository's
+owned headless Edge regression, with an empty disposable profile and blocked
+external requests, not the user's browser profile or a real logged-in account.
 
-- Typography in the initial pass: Inter/system-ui stack retained, moderate 24px page headings, compact 12-14px data labels, zero letter spacing on new surfaces, long synthetic names tested. The offline fallback was subsequently rejected by the owner and corrected in the follow-up below.
-- Layout: charcoal navigation, neutral working ground, white repeated items, 8px borders/corners and restrained elevation. All seven mortgage routes passed four viewport sizes with document scroll width equal to client width. Wide data tables/calendar scroll inside labeled regions rather than widening the page.
-- Colors: mint selected navigation/segments and first overview metric, black primary commands, white outlined secondary commands, semantic blue/amber/red statuses. Measured sidebar rgb(20,26,23), primary rgb(18,22,20).
-- Images/icons: existing brand treatment and Lucide icons reused. The chosen design has no photographic or illustrative asset requirement; no generated bitmap was substituted for working UI. Analytics use semantic meters with actual snapshot values, including empty zero meters.
-- Copy/content: Russian labels and existing status meanings retained. No fictional join/video-call action, revenue, paid advertising metric, or invented completion count was copied from the generated concept.
-- Intentional adaptations: preserve the existing agenda tabs, full 24-hour calendar, richer factual analytics table and role-specific access. Horizontal workload bars replace the mock's simplified chart composition; the sidebar retains the established compact width. These are functional-product constraints, not pending fidelity defects.
+Same-input full-view comparisons are `final/{operator,partner,creator}-comparison.png`.
+Sources are proportionally normalized to 1440 px wide. Implementation toolbar
+59 px is excluded; the remaining 1440 x 941 viewport is not stretched and is
+bottom-padded on the comparison canvas. Padding is not a layout discrepancy.
+The desktop source has no separate mobile target; mobile is a responsive adaptation.
+Focused native-density header/mode comparison: `final/creator-header-focus.png`.
+Final mobile filter interaction: `final/creator-status-select-mobile.png`.
+Machine-readable final ready/interaction evidence: `final/browser-report.json`.
 
-## Interaction And Safety Checks
+## Comparison History
 
-- Navigation through all seven sections, mobile More menu and contact form open/cancel.
-- Unassigned-lead filter returns exactly one synthetic row; analytics 7/30-day controls update chart labels; calendar day/week modes and new-meeting form work.
-- Manager fixture retains four own-work metrics and no analytics/team links. Scope invalidation, hidden stale contacts and restricted dispatch remain covered by executable regressions.
-- Historical console contained transient HMR reload/createRoot errors while files were being edited. Clean final reload produced no new console errors; see `browser-console-proof.json`.
-- Final checks: mortgage suite 105/105; activity/workspace 173/173; admin-session 82/82 (89/89 with mint checks); contact privacy/design tokens/route permissions/mobile overlays 36/36; fixture safety 63/63. Frontend/scripts typechecks and frontend build passed. Existing tooltip sourcemap and mixed serverAuth-import build warnings remain unchanged.
-- Only loopback fixtures were used. No deployment, migration, real account, working Baspana/salon data, WhatsApp, advertising or payment changes. Foreign migration edits 059/065 were preserved.
+1. `iteration-1-creator.png`: duplicate heading and excessive pre-list height
+   (P2). Hidden redundant inner heading, tightened row spacing; mobile header
+   actions now share the title row, metrics have three compact columns, and the
+   mobile status control is a native select. Final individual mobile evidence
+   shows the first assignment above the fold after the fixture toolbar.
+2. `iteration-1-operator.png`: the main work view opened cooperation offers,
+   not leads (P1). Added an owned, read-only workday view: accepted company
+   selection followed by the existing guarded lead workflow. Cooperation offers
+   retain their own navigation section. Final operator comparison shows a real
+   scoped lead, not a second implementation of booking or stage mutations.
+3. Final full-view and individual mobile captures were inspected after both fixes.
+   Header, status control and assignment action text are readable at native
+   capture size. Full-view images are also provided without comparison scaling.
+
+## Fidelity Surfaces
+
+- Typography: existing local Inter, restrained 400/500/600 weights, no viewport
+  font scaling or negative spacing. Long mobile title wraps, not clipped.
+- Layout: dark 236 px sidebar, unframed workspace bands, white repeated rows,
+  6 px controls, mobile drawer; no nested decorative cards or horizontal overflow.
+- Colors: mint active navigation, near-black green sidebar, neutral gray ground,
+  blue/amber semantic states. Existing brand favicon is preserved intentionally.
+- Images: three individually generated generic content-production illustrations,
+  optimized to 640 px WebP (about 25/39/35 KB), with explicit illustration alt text.
+  They are not customer media, company locations or evidence of accepted work.
+- Copy/content: counts are page-scoped when the API is paginated; money is exact
+  minor-unit data from the original DTO. The fixture's example balances are not
+  actual earnings. Missing agreements, unknown outcomes and denials remain truthful.
+
+## Findings And Remaining Work
+
+- [P1] Partner mock includes an issued referral URL and event history. Existing
+  approved-account/ledger APIs do not provide either as a verified live resource.
+  The local UI exposes the actual agreement/code workflow and aggregate ledger,
+  not a fabricated share link or transaction table. Finish protected link issuance
+  and paginated event-history reads before claiming full mock parity.
+- [P2] Operator mock includes cross-company totals and a combined Today agenda.
+  Existing per-cooperation scopes are preserved instead. A complete authorized
+  aggregate/agenda contract is still needed; do not sum partial pages or expose
+  the staff calendar to external operators.
+- [P2] Creator mock includes a nearest-deadline shortcut. The current UI provides
+  actual deadlines, page-scoped filters and the full assignment workflow, but not
+  that separate shortcut. Add it with an explicit page/overall scope and recheck.
+
+No observed viewport clipping, broken image or runtime console error in the six
+final ready captures. Those checks do not establish real Auth/database/provider
+acceptance. Empty/error states, role changes, recovery and command privacy have
+separate fixture/unit receipts; they do not remove the feature gaps above.
+Receipts: full owned-browser interactions 24/24, final captures/brand/mobile filter
+9/9, operator regression 733/733, portal UI 126/126, isolated fixture models/HTTP/
+bundle 11/11 with normal exit. The fixture cleanup issue was fixed by normal Vite
+listen/shutdown, disabling unused HTTP-test file watchers, and separating build
+plugin resources from the development-server test process; no force-exit or
+dropped assertions. Full build and final frontend typecheck/client build passed.
 
 ## Implementation Checklist
 
-- [x] Shared authenticated-workspace theme and navigation.
-- [x] Overview, leads, clients, tasks, calendar, analytics and team styling.
-- [x] Responsive screenshots, interaction checks and security regression coverage.
-- [x] Recompare fixed lead density and settled overview against the selected source.
-- [x] Keep local preview running; do not publish this redesign.
+- [x] Shared scoped shell, previous font, reduced-motion behavior, actual navigation.
+- [x] Operator scoped leads, separate cooperation/profile, original actor guards.
+- [x] Partner exact aggregate balances and actual terms/code workflow.
+- [x] Creator actual assignments, responsive rows, page filters and original commands.
+- [x] Desktop/mobile ready-state screenshots and same-page comparisons.
+- [ ] Complete the three remaining mock regions and repeat final visual acceptance.
+- [ ] Separately authorize and verify an isolated cloud Preview; no release here.
 
-## Follow-Up Polish
+final result: blocked
 
-- Resolved: the original self-hosted-font follow-up is complete; see the typography/motion pass below.
-- Live authentication, persistence, integrations and production deployment are outside this run and are not claimed as verified.
-
-## Typography And Motion Follow-Up, 20 October
-
-User requested the previous softer font and smooth animations in all sections,
-with phone/desktop verification and no publication.
-
-- Source visual truth remains the selected first concept above. For the scoped
-  refinement, the layout baseline is `mint-office/dashboard-1440.png`, copied to
-  `soft-type-motion/baseline-1440.png` under the same evidence parent directory.
-  The previous production source explicitly named Inter; the offline fixture
-  had no font source under its self-only CSP and rendered the system fallback.
-- Implementation: `soft-type-motion/dashboard-1440.png`, `dashboard-390.png`,
-  plus all seven route screenshots at 360/390/1440. Combined visual inputs:
-  `full-comparison.png` and `focused-comparison.png`; handoff board:
-  `desktop-mobile.png`. Baseline and revised desktop captures are both
-  1425x990 pixels at 1440x1000 CSS, no density conversion. Mobile 390x844 CSS
-  produces a 375x834 screenshot because the capture excludes the scrollbar.
-- State: same synthetic admin, team overview with task agenda selected. Fixture
-  clock timestamps differ between runs; counts, identities and layout match.
-  An initial 1280x720 capture was excluded from comparison, rather than treated
-  as a layout change at the 1440px breakpoint.
-- Finding P2, resolved: the fallback made Cyrillic labels and the overall type
-  rhythm differ from the intended existing Inter. Bundled unmodified variable
-  WOFF2 files now cover Latin, Cyrillic and Cyrillic-ext. Browser font checks
-  passed for 400/500/600 and for Kazakh letters after making them visible in a
-  synthetic search field. The extended subset loads on demand. The license and
-  upstream sources are bundled; no external font request or CSP relaxation.
-- Typography: headings and shared buttons use weight 500, metrics retain 600,
-  body text stays 400. Sizes, line heights and zero tracking remain. Side-by-side
-  full/focused review found no clipping, awkward new wrapping or open P0/P1/P2.
-- Layout/colors/assets/copy: all unchanged from the selected system. Existing
-  Lucide icons, mint/charcoal/white tokens and Russian labels remain. No new
-  illustration, chart value, product feature or API behavior was introduced.
-- Motion: shared page entry is opacity 0.94 to 1 in 180ms, controls/nav/rows use
-  160ms paint-only transitions. No main transform, delayed unmount, exit-retained
-  private data or eager Framer import. Existing agenda motion remains in its
-  lazy page chunk. New entry/transitions honor the reduced-motion media query;
-  executable CSS/VM checks cover that branch, not a claimed physical-device test.
-- Browser checks: seven sections at 360x740, 390x844 and 1440x1000 without
-  document overflow or alert errors; mobile More > Clients navigation and
-  contact form open/cancel passed. Form font is Inter, fields 16px/44px,
-  dialog layer 80 and main transform none. No data was submitted.
-- Verification: focused mint 11/11, overview/mobile 47/47; frontend and scripts
-  typechecks and final frontend build passed. Existing build warnings remain.
-  Clean final browser reload has no new console errors; proofs are in the
-  `soft-type-motion` directory. Local-only, no database/deployment/WhatsApp or
-  working Baspana/salon changes. Unrelated migrations 059/065 were preserved.
-
-## Approved Production Release, 20 October
-
-The owner subsequently approved publishing this style, font and motion only.
-The narrowly extracted release is 9379bdc, based on actual production 3291e0f,
-not the accumulated development branch. API, libraries, migrations and project
-configuration remain unchanged. An independent source/dependency review passed.
-
-- Candidate verification: mortgage 107/107; activity/admin/privacy/mobile/tokens/
-  routes 119/119; isolated cold-start 58+57; frontend/scripts typechecks and build.
-- Preview g6hrlfjn6: READY, exact source fingerprint checks; ordinary browser
-  login/font/CSS check and unauthenticated auth-context refusal. No protection
-  bypass, new roles, fixtures or claimed new authenticated-user acceptance.
-- Production qhf5davce, dpl_HxoJj546hDpkzhgQCqNA4NGUGBJV: READY and assigned
-  to medinaos.com and the prior Vercel domain. Uploaded source checks 33/33.
-  Environment metadata, project settings and protection match the baseline.
-- Both domains return the same built entry/CSS, correct existing production
-  database URL, exact three bundled Inter files and auth-context 401 without
-  private data. The 155751-byte cloud CSS includes the agreed theme/motion;
-  its hash matches the stylesheet observed in the isolated Preview.
-- Published public browser evidence:
-  `C:/Users/Lenovo/Documents/Codex/medina-os/node_modules/.cache/mint-style-release-tools-20261020/medinaos-login.png`.
-  Receipts and machine-readable smoke/source proofs are in that same directory.
-  Private production screens were not opened or used for testing; visual phone/
-  desktop acceptance remains the synthetic evidence above. No business data or
-  Baspana/salon/WhatsApp settings were changed. Previous deployment retained.
-
-final result: passed
+Blocked means full approved-mock parity is not yet complete, not that the local
+pages fail to render. This report must not be presented as 100% product readiness.

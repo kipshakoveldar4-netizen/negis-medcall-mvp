@@ -72,26 +72,51 @@ export async function operatorApi<T>(
   return payload.data as T;
 }
 
+type OperatorListOwner = {
+  actorId: string;
+  isSessionCurrent?: () => boolean;
+};
+type OperatorListScope = { owner: OperatorListOwner | undefined; expired: boolean };
+
+function isOperatorListScopeCurrent(scope: OperatorListScope): boolean {
+  if (scope.expired) return false;
+  if (scope.owner && (!scope.owner.actorId || scope.owner.isSessionCurrent?.() === false)) {
+    scope.expired = true;
+    return false;
+  }
+  return true;
+}
+
 export function useOperatorList<
   T,
   TList extends OperatorList<T> = OperatorList<T>,
->(path: string, enabled = true, onAccessDenied?: () => void) {
-  const [request, setRequest] = useState({ path, enabled, offset: 0, revision: 0 });
+>(path: string, enabled = true, onAccessDenied?: () => void, owner?: OperatorListOwner) {
+  // Legacy unowned callers keep their contract. Owned reads never infer an actor
+  // from the SDK, and a retired lifetime cannot revive when its actor returns.
+  const scope = useRef<OperatorListScope>({ owner, expired: false });
+  if (Boolean(scope.current.owner) !== Boolean(owner) || scope.current.owner?.actorId !== owner?.actorId
+    || (scope.current.owner?.isSessionCurrent !== owner?.isSessionCurrent && !isOperatorListScopeCurrent(scope.current))) {
+    scope.current = { owner, expired: false };
+  }
+  const renderedScope = scope.current;
+  if (owner?.isSessionCurrent?.() === false) renderedScope.expired = true;
+  const [request, setRequest] = useState({ path, enabled, scope: renderedScope, offset: 0, revision: 0 });
   const [response, setResponse] = useState<{
     request: typeof request;
     data: TList | null;
     error: string;
   } | null>(null);
-  const live = useRef({ path, enabled, request, onAccessDenied });
-  live.current = { path, enabled, request, onAccessDenied };
+  const live = useRef({ path, enabled, request, scope: renderedScope, onAccessDenied });
+  live.current = { path, enabled, request, scope: renderedScope, onAccessDenied };
 
   // Adjust this hook's state before children render, not in a passive effect.
   // Each scope change gets a new identity, including A -> B -> A transitions.
-  if (request.path !== path || request.enabled !== enabled) {
+  if (request.path !== path || request.enabled !== enabled || request.scope !== renderedScope) {
     setRequest({
       path,
       enabled,
-      offset: request.path === path ? request.offset : 0,
+      scope: renderedScope,
+      offset: request.path === path && request.scope === renderedScope ? request.offset : 0,
       revision: request.revision + 1,
     });
   }
@@ -102,15 +127,18 @@ export function useOperatorList<
   }, []);
   useEffect(() => {
     setResponse(null);
-    if (!request.enabled) return;
+    if (!request.enabled || !isOperatorListScopeCurrent(request.scope)) return;
     const controller = new AbortController();
     const isCurrent = () => !controller.signal.aborted && live.current.request === request
-      && live.current.path === request.path && live.current.enabled === request.enabled;
+      && live.current.path === request.path && live.current.enabled === request.enabled
+      && live.current.scope === request.scope && isOperatorListScopeCurrent(request.scope);
     void operatorApi<TList>(
       `${request.path}${request.path.includes("?") ? "&" : "?"}offset=${request.offset}`,
       undefined,
       "GET",
       controller.signal,
+      request.scope.owner?.actorId,
+      isCurrent,
     )
       .then((result) => {
         if (isCurrent())
@@ -136,6 +164,8 @@ export function useOperatorList<
     enabled &&
     request.path === path &&
     request.enabled === enabled &&
+    request.scope === renderedScope &&
+    isOperatorListScopeCurrent(renderedScope) &&
     response?.request === request
       ? response
       : null;

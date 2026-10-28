@@ -163,6 +163,7 @@ function BookingFields({
     `operator-services?requestId=${encodeURIComponent(requestId)}`,
     true,
     onAccessDenied,
+    { actorId, isSessionCurrent },
   );
   const [doctorId, setDoctorId] = useState("");
   const [selected, setSelected] = useState<OperatorService[]>([]);
@@ -390,6 +391,8 @@ function BookingFields({
         {doctor && (
           <ServicePicker
             key={doctor.id}
+            actorId={actorId}
+            isSessionCurrent={isSessionCurrent}
             requestId={requestId}
             doctorId={doctor.id}
             selected={selected}
@@ -455,6 +458,8 @@ function getOperatorBookingStorage(): Storage | null {
 }
 
 function ServicePicker({
+  actorId,
+  isSessionCurrent,
   requestId,
   doctorId,
   selected,
@@ -462,6 +467,8 @@ function ServicePicker({
   onValidity,
   onAccessDenied,
 }: {
+  actorId: string;
+  isSessionCurrent?: () => boolean;
   requestId: string;
   doctorId: string;
   selected: OperatorService[];
@@ -473,6 +480,7 @@ function ServicePicker({
     `operator-services?requestId=${encodeURIComponent(requestId)}&doctorId=${encodeURIComponent(doctorId)}`,
     true,
     onAccessDenied,
+    { actorId, isSessionCurrent },
   );
   useEffect(() => {
     onValidity(!!list.data && !list.error);

@@ -72,6 +72,7 @@ type Slot =
   | { kind: "effect"; create: Effect; deps: Dependencies; cleanup?: () => void; pending: boolean };
 
 const OperatorRequests = Symbol("OperatorRequests boundary");
+const PortalShell = "synthetic-portal-shell";
 const RefreshCw = Symbol("RefreshCw");
 const jsx = (type: unknown, props: Props, key?: unknown): Element => ({ type, props, key });
 
@@ -288,9 +289,14 @@ async function fixture(t: TestContext, delayInitialSession = false) {
     if (name === "react") return { ...driver.hooks, useLayoutEffect: driver.hooks.useEffect };
     if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: Symbol("Fragment") };
     if (name === "wouter") return { Link: Symbol("Link") };
-    if (name === "lucide-react") return { RefreshCw, LogOut: Symbol("LogOut"), Send: Symbol("Send") };
+    if (name === "lucide-react") return {
+      RefreshCw, LogOut: Symbol("LogOut"), Send: Symbol("Send"), ClipboardList: Symbol("ClipboardList"),
+      FileText: Symbol("FileText"), UserRound: Symbol("UserRound"), Users: Symbol("Users"),
+    };
+    if (name === "@/components/portals/PortalShell") return { PortalShell };
     if (name === "@/lib/operatorApi") return api;
     if (name === "@/components/operators/OperatorRequests") return { OperatorRequests };
+    if (name === "@/components/operators/OperatorWorkday") return { OperatorWorkday: OperatorRequests };
     if (name === "../../../../lib/crm/operator-contracts") return contracts;
     if (name === "../../../../lib/auth/password-rules") return { validatePasswordRules: () => unexpected("password validation") };
     if (name === "../../../../lib/auth/staff-logins") return {
@@ -325,11 +331,23 @@ async function fixture(t: TestContext, delayInitialSession = false) {
     assert.equal(typeof handler, "function", `Expected ${name} handler`);
     (handler as (value?: unknown) => unknown)(event);
   }
+  async function navigate(label: string) {
+    // The historical pre-shell baseline has no navigation.
+    if (baseline) return;
+    const shell = driver.nodes().find((node) => node.type === PortalShell);
+    assert.ok(shell, "The shell host must expose the real root's props and children");
+    assert.ok(Array.isArray(shell.props.items));
+    const item = (shell.props.items as Array<{ id: string; label: string }>).find((value) => value.label === label);
+    assert.ok(item, `Expected actual shell navigation item ${label}`);
+    invoke(shell, "onNavigate", item.id);
+    await driver.flush();
+  }
 
   return {
     requests,
     labels: contracts.operatorStatusLabels,
     flush: driver.flush,
+    navigate,
     initialSession(id: string) { initial.resolve({ data: { session: session(id) } }); },
     changeSession(id: string | null, event = "SIGNED_IN") {
       assert.ok(authListener, "Auth subscription must be installed");
@@ -348,7 +366,8 @@ async function fixture(t: TestContext, delayInitialSession = false) {
       request.claimed = true;
       return request;
     },
-    toggle(value: boolean) {
+    async toggle(value: boolean) {
+      await navigate("\u041f\u0440\u043e\u0444\u0438\u043b\u044c");
       const checkbox = driver.nodes().find((node) => node.type === "input" && node.props.type === "checkbox");
       assert.ok(checkbox, "The real acceptingRequests checkbox must be rendered");
       invoke(checkbox, "onChange", { target: { checked: value } });
@@ -407,10 +426,12 @@ test("simulation R3.1 delayed successful PATCH cannot restore approved after sus
   const source = await compiled;
   t.diagnostic(`Portal: ${source.portalOrigin}; SHA256: ${source.portalHash}; hook/JSX simulation, not React acceptance`);
   const ui = await approvedFixture(t);
-  ui.toggle(false);
+  await ui.toggle(false);
   await ui.flush();
   const oldSave = ui.take("PATCH", "A");
   assert.deepEqual(oldSave.body, { acceptingRequests: false });
+  await ui.navigate("\u041c\u043e\u0438 \u0437\u0430\u044f\u0432\u043a\u0438");
+  assert.equal(ui.snapshot().cabinetActor, "A", "Exercise revocation from the open work view");
   ui.focus();
   await ui.flush();
   ui.take("GET", "A").succeed(profile("A", "suspended"));
@@ -442,9 +463,11 @@ test("simulation R3.8 batched A -> B -> A auth changes start a replacement profi
 
 test("simulation R3.9 a focus GET before PATCH commit is reconciled after the write settles", async (t) => {
   const ui = await approvedFixture(t);
-  ui.toggle(false);
+  await ui.toggle(false);
   await ui.flush();
   const save = ui.take("PATCH", "A");
+  await ui.navigate("\u041c\u043e\u0438 \u0437\u0430\u044f\u0432\u043a\u0438");
+  assert.equal(ui.snapshot().cabinetActor, "A");
   ui.focus();
   await ui.flush();
   ui.take("GET", "A").succeed(profile("A", "approved", true));
@@ -455,13 +478,14 @@ test("simulation R3.9 a focus GET before PATCH commit is reconciled after the wr
   assert.equal(ui.snapshot().cabinetActor, null, "Old PATCH approval cannot reopen access");
   ui.take("GET", "A").succeed(profile("A", "approved", false));
   await ui.flush();
+  await ui.navigate("\u041f\u0440\u043e\u0444\u0438\u043b\u044c");
   assert.equal(ui.snapshot().acceptingRequests, false, "The authoritative post-write setting must become visible");
   assert.equal(ui.snapshot().busy, false);
 });
 
 test("simulation R3.10 writes carry the original actor and are aborted synchronously on an auth change", async (t) => {
   const ui = await approvedFixture(t);
-  ui.toggle(false);
+  await ui.toggle(false);
   await ui.flush();
   const save = ui.take("PATCH", "A");
   assert.equal(save.expectedUserId, "A");
@@ -480,25 +504,27 @@ test("simulation R3.10 writes carry the original actor and are aborted synchrono
 
 test("simulation R3.2 delayed successful A save cannot replace the loaded B profile", async (t) => {
   const ui = await approvedFixture(t);
-  ui.toggle(false);
+  await ui.toggle(false);
   await ui.flush();
   const oldSave = ui.take("PATCH", "A");
   ui.changeSession("B");
   await ui.flush();
   ui.take("GET", "B").succeed(profile("B"));
   await ui.flush();
+  await ui.navigate("\u041f\u0440\u043e\u0444\u0438\u043b\u044c");
   assert.equal(ui.snapshot().profileName, profile("B").displayName);
   oldSave.succeed(profile("A", "approved", false));
   await ui.flush();
   assert.equal(ui.snapshot().profileName, profile("B").displayName, "Late A success must not publish its profile into B");
-  assert.equal(ui.snapshot().cabinetActor, "B");
   assert.equal(ui.snapshot().acceptingRequests, true);
+  await ui.navigate("\u041c\u043e\u0438 \u0437\u0430\u044f\u0432\u043a\u0438");
+  assert.equal(ui.snapshot().cabinetActor, "B");
 });
 
 for (const status of [401, 403, 503]) {
   test(`simulation R3.3 late A save HTTP ${status} cannot replace B's current GET message`, async (t) => {
     const ui = await approvedFixture(t);
-    ui.toggle(false);
+    await ui.toggle(false);
     await ui.flush();
     const oldSave = ui.take("PATCH", "A");
     ui.changeSession("B");
@@ -518,7 +544,7 @@ for (const status of [401, 403, 503]) {
 for (const outcome of ["success", "refusal"] as const) {
   test(`simulation R3.4 session change unlocks B; late A ${outcome}/finally cannot release B's pending save`, async (t) => {
     const ui = await approvedFixture(t);
-    ui.toggle(false);
+    await ui.toggle(false);
     await ui.flush();
     const oldSave = ui.take("PATCH", "A");
     assert.equal(ui.snapshot().busy, true);
@@ -527,7 +553,7 @@ for (const outcome of ["success", "refusal"] as const) {
     ui.take("GET", "B").succeed(profile("B"));
     await ui.flush();
     assert.equal(ui.snapshot().busy, false, "Session change must discard A's busy state so B can act");
-    ui.toggle(false);
+    await ui.toggle(false);
     await ui.flush();
     const newSave = ui.take("PATCH", "B");
     const before = ui.snapshot();
@@ -547,12 +573,16 @@ for (const outcome of ["success", "refusal"] as const) {
 for (const status of [401, 403, 503]) {
   test(`simulation R3.5 current save HTTP ${status} closes approved until explicit successful GET retry`, async (t) => {
     const ui = await approvedFixture(t);
-    ui.toggle(false);
+    await ui.toggle(false);
     await ui.flush();
     const save = ui.take("PATCH", "A");
+    await ui.navigate("\u041c\u043e\u0438 \u0437\u0430\u044f\u0432\u043a\u0438");
+    assert.equal(ui.snapshot().cabinetActor, "A");
     const count = ui.requests.length;
     save.fail(status);
     await ui.flush();
+    const refusedWork = ui.snapshot();
+    await ui.navigate("\u041f\u0440\u043e\u0444\u0438\u043b\u044c");
     const refused = ui.snapshot();
     assert.ok(refused.message, "The current refusal must be explained");
     assert.equal(refused.busy, false, "The explicit retry must be enabled");
@@ -563,15 +593,17 @@ for (const status of [401, 403, 503]) {
     ui.retry();
     await ui.flush();
     assert.equal(ui.requests.length, count + 1, "The real refresh button must issue one fresh GET");
+    await ui.navigate("\u041c\u043e\u0438 \u0437\u0430\u044f\u0432\u043a\u0438");
     assert.equal(ui.snapshot().cabinetActor, null, "Cabinet stays closed while retry is pending");
     const fresh = { ...profile("A", "approved", false), displayName: "Synthetic freshly verified A" };
     ui.take("GET", "A").succeed(fresh);
     await ui.flush();
-    assert.equal(ui.snapshot().profileName, fresh.displayName);
     assert.equal(ui.snapshot().cabinetActor, "A");
+    await ui.navigate("\u041f\u0440\u043e\u0444\u0438\u043b\u044c");
+    assert.equal(ui.snapshot().profileName, fresh.displayName);
     assert.equal(ui.snapshot().acceptingRequests, false);
     assert.equal(ui.snapshot().message, "");
-    assert.deepEqual({ profile: refused.profileName, actor: refused.cabinetActor }, {
+    assert.deepEqual({ profile: refused.profileName, actor: refusedWork.cabinetActor }, {
       profile: null, actor: null,
     }, `HTTP ${status} must immediately hide the previous approved profile/cabinet until manual verification`);
   });
@@ -579,7 +611,7 @@ for (const status of [401, 403, 503]) {
 
 test("simulation R3.6 an ordinary current successful PATCH updates the profile and finishes busy", async (t) => {
   const ui = await approvedFixture(t);
-  ui.toggle(false);
+  await ui.toggle(false);
   await ui.flush();
   assert.equal(ui.snapshot().busy, true);
   const saved = { ...profile("A", "approved", false), displayName: "Synthetic saved A" };
@@ -588,6 +620,7 @@ test("simulation R3.6 an ordinary current successful PATCH updates the profile a
   assert.equal(ui.snapshot().profileName, saved.displayName);
   assert.equal(ui.snapshot().status, ui.labels.approved);
   assert.equal(ui.snapshot().acceptingRequests, false);
+  await ui.navigate("\u041c\u043e\u0438 \u0437\u0430\u044f\u0432\u043a\u0438");
   assert.equal(ui.snapshot().cabinetActor, "A");
   assert.equal(ui.snapshot().message, "");
   assert.equal(ui.snapshot().busy, false);
@@ -601,10 +634,15 @@ test("simulation R3.7 a delayed initial getSession A cannot supersede an observe
   await ui.flush();
   ui.take("GET", "B").succeed(profile("B"));
   await ui.flush();
+  const beforeWork = ui.snapshot();
+  assert.equal(beforeWork.cabinetActor, "B");
+  await ui.navigate("\u041f\u0440\u043e\u0444\u0438\u043b\u044c");
   const before = ui.snapshot();
   assert.equal(before.profileName, profile("B").displayName);
   ui.initialSession("A");
   await ui.flush();
   assert.equal(ui.requests.length, 1, "Stale initial session must not launch an A profile GET after the B auth event");
   assert.deepEqual(ui.snapshot(), before, "B must remain the current account");
+  await ui.navigate("\u041c\u043e\u0438 \u0437\u0430\u044f\u0432\u043a\u0438");
+  assert.deepEqual(ui.snapshot(), beforeWork, "B's work view must also keep its original owner");
 });

@@ -5,6 +5,9 @@
   "license": "MIT",
   "scripts": {
     "test:readiness-isolation": "node scripts/run-readiness-isolation.cjs",
+    "test:portal-design": "node --test scripts/fixtures/portal-design-browser.test.mjs scripts/fixtures/portal-design-build.test.mjs",
+    "test:portal-design-render": "node --test scripts/fixtures/portal-design-browser.render.test.mjs",
+    "test:portal-ui": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:portal-ui",
     "test:readiness-workflows": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:readiness-workflows",
     "test:site-deletion-operations": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:site-deletion-operations",
     "test:site-deletion-client": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:site-deletion-client",

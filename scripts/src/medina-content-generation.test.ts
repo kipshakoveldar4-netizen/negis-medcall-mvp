@@ -1345,7 +1345,7 @@ const generationCallbackPrograms = (async () => {
       return { ${Object.entries(videoEffects).map(([name, matches]) => `${name}: ${matches[0]}`).join(",\n")} };
     };`;
   const demo = `${texts(libraryRestore.top)}
-    exports.selected = function captureLocalDraftHydration({ workspaceId, localDraftsOnly }, refs) {
+    exports.selected = function captureLocalDraftHydration({ actorId, workspaceId, localDraftsOnly, sessionRef }, refs) {
       const { ${libraryRefNames.join(", ")} } = refs;
       ${texts(libraryRestore.nested)}
       return ${demoEffects[0]};
@@ -3298,6 +3298,8 @@ test("GEN65 explicitly allowed local demo hydrates only idea drafts without API,
     const demo = fixture.localDrafts();
     assert.equal(demo.session.localDraftsOnly, true);
     assert.equal(demo.session.actorId, "");
+    assert.notEqual(demo.session.sessionRef, fixture.captured.sessionRef, "the demo remount must use its own current session, not the retired fixture binding");
+    assert.equal(demo.session.sessionRef.current?.signal.aborted, false);
     const reads = fixture.storageReads.length, mutations = fixture.mutations.length, sdkReads = fixture.sdkReads.total;
     demo.hydrate();
     assert.deepEqual(JSON.parse(JSON.stringify(fixture.writes)), [

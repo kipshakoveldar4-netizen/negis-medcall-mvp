@@ -195,6 +195,7 @@ async function runtime(t: TestContext): Promise<Ui> {
       if (dependency === "react") return render.hooks;
       if (dependency === "react/jsx-runtime") return { jsx: helpers.jsx, jsxs: helpers.jsx, Fragment: helpers.Fragment };
       if (dependency === "lucide-react") return helpers.icons;
+      if (dependency === "./OperatorRequests.css") return {};
       if (dependency.endsWith("/crm/operator-contracts")) return load("contracts");
       if (dependency === "@/lib/serverAuth") return { getSupabaseAccessToken: async () => "synthetic-header-test-token" };
       if (dependency === "@/lib/supabase") return { supabase: { auth: { getSession: async () => {

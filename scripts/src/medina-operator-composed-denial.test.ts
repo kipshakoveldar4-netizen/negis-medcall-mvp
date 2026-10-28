@@ -360,6 +360,7 @@ async function runtime(t: TestContext, queueMutations = false, confirm = () => t
       if (name === "react") return render.hooks;
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment };
       if (name === "lucide-react") return icons;
+      if (name === "./OperatorRequests.css") return {};
       // These older composed cases exercise header/parent ownership, not SDK auth.
       // The separate request-lifetime suite executes the real serverAuth module.
       if (name === "@/lib/serverAuth") return { getSupabaseAccessToken: async () => "synthetic-composed-token" };
@@ -921,10 +922,16 @@ async function clinicMutation(t: TestContext, target: ClinicMutation) {
   }
   async function populate() {
     await ui.render.flush();
-    ui.take("ClinicOperators").succeed(list([{
+    const directory = ui.take("ClinicOperators");
+    const requests = ui.take("OperatorRequests");
+    for (const request of [directory, requests]) {
+      assert.equal(request.expectedUserId, actorId, "Replacement reads must belong to the newly mounted actor");
+      assert.equal(request.dispatchGuard?.(), true, "Replacement reads must use a live owner lifetime");
+    }
+    directory.succeed(list([{
       id: REQUEST_B, displayName: `Synthetic operator ${epoch}`, status: "approved", acceptingRequests: true,
     }]));
-    ui.take("OperatorRequests").succeed(list([{
+    requests.succeed(list([{
       id: REQUEST_A, status: target === "withdraw" ? "requested" : "accepted",
       displayName: `Synthetic agreement ${epoch}`, clinicBrief: "Synthetic user-only 0 KZT agreement",
       pricePerArrivalMinor: "0", currency: "KZT", leadScope: "assigned",
@@ -981,11 +988,8 @@ async function clinicMutation(t: TestContext, target: ClinicMutation) {
       actorId = rawActor = nextActor;
       if (remount) epoch++;
       ui.render.update(view());
-      if (remount) await populate();
-      else {
-        await ui.render.flush();
-        if (target === "send") await prepareOffer();
-      }
+      // Owned lists re-read for the new actor even when the component instance survives.
+      await populate();
     },
   };
 }
@@ -1208,7 +1212,9 @@ for (const transition of ["actor", "workspace", "unmount"] as const) {
       if (transition === "workspace") await ui.replaceWorkspace(REQUEST_B);
       else await ui.replaceActor(REQUEST_B, transition === "unmount");
       assert.equal(ui.render.instances("ClinicOperators")[0] === owner, transition !== "unmount");
+      assert.equal(obsolete.dispatchGuard?.(), false, "A replacement cannot revive the old action's owner");
       const current = await ui.start();
+      assert.equal(current.dispatchGuard?.(), true, "The new action must own a live replacement lifetime");
       current.release();
       assert.equal(current.expectedUserId, transition === "workspace" ? ACTOR : REQUEST_B);
       const before = clinicSnapshot(ui);

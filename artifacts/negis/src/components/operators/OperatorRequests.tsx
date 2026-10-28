@@ -1,5 +1,14 @@
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
-import { Check, X, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
+import {
+  Check,
+  X,
+  RefreshCw,
+  ChevronLeft,
+  ChevronRight,
+  BookOpen,
+  ClipboardList,
+  Phone,
+} from "lucide-react";
 import { operatorApi, OperatorApiError, useOperatorList } from "@/lib/operatorApi";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { supabase } from "@/lib/supabase";
@@ -9,6 +18,7 @@ import { OperatorArrivals } from "./OperatorArrivals";
 import { OperatorCommandRecovery } from "./OperatorCommandRecovery";
 import { useOperatorCommand } from "@/lib/useOperatorCommand";
 import type { OperatorCommandAttempt } from "@/lib/operatorCommandAttempt";
+import "./OperatorRequests.css";
 import {
   formatArrivalPrice,
   operatorStatusLabels,
@@ -32,7 +42,7 @@ export function OperatorRequests({
   const path = workspaceId
     ? `clinic-operator-requests?workspaceId=${encodeURIComponent(workspaceId)}`
     : "operator-inbox";
-  const list = useOperatorList<OperatorRequest>(path, true, workspaceId ? undefined : onAccessDenied);
+  const list = useOperatorList<OperatorRequest>(path, true, workspaceId ? undefined : onAccessDenied, { actorId, isSessionCurrent });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -211,184 +221,227 @@ export function OperatorRequests({
   }
   return (
     <section
-      className="min-w-0 space-y-3"
+      className="operator-requests"
       aria-label="Предложения о сотрудничестве"
     >
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-lg font-semibold">
+      <header className="operator-requests__header">
+        <h2 className="operator-requests__title">
           {workspaceId ? "Ваши предложения" : "Предложения клиник"}
         </h2>
         <button
-          className="neu-btn"
+          className="neu-btn operator-requests__refresh"
           type="button"
           onClick={list.refresh}
           aria-label="Обновить предложения"
           title="Обновить предложения"
         >
-          <RefreshCw size={16} />
+          <RefreshCw size={16} aria-hidden="true" />
         </button>
+      </header>
+      <div className="operator-requests__recovery">
+        <OperatorCommandRecovery
+          key={`${actorId}:${path}:${command.attempt?.commandId ?? "idle"}`}
+          command={command}
+          onResolved={resolved}
+          onAccessDenied={() => void invalidateAccess()}
+        />
       </div>
-      <OperatorCommandRecovery key={`${actorId}:${path}:${command.attempt?.commandId ?? "idle"}`} command={command} onResolved={resolved} onAccessDenied={() => void invalidateAccess()} />
-      {notice && <p role="status" className="break-words text-sm">{notice}</p>}
+      {notice && (
+        <p role="status" className="operator-requests__notice">
+          {notice}
+        </p>
+      )}
       {(error || list.error) && (
-        <p role="alert" className="break-words text-sm text-red-700">
+        <p role="alert" className="operator-requests__error">
           {error || list.error}
         </p>
       )}
-      {!visibleData && !list.error && <p role="status">Загружаем предложения…</p>}
-      {visibleData?.items.length === 0 && (
-        <p className="text-sm opacity-70">Предложений пока нет.</p>
+      {!visibleData && !list.error && (
+        <p role="status" className="operator-requests__empty">
+          Загружаем предложения…
+        </p>
       )}
-      {visibleData?.items.map((item) => (
-        <article
-          key={item.id}
-          className="min-w-0 rounded-lg border p-4 space-y-3"
-          style={{ borderColor: "var(--negis-border)" }}
-        >
-          <div className="flex flex-wrap justify-between gap-2">
-            <h3 className="font-semibold break-words min-w-0">
-              {item.displayName || "Предложение о сотрудничестве"}
-            </h3>
-            <span className="text-sm opacity-70">
-              {operatorStatusLabels[item.status]}
-            </span>
+      {visibleData?.items.length === 0 && (
+        <p className="operator-requests__empty">Предложений пока нет.</p>
+      )}
+      <div className="operator-requests__list">
+        {Boolean(visibleData?.items.length) && (
+          <div className="operator-requests__columns" aria-hidden="true">
+            <span>{workspaceId ? "Оператор" : "Клиника"}</span>
+            <span>Статус</span>
+            <span>Условия</span>
+            <span>Действия</span>
           </div>
-          <p className="whitespace-pre-wrap break-words text-sm">
-            {item.clinicBrief}
-          </p>
-          <p className="font-medium">
-            {formatArrivalPrice(item.pricePerArrivalMinor, item.currency)} за
-            подтверждённый приход
-          </p>
-          <p className="text-sm">
-            Доступ: {operatorLeadScopeLabels[item.leadScope || "assigned"]}
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {item.status === "requested" && (
-              <>
-                {!workspaceId && (
+        )}
+        {visibleData?.items.map((item) => (
+          <article key={item.id} className="operator-requests__row">
+            <div className="operator-requests__company">
+              <h3 className="operator-requests__name">
+                {item.displayName || "Предложение о сотрудничестве"}
+              </h3>
+              <p className="operator-requests__brief">{item.clinicBrief}</p>
+            </div>
+            <div className="operator-requests__status">
+              <span
+                className={`operator-requests__badge operator-requests__badge--${item.status}`}
+              >
+                {operatorStatusLabels[item.status]}
+              </span>
+            </div>
+            <div className="operator-requests__terms">
+              <p className="operator-requests__price">
+                <span>
+                  {formatArrivalPrice(item.pricePerArrivalMinor, item.currency)}
+                </span>{" "}
+                за подтверждённый приход
+              </p>
+              <p className="operator-requests__scope">
+                Доступ: {operatorLeadScopeLabels[item.leadScope || "assigned"]}
+              </p>
+            </div>
+            <div className="operator-requests__actions">
+              {item.status === "requested" && (
+                <>
+                  {!workspaceId && (
+                    <button
+                      type="button"
+                      className="neu-btn-primary operator-requests__accept"
+                      disabled={busy || command.blocked}
+                      onClick={() => void change(item.id, "accept")}
+                    >
+                      <Check size={16} aria-hidden="true" />
+                      Принять условия
+                    </button>
+                  )}
                   <button
                     type="button"
-                    className="neu-btn-primary"
+                    className="neu-btn operator-requests__decline"
                     disabled={busy || command.blocked}
-                    onClick={() => void change(item.id, "accept")}
-                  >
-                    <Check size={16} />
-                    Принять условия
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="neu-btn"
-                  disabled={busy || command.blocked}
-                  onClick={() =>
-                    void change(item.id, workspaceId ? "withdraw" : "decline")
-                  }
-                >
-                  <X size={16} />
-                  {workspaceId ? "Отозвать" : "Отклонить"}
-                </button>
-              </>
-            )}
-            {item.status === "accepted" && item.id !== refusedRequestId && (
-              <>
-                {!workspaceId && (
-                  <button
-                    type="button"
-                    className="neu-btn"
-                    aria-expanded={openCatalog === item.id}
                     onClick={() =>
-                      setOpenCatalog(openCatalog === item.id ? null : item.id)
+                      void change(item.id, workspaceId ? "withdraw" : "decline")
                     }
                   >
-                    {openCatalog === item.id ? "Скрыть прайс" : "Услуги и цены"}
+                    <X size={16} aria-hidden="true" />
+                    {workspaceId ? "Отозвать" : "Отклонить"}
                   </button>
-                )}
-                <button
-                  type="button"
-                  className="neu-btn"
-                  aria-expanded={openArrivals === item.id}
-                  onClick={() =>
-                    setOpenArrivals(openArrivals === item.id ? null : item.id)
-                  }
-                >
-                  {openArrivals === item.id
-                    ? "Скрыть приходы"
-                    : workspaceId
-                      ? "Подтвердить приходы"
-                      : "Приходы и звонки"}
-                </button>
-                <button
-                  type="button"
-                  className="neu-btn"
-                  aria-expanded={openRequest === item.id}
-                  onClick={() =>
-                    setOpenRequest(openRequest === item.id ? null : item.id)
-                  }
-                >
-                  {openRequest === item.id
-                    ? "Скрыть заявки"
-                    : workspaceId && item.leadScope !== "clinic"
-                      ? "Назначить заявки"
-                      : "Открыть заявки"}
-                </button>
-                <button
-                  type="button"
-                  className="neu-btn"
-                  disabled={busy || command.blocked}
-                  onClick={() => void change(item.id, "end")}
-                >
-                  Завершить сотрудничество
-                </button>
-              </>
-            )}
-          </div>
-          {item.status === "accepted" && item.id !== refusedRequestId && openRequest === item.id && (
-            <OperatorLeads
-              key={`${item.id}:leads`}
-              actorId={actorId}
-              isSessionCurrent={isSessionCurrent}
-              requestId={item.id}
-              workspaceId={workspaceId}
-              leadScope={item.leadScope || "assigned"}
-              onAccessDenied={workspaceId ? undefined : invalidateAccess}
-            />
-          )}
-          {!workspaceId && item.status === "accepted" && item.id !== refusedRequestId && openCatalog === item.id && (
-            <OperatorServiceCatalog key={`${item.id}:catalog`} requestId={item.id} onAccessDenied={invalidateAccess} />
-          )}
-          {item.status === "accepted" && item.id !== refusedRequestId && openArrivals === item.id && (
-            <OperatorArrivals
-              key={`${item.id}:arrivals`}
-              actorId={actorId}
-              isSessionCurrent={isSessionCurrent}
-              requestId={item.id}
-              workspaceId={workspaceId}
-              onAccessDenied={workspaceId ? undefined : invalidateAccess}
-            />
-          )}
-        </article>
-      ))}
-      <div className="flex gap-2">
+                </>
+              )}
+              {item.status === "accepted" && item.id !== refusedRequestId && (
+                <>
+                  {!workspaceId && (
+                    <button
+                      type="button"
+                      className="neu-btn operator-requests__link"
+                      aria-expanded={openCatalog === item.id}
+                      onClick={() =>
+                        setOpenCatalog(openCatalog === item.id ? null : item.id)
+                      }
+                    >
+                      <BookOpen size={15} aria-hidden="true" />
+                      {openCatalog === item.id
+                        ? "Скрыть прайс"
+                        : "Услуги и цены"}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="neu-btn operator-requests__link"
+                    aria-expanded={openArrivals === item.id}
+                    onClick={() =>
+                      setOpenArrivals(openArrivals === item.id ? null : item.id)
+                    }
+                  >
+                    <Phone size={15} aria-hidden="true" />
+                    {openArrivals === item.id
+                      ? "Скрыть приходы"
+                      : workspaceId
+                        ? "Подтвердить приходы"
+                        : "Приходы и звонки"}
+                  </button>
+                  <button
+                    type="button"
+                    className="neu-btn operator-requests__link operator-requests__link--primary"
+                    aria-expanded={openRequest === item.id}
+                    onClick={() =>
+                      setOpenRequest(openRequest === item.id ? null : item.id)
+                    }
+                  >
+                    <ClipboardList size={15} aria-hidden="true" />
+                    {openRequest === item.id
+                      ? "Скрыть заявки"
+                      : workspaceId && item.leadScope !== "clinic"
+                        ? "Назначить заявки"
+                        : "Открыть заявки"}
+                  </button>
+                  <button
+                    type="button"
+                    className="neu-btn operator-requests__end"
+                    disabled={busy || command.blocked}
+                    onClick={() => void change(item.id, "end")}
+                  >
+                    Завершить сотрудничество
+                  </button>
+                </>
+              )}
+            </div>
+            <div className="operator-requests__panes">
+              {item.status === "accepted" && item.id !== refusedRequestId && openRequest === item.id && (
+                <OperatorLeads
+                  key={`${item.id}:leads`}
+                  actorId={actorId}
+                  isSessionCurrent={isSessionCurrent}
+                  requestId={item.id}
+                  workspaceId={workspaceId}
+                  leadScope={item.leadScope || "assigned"}
+                  onAccessDenied={workspaceId ? undefined : invalidateAccess}
+                />
+              )}
+              {!workspaceId && item.status === "accepted" && item.id !== refusedRequestId && openCatalog === item.id && (
+                <OperatorServiceCatalog
+                  key={`${item.id}:catalog`}
+                  actorId={actorId}
+                  isSessionCurrent={isSessionCurrent}
+                  requestId={item.id}
+                  onAccessDenied={invalidateAccess}
+                />
+              )}
+              {item.status === "accepted" && item.id !== refusedRequestId && openArrivals === item.id && (
+                <OperatorArrivals
+                  key={`${item.id}:arrivals`}
+                  actorId={actorId}
+                  isSessionCurrent={isSessionCurrent}
+                  requestId={item.id}
+                  workspaceId={workspaceId}
+                  onAccessDenied={workspaceId ? undefined : invalidateAccess}
+                />
+              )}
+            </div>
+          </article>
+        ))}
+      </div>
+      <nav
+        className="operator-requests__pagination"
+        aria-label="Страницы предложений"
+      >
         <button
           type="button"
-          className="neu-btn"
+          className="neu-btn operator-requests__page"
           onClick={list.previous}
           disabled={list.offset === 0}
         >
-          <ChevronLeft size={16} />
+          <ChevronLeft size={16} aria-hidden="true" />
           Назад
         </button>
         <button
           type="button"
-          className="neu-btn"
+          className="neu-btn operator-requests__page"
           onClick={list.next}
           disabled={!list.data?.hasMore}
         >
           Далее
-          <ChevronRight size={16} />
+          <ChevronRight size={16} aria-hidden="true" />
         </button>
-      </div>
+      </nav>
     </section>
   );
 }

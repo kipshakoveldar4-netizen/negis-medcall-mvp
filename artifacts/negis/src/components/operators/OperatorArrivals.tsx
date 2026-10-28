@@ -61,7 +61,7 @@ export function OperatorArrivals({
   const path = clinic
     ? `clinic-operator-arrivals?workspaceId=${encodeURIComponent(workspaceId!)}&requestId=${encodeURIComponent(requestId)}`
     : `operator-arrivals?requestId=${encodeURIComponent(requestId)}`;
-  const list = useOperatorList<OperatorArrival>(path, true, clinic ? undefined : onAccessDenied);
+  const list = useOperatorList<OperatorArrival>(path, true, clinic ? undefined : onAccessDenied, { actorId, isSessionCurrent });
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
   const [error, setError] = useState("");
   const mounted = useRef(false);

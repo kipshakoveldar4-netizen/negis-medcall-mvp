@@ -30,6 +30,7 @@
     "test:partner-source-postgres": "node --test ./fixtures/partner-source-postgres.test.mjs",
     "test:partner-first-paid-window": "node --test ./fixtures/partner-first-paid-window-postgres.test.mjs",
     "test:partner-company-approval": "node --test ./fixtures/partner-company-approval-postgres.test.mjs",
+    "test:portal-ui": "tsx --test ./src/medina-contributor-design-navigation.test.ts ./src/medina-partner-entry-state.test.ts ./src/medina-operator-list-original-actor.test.ts ./src/medina-content-draft-restore-isolation.test.ts",
     "test:partner-entry-http": "node --test ./fixtures/partner-entry-http.test.mjs",
     "test:partner-entry-postgres": "node --test ./fixtures/partner-entry-postgres.test.mjs",
     "test:partner-terms-http": "node --test ./fixtures/partner-terms-http.test.mjs",

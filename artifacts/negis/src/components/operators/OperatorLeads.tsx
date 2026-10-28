@@ -25,7 +25,7 @@ export function OperatorLeads({
   leadScope,
   onAccessDenied,
 }: {
-  actorId?: string;
+  actorId: string;
   isSessionCurrent?: () => boolean;
   requestId: string;
   workspaceId?: string;
@@ -96,7 +96,7 @@ function LeadList({
   canAssign,
   onAccessDenied,
 }: {
-  actorId?: string;
+  actorId: string;
   isSessionCurrent?: () => boolean;
   path: string;
   requestId: string;
@@ -104,7 +104,7 @@ function LeadList({
   canAssign: boolean;
   onAccessDenied?: () => void;
 }) {
-  const list = useOperatorList<OperatorLead, OperatorLeadList>(path, true, onAccessDenied);
+  const list = useOperatorList<OperatorLead, OperatorLeadList>(path, true, onAccessDenied, { actorId, isSessionCurrent });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");

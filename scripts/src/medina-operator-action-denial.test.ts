@@ -30,6 +30,7 @@ type Request = {
   method: string;
   signal?: AbortSignal;
   expectedUserId?: string;
+  dispatchGuard?: () => boolean;
   body?: Record<string,string>;
   claimed: boolean;
   settled: boolean;
@@ -238,9 +239,12 @@ async function fixture(t: TestContext, kind: Kind) {
   const requests: Request[] = [];
   let sessionActor = ACTION_ACTOR;
   let sessionRevision = 0;
-  const isSessionCurrent = () => sessionActor === ACTION_ACTOR && sessionRevision === 0;
-  let props: Props = kind === "requests" ? { actorId: ACTION_ACTOR }
-    : { actorId: ACTION_ACTOR, requestId: "synthetic-request-A", ...(kind === "confirm" ? { workspaceId: "synthetic-workspace-A", isSessionCurrent } : {}) };
+  function ownerProps(actorId: string) {
+    const revision = sessionRevision;
+    return { actorId, isSessionCurrent: () => sessionActor === actorId && sessionRevision === revision };
+  }
+  let props: Props = kind === "requests" ? ownerProps(ACTION_ACTOR)
+    : { ...ownerProps(ACTION_ACTOR), requestId: "synthetic-request-A", ...(kind === "confirm" ? { workspaceId: "synthetic-workspace-A" } : {}) };
   const storage=new Map<string,string>();
   const globals = {
     Error, AbortController, crypto:{randomUUID},
@@ -264,7 +268,7 @@ async function fixture(t: TestContext, kind: Kind) {
     if (name === "@/lib/api") return {
       CrmApiError: SyntheticCrmApiError,
       crmErrorMessage: (status: number) => `Synthetic CRM error ${status}`,
-      crmFetch(url: string, init: RequestInit & { expectedUserId?: string }) {
+      crmFetch(url: string, init: RequestInit & { expectedUserId?: string; dispatchGuard?: () => boolean }) {
         assert.equal(init.cache, "no-store");
         let resolve!: (response: unknown) => void;
         let reject!: (error: Error) => void;
@@ -279,7 +283,7 @@ async function fixture(t: TestContext, kind: Kind) {
         };
         const request: Request = {
           url, method: init.method ?? "GET", signal: init.signal ?? undefined,
-          expectedUserId: init.expectedUserId, claimed: false, settled: false,
+          expectedUserId: init.expectedUserId, dispatchGuard: init.dispatchGuard, claimed: false, settled: false,
           body:init.body?JSON.parse(String(init.body)):undefined,
           succeed(data) {
             if(data===undefined&&request.body?.commandId){const b=request.body,action=b.commandAction??b.action;
@@ -309,6 +313,7 @@ async function fixture(t: TestContext, kind: Kind) {
       if (name === "react") return { ...driver.hooks, useLayoutEffect: driver.hooks.useEffect };
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: Symbol("Fragment") };
       if (name === "lucide-react") return icons;
+      if (name === "./OperatorRequests.css") return {};
       if (name === "@/lib/operatorApi") return api;
       if (name === "@/lib/useOperatorCommand") return commandHook;
       if (name === "./OperatorCommandRecovery") return {OperatorCommandRecovery:RecoveryBoundary};
@@ -411,7 +416,10 @@ async function fixture(t: TestContext, kind: Kind) {
       driver.invalidate();
     },
     changeActor() {
-      props = { ...props, actorId: ACTION_OTHER };
+      // A replacement owner gets a new lifetime; old callbacks keep the retired revision.
+      sessionRevision++;
+      sessionActor = ACTION_OTHER;
+      props = { ...props, ...ownerProps(ACTION_OTHER) };
       driver.invalidate();
     },
     changeSessionActor(actorId: string) {
@@ -533,14 +541,19 @@ for (const kind of kinds) {
     const obsolete = await ui.startAction();
     ui.changeActor();
     ui.renderBeforeEffects();
+    hidden(ui.snapshot());
+    assert.equal(obsolete.dispatchGuard?.(), false, "The original actor's action must remain expired");
     await ui.flush();
-    ui.refresh();
-    await ui.flush();
-    ui.take("GET").succeed(dto(kind, "new-actor"));
+    const replacement = ui.take("GET");
+    assert.equal(replacement.url, ui.requests[0].url, "Actor replacement must keep the same list path");
+    assert.equal(replacement.expectedUserId, ACTION_OTHER);
+    assert.equal(replacement.dispatchGuard?.(), true, "The replacement list needs its own live actor lifetime");
+    replacement.succeed(dto(kind, "new-actor"));
     await ui.flush();
     ui.openNested();
     await ui.flush();
     const current = await ui.startAction();
+    assert.equal(current.dispatchGuard?.(), true);
     const before = ui.snapshot();
     const count = ui.requests.length;
     obsolete.fail(403);

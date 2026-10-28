@@ -20,6 +20,9 @@ export function ClinicOperators({ workspaceId, actorId, isSessionCurrent }: {
 }) {
   const list = useOperatorList<OperatorProfile>(
     `operator-directory?workspaceId=${encodeURIComponent(workspaceId)}`,
+    true,
+    undefined,
+    { actorId, isSessionCurrent },
   );
   const [selected, setSelected] = useState<OperatorProfile | null>(null);
   const [brief, setBrief] = useState("");

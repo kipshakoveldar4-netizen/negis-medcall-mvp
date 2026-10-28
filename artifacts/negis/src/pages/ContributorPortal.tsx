@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Link } from "wouter";
-import { ArrowRight, ExternalLink, LogOut, RefreshCw, Send, Users, Video } from "lucide-react";
+import { ArrowRight, ClipboardList, ExternalLink, FileText, Home, Image, RefreshCw, Send, UserRound, Users, Video } from "lucide-react";
+import { PortalShell } from "@/components/portals/PortalShell";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { operatorApi } from "@/lib/operatorApi";
 import { validatePasswordRules } from "../../../../lib/auth/password-rules";
@@ -24,18 +25,11 @@ export default function ContributorPortal() {
     void supabase.auth.getSession().then(({ data, error }) => { if (!observed) apply(error ? null : data.session?.user.id ?? null); }, () => { if (!observed) apply(null); });
     return () => { alive = false; live.current = { id: null, epoch: live.current.epoch + 1 }; data.subscription.unsubscribe(); };
   }, []);
-  return <main className="min-h-screen px-4 py-8" style={{ background: "var(--negis-bg)", color: "var(--negis-text)" }}>
-    <div className="mx-auto max-w-3xl min-w-0 space-y-6">
-      <header className="flex flex-wrap items-start justify-between gap-3 border-b pb-5">
-        <div><Link href="/" className="text-sm font-medium">Medina OS</Link><h1 className="mt-2 text-2xl font-semibold">Кабинет блогера</h1><p className="mt-1 text-sm text-muted-foreground">Партнёрство и создание контента</p></div>
-        {session?.id && <button className="neu-btn" type="button" onClick={() => void supabase.auth.signOut()}><LogOut size={16} />Выйти</button>}
-      </header>
-      {!session ? <p role="status">Проверяем вход…</p> : session.id
-        ? <Application key={session.epoch} userId={session.id} isActorCurrent={() => live.current === session} />
-        : <ContributorLogin key={session.epoch} isCurrent={() => live.current === session} />}
-      <footer className="flex flex-wrap gap-5 border-t pt-5 text-sm"><Link href="/operator" className="inline-flex items-center gap-2">Кабинет оператора <ArrowRight size={14} /></Link><Link href="/login">Вход для команды компании</Link><Link href="/privacy">Конфиденциальность</Link><Link href="/terms">Условия</Link></footer>
-    </div>
-  </main>;
+  if (session?.id) return <Application key={session.epoch} userId={session.id} isActorCurrent={() => live.current === session} />;
+  return <PortalShell title="Кабинет блогера" homeHref="/contributors" roleLabel="Партнёрам и авторам" activeId="entry" onNavigate={() => {}}
+    items={[{ id: "entry", label: "Вход в кабинет", icon: UserRound }, { id: "operator", label: "Кабинет оператора", icon: ClipboardList, href: "/operator" }, { id: "team", label: "Вход для команды", icon: Users, href: "/login" }]}>
+    <div className="portal-form-layout">{!session ? <p role="status">Проверяем вход…</p> : <ContributorLogin key={session.epoch} isCurrent={() => live.current === session} />}</div>
+  </PortalShell>;
 }
 
 function ContributorLogin({ isCurrent }: { isCurrent: () => boolean }) {
@@ -90,6 +84,8 @@ function Application({ userId, isActorCurrent }: { userId: string; isActorCurren
   const [revision, setRevision] = useState(0);
   const [partnerLedgerRevision, setPartnerLedgerRevision] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [selectedMode, setSelectedMode] = useState<"partner" | "creator" | null>(null);
+  const [section, setSection] = useState("overview");
   const generation = useRef(0);
   const mounted = useRef(true);
   const mutation = useRef<AbortController | null>(null);
@@ -148,31 +144,51 @@ function Application({ userId, isActorCurrent }: { userId: string; isActorCurren
     finally { if (mutation.current === controller) { mutation.current = null; if (current()) { setBusy(false); if (generation.current !== epoch) refresh(); } } }
   }
   const missingRole = profile && (profile.partnerStatus === null || profile.creatorStatus === null);
-  return <>
-    <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="min-w-0 max-w-full break-words text-lg font-semibold">{profile ? profile.displayName : "Заявка на участие"}</h2><button type="button" className="neu-btn" aria-label="Обновить профиль" title="Обновить профиль" disabled={busy} onClick={refresh}><RefreshCw size={16} /></button></div>
+  const activeMode = selectedMode ?? (profile?.partnerStatus ? "partner" : "creator");
+  const isProfile = section === "profile" || !profile;
+  const roleStatus = activeMode === "partner" ? profile?.partnerStatus : profile?.creatorStatus;
+  const title = isProfile ? "Мой профиль" : section === "portfolio" ? "Моё портфолио" : section === "terms" ? "Условия партнёрства" : activeMode === "partner" ? "Партнёрский кабинет" : "Мои задания";
+  return <PortalShell title={title} homeHref="/contributors" roleLabel={activeMode === "partner" ? "Кабинет партнёра" : "Кабинет автора"} displayName={profile?.displayName}
+    onSignOut={() => void supabase.auth.signOut()} activeId={section} onNavigate={setSection}
+    items={[
+      { id: "overview", label: activeMode === "partner" ? "Обзор" : "Мои задания", icon: activeMode === "partner" ? Home : ClipboardList },
+      ...(activeMode === "partner" ? [{ id: "terms", label: "Код и условия", icon: FileText }] : [{ id: "portfolio", label: "Портфолио", icon: Image }]),
+      { id: "profile", label: "Профиль", icon: UserRound },
+      { id: "operator", label: "Кабинет оператора", icon: ClipboardList, href: "/operator" },
+    ]} actions={<button type="button" className="neu-btn" aria-label="Обновить профиль" title="Обновить профиль" disabled={busy} onClick={refresh}><RefreshCw size={16}/></button>}>
+    <div className="portal-mode-tabs" role="group" aria-label="Направление работы">
+      <button type="button" aria-pressed={activeMode === "partner"} onClick={() => { setSelectedMode("partner"); setSection("overview"); }}><Users size={18}/>Партнёр</button>
+      <button type="button" aria-pressed={activeMode === "creator"} onClick={() => { setSelectedMode("creator"); setSection("overview"); }}><Video size={18}/>Автор контента</button>
+    </div>
+    <div className="portal-view min-w-0 space-y-6" key={`${activeMode}:${section}`}>
     {error && <p role="alert" className="text-sm break-words">{error}</p>}
     {!loaded && !error && <p role="status">Загружаем профиль…</p>}
     {loaded && profile && <>
-      <div className="grid gap-3 sm:grid-cols-2">{(["partner", "creator"] as const).map(role => {
+      {isProfile && <><div className="portal-section-heading"><h2>{profile.displayName}</h2></div><div className="grid gap-3 sm:grid-cols-2">{(["partner", "creator"] as const).map(role => {
         const status = role === "partner" ? profile.partnerStatus : profile.creatorStatus;
         const Icon = role === "partner" ? Users : Video;
         return <article key={role} className="min-w-0 rounded-lg border p-4"><div className="flex items-center gap-2 font-medium"><Icon size={18} />{role === "partner" ? "Партнёр" : "Автор контента"}</div><p className="mt-3 text-sm">{status ? contributorStatusLabels[status] : "Заявка не подана"}</p></article>;
-      })}</div>
-      {profile.partnerStatus === "approved" && <><PartnerTerms actorId={userId} profileId={profile.id} side="partner" isSessionCurrent={current}
+      })}</div></>}
+      {!isProfile && activeMode === "partner" && profile.partnerStatus === "approved" && <>
+        {section === "terms" && <PartnerTerms actorId={userId} profileId={profile.id} side="partner" isSessionCurrent={current}
         onResolved={() => { if (current()) setPartnerLedgerRevision(n => n + 1); }}
         onAccessDenied={() => denyAccess("Доступ партнёра изменился. Обновите профиль.")}
         request={options => {
           const query = options.method === "GET" ? "?" + new URLSearchParams({ profileId: profile.id, ...(options.requestId ? { requestId: options.requestId } : {}) }) : "";
           return operatorApi<unknown>("partner-terms" + query, options.body, options.method, options.signal, userId, () => current() && options.isCurrent());
-        }} />
-        <PartnerLedger key={partnerLedgerRevision} userId={userId} isActorCurrent={current} onAccessDenied={() => denyAccess("Доступ партнёра изменился. Обновите профиль.")} /></>}
-      {profile.creatorStatus === "approved" && <CreatorJobs actorId={userId} isSessionCurrent={current} onAccessDenied={() => denyAccess("Доступ автора изменился. Обновите профиль.")} />}
-      {profile.portfolioUrls.length > 0 && <section className="space-y-3"><h3 className="font-medium">Портфолио</h3>{profile.portfolioUrls.map(url => <a className="flex min-w-0 items-start gap-2 text-sm" key={url} href={url} rel="noopener noreferrer" target="_blank"><ExternalLink className="shrink-0" size={16} /><span className="break-all">{url}</span></a>)}</section>}
+        }} />}
+        {section === "overview" && <><PartnerLedger key={partnerLedgerRevision} userId={userId} isActorCurrent={current} onAccessDenied={() => denyAccess("Доступ партнёра изменился. Обновите профиль.")} />
+          <div className="portal-profile-summary"><div><h2 className="font-medium">Партнёрская программа</h2><p className="portal-note">{contributorStatusLabels[profile.partnerStatus]}</p></div><button type="button" className="neu-btn" onClick={() => setSection("terms")}><FileText size={16}/>Код и условия<ArrowRight size={16}/></button></div></>}
+      </>}
+      {!isProfile && activeMode === "creator" && section === "overview" && profile.creatorStatus === "approved" && <CreatorJobs actorId={userId} isSessionCurrent={current} onAccessDenied={() => denyAccess("Доступ автора изменился. Обновите профиль.")} />}
+      {!isProfile && roleStatus !== "approved" && <section className="space-y-4"><h2 className="text-lg font-medium">{activeMode === "partner" ? "Партнёрство" : "Создание контента"}</h2><p role="status">{roleStatus ? contributorStatusLabels[roleStatus] : "Заявка на это направление не подана"}</p><button type="button" className="neu-btn" onClick={() => setSection("profile")}><UserRound size={16}/>Мой профиль</button></section>}
+      {(isProfile || section === "portfolio") && <section className="space-y-3"><h3 className="font-medium">Портфолио</h3>{profile.portfolioUrls.length === 0 ? <p className="text-sm text-muted-foreground">Ссылки пока не добавлены.</p> : profile.portfolioUrls.map(url => <a className="flex min-w-0 items-start gap-2 text-sm" key={url} href={url} rel="noopener noreferrer" target="_blank"><ExternalLink className="shrink-0" size={16} /><span className="break-all">{url}</span></a>)}</section>}
     </>}
-    {loaded && (!profile || missingRole) && <form onSubmit={event => void submit(event)} className="space-y-5 border-t pt-5">
+    {loaded && isProfile && (!profile || missingRole) && <form onSubmit={event => void submit(event)} className="portal-form-layout space-y-5 border-t pt-5">
       {!profile && <><label className="block text-sm">Имя<input className="neu-input mt-2 w-full" required maxLength={120} value={name} disabled={busy} onChange={e => setName(e.target.value)} /></label><label className="block text-sm">Ссылки на портфолио<textarea className="neu-input mt-2 w-full" rows={3} maxLength={2504} placeholder="https://…" value={urls} disabled={busy} onChange={e => setUrls(e.target.value)} /></label></>}
       <fieldset className="space-y-3" disabled={busy}><legend className="mb-3 font-medium">Направления</legend>{(!profile || profile.partnerStatus === null) && <label className="flex items-center gap-3 text-sm"><input type="checkbox" checked={partner} onChange={e => setPartner(e.target.checked)} />Привлекать компании как партнёр</label>}{(!profile || profile.creatorStatus === null) && <label className="flex items-center gap-3 text-sm"><input type="checkbox" checked={creator} onChange={e => setCreator(e.target.checked)} />Создавать контент</label>}</fieldset>
       <button type="submit" className="neu-btn neu-btn-primary" disabled={busy}><Send size={16} />{busy ? "Отправляем…" : profile ? "Добавить направление" : "Подать заявку"}</button>
     </form>}
-  </>;
+    </div>
+  </PortalShell>;
 }

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Link } from "wouter";
-import { LogOut, RefreshCw, Send } from "lucide-react";
+import { ClipboardList, FileText, RefreshCw, Send, UserRound, Users } from "lucide-react";
+import { PortalShell } from "@/components/portals/PortalShell";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { operatorApi } from "@/lib/operatorApi";
 import { OperatorRequests } from "@/components/operators/OperatorRequests";
+import { OperatorWorkday } from "@/components/operators/OperatorWorkday";
 import {
   operatorStatusLabels,
   type OperatorProfile,
@@ -26,6 +28,7 @@ export default function OperatorPortal() {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [section, setSection] = useState("work");
   const currentUserId = useRef<string | null>(null);
   const profileEpoch = useRef(0);
   const profileMutation = useRef<AbortController | null>(null);
@@ -55,6 +58,7 @@ export default function OperatorPortal() {
         setLoaded(false);
         setBusy(false);
         setMessage("");
+        setSection("work");
       }
       setUserId(id);
       setReady(true);
@@ -92,6 +96,7 @@ export default function OperatorPortal() {
       "GET",
       controller.signal,
       userId,
+      isCurrent,
     )
       .then((value) => {
         if (isCurrent()) {
@@ -222,29 +227,17 @@ export default function OperatorPortal() {
   const isProfileSessionCurrent = () => currentUserId.current === userId
     && profileEpoch.current === renderedProfileEpoch;
   return (
-    <main
-      className="min-h-screen px-4 py-8"
-      style={{ background: "var(--negis-bg)", color: "var(--negis-text)" }}
-    >
-      <div className="mx-auto max-w-2xl min-w-0 space-y-6">
-        <header className="flex flex-wrap justify-between gap-3">
-          <div>
-            <Link href="/" className="text-sm font-medium">
-              Medina OS
-            </Link>
-            <h1 className="mt-2 text-2xl font-semibold">Кабинет оператора</h1>
-          </div>
-          {userId && (
-            <button
-              type="button"
-              className="neu-btn self-start"
-              onClick={() => void supabase.auth.signOut()}
-            >
-              <LogOut size={16} />
-              Выйти
-            </button>
-          )}
-        </header>
+    <PortalShell homeHref="/operator" title={section === "profile" ? "Мой профиль" : section === "terms" ? "Условия работы" : "Мой рабочий день"}
+      roleLabel="Кабинет оператора" displayName={profile?.displayName}
+      activeId={section} onNavigate={setSection} onSignOut={userId ? () => void supabase.auth.signOut() : undefined}
+      items={[
+        { id: "work", label: "Мои заявки", icon: ClipboardList },
+        { id: "cooperations", label: "Сотрудничество", icon: Users },
+        { id: "profile", label: "Профиль", icon: UserRound },
+        { id: "terms", label: "Условия", icon: FileText },
+        { id: "contributors", label: "Блогерам и партнёрам", icon: Users, href: "/contributors" },
+      ]}>
+      <div className={`portal-view min-w-0 space-y-6 ${!userId || !profile ? "portal-form-layout" : ""}`} key={section}>
         {!ready && <p role="status">Проверяем вход…</p>}
         {ready && !userId && (
           <form className="space-y-4" onSubmit={authenticate}>
@@ -346,10 +339,10 @@ export default function OperatorPortal() {
             </button>
           </form>
         )}
-        {userId && profile && (
-          <section className="space-y-3 border-y py-4">
-            <h2 className="font-semibold break-words">{profile.displayName}</h2>
-            <p>{operatorStatusLabels[profile.status]}</p>
+        {userId && profile && (section === "profile" || profile.status !== "approved") && section !== "terms" && (
+          <section className="portal-profile-summary">
+            <div><h2 className="font-medium break-words">{profile.displayName}</h2>
+            <p className="portal-status mt-2">{operatorStatusLabels[profile.status]}</p></div>
             {profile.status === "approved" && (
               <label className="flex items-center gap-3">
                 <input
@@ -373,27 +366,29 @@ export default function OperatorPortal() {
             )}
           </section>
         )}
-        {userId && profile?.status === "approved" && (
+        {userId && profile?.status === "approved" && (section === "work" || section === "cooperations") && (
           <>
-            <p className="text-sm opacity-70">
+            {section === "cooperations" && <p className="portal-note">
               Оплата согласуется с клиникой напрямую. Подтверждение
               сотрудничества открывает только согласованный список заявок.
               Медицинская история и реклама недоступны.
-            </p>
-            <OperatorRequests
+            </p>}
+            {section === "work" ? <OperatorWorkday key={`${userId}:${revision}`} actorId={userId} isSessionCurrent={isProfileSessionCurrent}
+              onAccessDenied={refreshProfile} onCooperations={() => setSection("cooperations")}/> : <OperatorRequests
               key={`${userId}:${revision}`}
               actorId={userId}
               isSessionCurrent={isProfileSessionCurrent}
               onAccessDenied={refreshProfile}
-            />
+            />}
           </>
         )}
-        <footer className="flex flex-wrap gap-4 text-sm opacity-70">
-          <Link href="/contributors">Блогерам и партнёрам</Link>
-          <Link href="/privacy">Конфиденциальность</Link>
-          <Link href="/terms">Условия</Link>
-        </footer>
+        {section === "terms" && <section className="space-y-5 max-w-2xl">
+          <h2 className="text-xl font-medium">Сотрудничество с компаниями</h2>
+          <p>Стоимость работы и условия подтверждаются отдельно с каждой компанией. Доступ открывается только к согласованным заявкам и может быть отозван.</p>
+          <p className="text-sm text-muted-foreground">Медицинская история, управление рекламой и данные других компаний недоступны.</p>
+          <div className="flex flex-wrap gap-3"><Link className="neu-btn" href="/terms"><FileText size={16}/>Условия платформы</Link><Link className="neu-btn" href="/privacy">Конфиденциальность</Link></div>
+        </section>}
       </div>
-    </main>
+    </PortalShell>
   );
 }

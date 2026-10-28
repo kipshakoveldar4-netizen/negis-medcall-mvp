@@ -1,11 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Ban, Check, ChevronLeft, ChevronRight, ExternalLink, Plus, RefreshCw, Send, X } from "lucide-react";
+import { ArrowRight, BadgeCheck, Ban, CalendarDays, Check, CheckCircle2, ChevronLeft, ChevronRight, Coins, ExternalLink, FileText, MessageSquare, Plus, RefreshCw, Search, Send, Timer, Upload, UserRound, X } from "lucide-react";
 import { operatorApi } from "@/lib/operatorApi";
 import { useCreatorCommand, type CreatorCommandController } from "@/lib/useCreatorCommand";
 import { creatorDueAt, creatorFeeToMinor, type CreatorCommandAttempt, type CreatorWrite } from "@/lib/creatorCommandAttempt";
 import { formatArrivalPrice } from "../../../../../lib/crm/operator-contracts";
 import { CREATOR_JOB_PAGE_SIZE, parseCreatorDirectory, parseCreatorJobAction, parseCreatorJobDetail, parseCreatorJobPage, parseCreatorJobTerms,
   type CreatorDirectoryEntry, type CreatorJob, type CreatorJobAction, type CreatorJobDetail, type CreatorJobState } from "../../../../../lib/crm/creator-job-contracts";
+import "./CreatorJobs.css";
 
 const labels: Record<CreatorJobState, string> = { offered: "Предложено", in_progress: "В работе", submitted: "На проверке",
   changes_requested: "Нужна доработка", approved: "Принято", declined: "Отклонено", cancelled: "Отменено" };
@@ -15,6 +16,11 @@ const money = (job: Pick<CreatorJob, "feeMinor" | "currency">) => ["KZT", "USD",
   ? formatArrivalPrice(job.feeMinor, job.currency) : `${BigInt(job.feeMinor).toLocaleString("ru-RU")} ${job.currency} (мин. ед.)`;
 const date = (value: string) => new Date(value).toLocaleString("ru-RU", { dateStyle: "medium", timeStyle: "short" });
 const zone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+const illustrations = [
+  { src: "/images/contributors/filming.webp", alt: "Иллюстрация: съёмка контента" },
+  { src: "/images/contributors/interior.webp", alt: "Иллюстрация: интерьер" },
+  { src: "/images/contributors/photography.webp", alt: "Иллюстрация: предметная съёмка" },
+];
 
 function useFormFrame(values: unknown[]) {
   const [, repaint] = useState(0);
@@ -56,7 +62,7 @@ function useCreatorRead<T>(path: string | null, parse: (value: unknown) => T | n
 
 function Pages({ offset, hasMore, disabled, onChange, label }: { offset: number; hasMore: boolean; disabled: boolean;
   onChange: (offset: number) => void; label: string }) {
-  return <nav aria-label={label} className="flex items-center gap-3">
+  return <nav aria-label={label} className="creator-pagination flex items-center gap-3">
     <button className="neu-btn" type="button" title="Предыдущая страница" aria-label={`${label}: назад`} disabled={disabled || offset === 0} onClick={() => onChange(Math.max(0, offset - CREATOR_JOB_PAGE_SIZE))}><ChevronLeft size={16}/></button>
     <span className="text-xs tabular-nums">{Math.floor(offset / CREATOR_JOB_PAGE_SIZE) + 1}</span>
     <button className="neu-btn" type="button" title="Следующая страница" aria-label={`${label}: далее`} disabled={disabled || !hasMore || offset >= 1000000} onClick={() => onChange(offset + CREATOR_JOB_PAGE_SIZE)}><ChevronRight size={16}/></button>
@@ -74,6 +80,7 @@ function CreatorJobsSession({ actorId, workspaceId, isSessionCurrent, onAccessDe
   const [denied, setDenied] = useState(false), [revision, setRevision] = useState(0);
   const [offset, setOffset] = useState(0), [directoryOffset, setDirectoryOffset] = useState(0);
   const [selected, setSelected] = useState<string | null>(null), [creating, setCreating] = useState(false);
+  const [search, setSearch] = useState(""), [status, setStatus] = useState<CreatorJobState | "all">("all");
   const [message, setMessage] = useState(""), [busy, setBusy] = useState(false);
   const pending = useRef<{ controller: AbortController } | null>(null);
   const company = workspaceId !== undefined;
@@ -127,10 +134,13 @@ function CreatorJobsSession({ actorId, workspaceId, isSessionCurrent, onAccessDe
     try { const attempt = command.claim(write); if (attempt) void dispatch(attempt, "send"); }
     catch (error) { if (command.isCurrent()) setMessage(error instanceof Error ? error.message : "Проверьте действие."); }
   }
-  if (denied || command.lifetime.expired) return <section aria-label="Задания авторов"><p role="alert">Доступ к заданиям изменился. Обновите страницу после проверки прав.</p></section>;
-  if (!command.isCurrent()) return <p role="status">Проверяем доступ к заданиям…</p>;
-  return <section aria-label="Задания авторов" className="min-w-0 space-y-5 border-t pt-5">
-    <header className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-lg font-semibold">Задания на контент</h2><p className="mt-1 text-xs text-muted-foreground">Время: {zone()}</p></div><div className="flex flex-wrap gap-2">
+  const query = search.trim().toLocaleLowerCase("ru-RU");
+  const visibleJobs = list?.data?.items.filter(job => (status === "all" || job.state === status)
+    && [job.title, job.brief, ...(company ? [job.creatorName] : [])].some(value => value.toLocaleLowerCase("ru-RU").includes(query))) ?? [];
+  if (denied || command.lifetime.expired) return <section aria-label="Задания авторов" className="creator-workspace"><p role="alert">Доступ к заданиям изменился. Обновите страницу после проверки прав.</p></section>;
+  if (!command.isCurrent()) return <p role="status" className="creator-workspace">Проверяем доступ к заданиям…</p>;
+  return <section aria-label="Задания авторов" className={`creator-workspace${company ? " creator-workspace--company" : ""}`}>
+    <header className="creator-workspace__header"><div><h2>{company ? "Задания на контент" : "Мои задания"}</h2><p className="creator-workspace__context">Страница {Math.floor(offset / CREATOR_JOB_PAGE_SIZE) + 1}<span aria-hidden="true"> · </span>Время: {zone()}</p></div><div className="creator-workspace__actions">
       {company && <button type="button" className="neu-btn neu-btn-primary" disabled={busy || command.blocked} onClick={() => { setCreating(value => !value); setMessage(""); }}><Plus size={16}/>{creating ? "Свернуть форму" : "Новое задание"}</button>}
       <button type="button" className="neu-btn" title="Обновить задания" aria-label="Обновить задания" onClick={refresh}><RefreshCw size={16}/></button>
     </div></header>
@@ -144,11 +154,53 @@ function CreatorJobsSession({ actorId, workspaceId, isSessionCurrent, onAccessDe
     {list?.error && <p role="alert" className="break-words text-sm">{list.error}</p>}
     {!list && <p role="status" className="text-sm text-muted-foreground">Загружаем задания…</p>}
     {list?.data && <>
-      {list.data.items.length === 0 ? <p role="status" className="py-5 text-sm text-muted-foreground">На этой странице заданий пока нет.</p> : <div className="divide-y border-y">{list.data.items.map(job => <button type="button" key={job.id}
-        className={`grid w-full min-w-0 grid-cols-[1fr_auto] items-center gap-3 px-2 py-4 text-left ${selected === job.id ? "bg-[var(--negis-surface-2)]" : "hover:bg-[var(--negis-surface-2)]"}`}
-        aria-pressed={selected === job.id} aria-label={`Открыть задание: ${job.title}`} onClick={() => { if (command.isCurrent()) { setSelected(job.id); setCreating(false); } }}>
-        <span className="min-w-0 space-y-2"><span className="block break-words font-medium [overflow-wrap:anywhere]">{job.title}</span><span className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted-foreground"><span>{labels[job.state]}</span><span>{company ? job.creatorName : money(job)}</span><span>{date(job.dueAt)}</span></span></span><ArrowRight size={16} className="shrink-0"/>
-      </button>)}</div>}
+      <section aria-label="Статусы заданий на текущей странице" className="creator-workspace__summary">
+        <h3 className="creator-workspace__section-label">На текущей странице</h3>
+        <dl className="creator-workspace__metrics">
+          <div><FileText size={24} aria-hidden="true"/><dt>Предложено</dt><dd>{list.data.items.filter(job => job.state === "offered").length}</dd></div>
+          <div><Timer size={24} aria-hidden="true"/><dt>В работе</dt><dd>{list.data.items.filter(job => job.state === "in_progress").length}</dd></div>
+          <div><BadgeCheck size={24} aria-hidden="true"/><dt>На проверке</dt><dd>{list.data.items.filter(job => job.state === "submitted").length}</dd></div>
+        </dl>
+      </section>
+      <div className="creator-workspace__filters">
+        <label className="creator-workspace__search"><Search size={20} aria-hidden="true"/>
+          <span className="creator-workspace__sr-only">{company ? "Поиск по названию, брифу и автору на текущей странице" : "Поиск по названию и брифу на текущей странице"}</span>
+          <input type="search" value={search} maxLength={200} placeholder={company ? "Название, бриф или автор" : "Название или бриф"} onChange={event => setSearch(event.target.value)}/>
+        </label>
+        <fieldset className="creator-workspace__status-filter">
+          <legend className="creator-workspace__section-label">Статус на текущей странице</legend>
+          <select className="creator-workspace__status-select neu-input" aria-label="Статус заданий на текущей странице" value={status}
+            onChange={event => setStatus(event.target.value as CreatorJobState | "all")}>
+            {(["all", ...Object.keys(labels)] as (CreatorJobState | "all")[]).map(value => <option key={value} value={value}>{value === "all" ? "Все задания" : labels[value]}</option>)}
+          </select>
+          <div className="creator-workspace__status-options">{(["all", ...Object.keys(labels)] as (CreatorJobState | "all")[]).map(value => <button key={value} type="button"
+            aria-pressed={status === value} onClick={() => setStatus(value)}>{value === "all" ? "Все задания" : labels[value]}</button>)}</div>
+        </fieldset>
+      </div>
+      <p role="status" className="creator-workspace__result-count">Показано {visibleJobs.length} из {list.data.items.length} на текущей странице</p>
+      {list.data.items.length === 0 ? <p role="status" className="creator-workspace__empty">На этой странице заданий пока нет.</p>
+        : visibleJobs.length === 0 ? <div className="creator-workspace__empty"><p role="status">На текущей странице нет заданий по выбранным условиям.</p>
+          <button type="button" className="neu-btn" onClick={() => { setSearch(""); setStatus("all"); }}><X size={16} aria-hidden="true"/>Сбросить фильтры</button></div>
+        : <ul className="creator-workspace__jobs">{visibleJobs.map(job => {
+          const illustration = illustrations[Number.parseInt(job.id.replaceAll("-", "").slice(-8), 16) % illustrations.length];
+          return <li key={job.id} className={`creator-job${company ? "" : " creator-job--illustrated"}`} data-selected={selected === job.id}>
+          {!company && <figure className="creator-job__illustration"><img src={illustration.src} alt={illustration.alt} width={220} height={124} loading="lazy" decoding="async"/></figure>}
+          <div className="creator-job__content">
+            <div className="creator-job__heading"><h3>{job.title}</h3><span className="creator-job__status" data-state={job.state}>{labels[job.state]}</span></div>
+            {company && <p className="creator-job__creator"><UserRound size={16} aria-hidden="true"/><span><span className="creator-workspace__sr-only">Автор: </span>{job.creatorName}</span></p>}
+            <p className="creator-job__brief">{job.brief}</p>
+            <dl className="creator-job__terms">
+              <div><dt><CalendarDays size={17} aria-hidden="true"/>Срок</dt><dd><time dateTime={job.dueAt}>{date(job.dueAt)}</time></dd></div>
+              <div><dt><Coins size={17} aria-hidden="true"/>Вознаграждение</dt><dd className="creator-job__fee">{money(job)}</dd></div>
+            </dl>
+            {job.state === "changes_requested" && job.feedback ? <p className="creator-job__note"><MessageSquare size={16} aria-hidden="true"/>Есть запрос доработки</p>
+              : job.approvedAt ? <p className="creator-job__note"><CheckCircle2 size={16} aria-hidden="true"/>Результат принят</p>
+              : job.latestSubmission ? <p className="creator-job__note"><Upload size={16} aria-hidden="true"/>Версия {job.latestSubmission.sequence} отправлена</p>
+              : job.acceptedAt ? <p className="creator-job__note"><CheckCircle2 size={16} aria-hidden="true"/>Условия приняты</p> : null}
+          </div>
+          <button type="button" className="creator-job__open" aria-pressed={selected === job.id} aria-label={`Открыть задание: ${job.title}`}
+            onClick={() => { if (command.isCurrent()) { setSelected(job.id); setCreating(false); } }}>Открыть задание<ArrowRight size={18} aria-hidden="true"/></button>
+        </li>; })}</ul>}
       <Pages label="Страницы заданий" offset={offset} hasMore={list.data.hasMore} disabled={false} onChange={setOffset}/>
     </>}
     {selected && <JobPanel key={selected} jobId={selected} actorId={actorId} workspaceId={workspaceId} command={command} revision={revision}

@@ -45,10 +45,14 @@ export function OperatorCatalogPagination({
 }
 
 function Services({
+  actorId,
+  isSessionCurrent,
   requestId,
   doctorId,
   onAccessDenied,
 }: {
+  actorId: string;
+  isSessionCurrent?: () => boolean;
   requestId: string;
   doctorId: string;
   onAccessDenied?: () => void;
@@ -57,6 +61,7 @@ function Services({
     `operator-services?requestId=${encodeURIComponent(requestId)}&doctorId=${encodeURIComponent(doctorId)}`,
     true,
     onAccessDenied,
+    { actorId, isSessionCurrent },
   );
   useEffect(() => {
     window.addEventListener("focus", list.refresh);
@@ -99,11 +104,17 @@ function Services({
   );
 }
 
-export function OperatorServiceCatalog({ requestId, onAccessDenied }: { requestId: string; onAccessDenied?: () => void }) {
+export function OperatorServiceCatalog({ actorId, isSessionCurrent, requestId, onAccessDenied }: {
+  actorId: string;
+  isSessionCurrent?: () => boolean;
+  requestId: string;
+  onAccessDenied?: () => void;
+}) {
   const list = useOperatorList<OperatorDoctor>(
     `operator-services?requestId=${encodeURIComponent(requestId)}`,
     true,
     onAccessDenied,
+    { actorId, isSessionCurrent },
   );
   const [doctorId, setDoctorId] = useState("");
   const doctor = list.data?.items.find((item) => item.id === doctorId);
@@ -161,6 +172,8 @@ export function OperatorServiceCatalog({ requestId, onAccessDenied }: { requestI
       {doctor && (
         <Services
           key={`${requestId}:${doctor.id}`}
+          actorId={actorId}
+          isSessionCurrent={isSessionCurrent}
           requestId={requestId}
           doctorId={doctor.id}
           onAccessDenied={onAccessDenied}
