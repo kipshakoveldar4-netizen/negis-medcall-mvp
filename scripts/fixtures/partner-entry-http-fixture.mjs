@@ -16,8 +16,10 @@ const codeCache = new Map();
 export const stopPartnerEntryBuilds = () => esbuild.stop();
 export async function partnerEntryHttpFixture(adapter, options = {}) {
   const approval = options.approved !== false;
-  if (!codeCache.has(approval)) codeCache.set(approval, (await esbuild.build({ stdin: {
-    contents: `export {default as handler} from ${JSON.stringify(path.join(root, 'api/crm/[...path].ts'))};
+  const entrypoint=options.entrypoint??'crm';assert.ok(['crm','content-studio'].includes(entrypoint));
+  const cacheKey=approval+':'+entrypoint;
+  if (!codeCache.has(cacheKey)) codeCache.set(cacheKey, (await esbuild.build({ stdin: {
+    contents: `export {default as handler} from ${JSON.stringify(path.join(root, 'api',entrypoint,'[...path].ts'))};
       export {setSupabaseServerClientFactoryForTests as install} from ${JSON.stringify(path.join(root, 'lib/supabase/server.ts'))};
       export * as cookies from ${JSON.stringify(path.join(root, 'lib/crm/partner-entry-cookie.ts'))};
       export * as terms from ${JSON.stringify(path.join(root, 'lib/crm/partner-terms-contracts.ts'))};`, loader: 'ts', resolveDir: root },
@@ -49,9 +51,14 @@ export async function partnerEntryHttpFixture(adapter, options = {}) {
       if (state.holdChallenge) { state.holdChallenge = false; await new Promise(resolve => { state.heldChallenge = resolve; }); }
       return new Response(state.challengeBytes ?? JSON.stringify(state.challenge), { status: state.challengeStatus });
     }
+    if (entrypoint==='content-studio' && options.telegramFetch
+      && /^synthetic-/.test(env.TELEGRAM_BOT_TOKEN??'')
+      && ['getChat','sendMessage'].some(method=>url===`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`)) {
+      return options.telegramFetch(url,init);
+    }
     state.unexpected.push(String(url)); throw Error('Unapproved network boundary');
   };
-  new Script(codeCache.get(approval), { filename: 'owned-partner-entry-router.cjs' }).runInNewContext({ module, exports: module.exports, require,
+  new Script(codeCache.get(cacheKey), { filename: 'owned-partner-entry-router.cjs' }).runInNewContext({ module, exports: module.exports, require,
     process: processView, fetch: request, Buffer, URL, URLSearchParams, AbortController, AbortSignal, DOMException, TextEncoder, TextDecoder,
     Request, Response, Headers, crypto: globalThis.crypto, setTimeout, clearTimeout, setInterval, clearInterval, console,
     __dirname: root, __filename: path.join(root, 'owned-partner-entry-router.cjs') });

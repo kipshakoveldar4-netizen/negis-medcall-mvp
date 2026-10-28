@@ -20,6 +20,7 @@
     "test:profile-session": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:profile-session",
     "test:video-worker-process": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:video-worker-process",
     "test:telegram-delivery-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:telegram-delivery-postgres",
+    "test:telegram-recipient-native-http": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:telegram-recipient-native-http",
     "test:backup-restore-safety": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:backup-restore-safety",
     "test:backup-restore-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:backup-restore-postgres",
     "test:migration-chain-native": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:migration-chain-native",

@@ -16,6 +16,7 @@ const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"../..");
 const delivery=await import(pathToFileURL(path.join(root,"lib/crm/telegram-delivery.ts")).href) as {
   TelegramDeliveryError:new(status:number,code:string)=>Error;
   telegramDeliveryHash(value:string):string;
+  resolveTelegramRecipient(input:Row):Promise<string>;
   admitTelegramDelivery(input:{actor:{workspaceId:string;staffUserId:string;userId:string};payload:Row;isTest:boolean;
     packageText:string;parts:string[];token:string;chatId:string},client:SupabaseClient):Promise<unknown>;
   beginTelegramDeliveryPart(value:unknown,index:number):Promise<void>;
@@ -27,7 +28,7 @@ type Handler=(req:{body:Row},res:ReturnType<typeof response>,context:Row)=>Promi
 function response() {
   return {code:0,body:{} as Row,status(code:number){this.code=code;return this;},setHeader(){return this;},json(body:Row){this.body=JSON.parse(JSON.stringify(body));}};
 }
-async function handler(db:PGlite, options: { fetch?:(url:string,init:{body:string})=>Promise<unknown>; rpc?:(name:string,args:Row)=>Promise<unknown>; configured?:boolean }={}) {
+async function handler(db:PGlite, options: { fetch?:(url:string,init:{body:string})=>Promise<unknown>; rpc?:(name:string,args:Row)=>Promise<unknown>; configured?:boolean; chatId?:string }={}) {
   const ts=createRequire(path.join(root,"package.json"))("typescript") as typeof import("typescript");
   const select=async(file:string,names:string[])=>{
     const text=await readFile(path.join(root,file),"utf8"), ast=ts.createSourceFile(file,text,ts.ScriptTarget.Latest,true);
@@ -54,10 +55,11 @@ async function handler(db:PGlite, options: { fetch?:(url:string,init:{body:strin
     exports:exported,
     TelegramDeliveryError:delivery.TelegramDeliveryError,
     telegramDeliveryHash:delivery.telegramDeliveryHash,
+    resolveTelegramRecipient:delivery.resolveTelegramRecipient,
     beginTelegramDeliveryPart:delivery.beginTelegramDeliveryPart,
     acknowledgeTelegramDeliveryPart:delivery.acknowledgeTelegramDeliveryPart,
     admitTelegramDelivery:(input:Parameters<typeof delivery.admitTelegramDelivery>[0])=>delivery.admitTelegramDelivery(input,client),
-    process:{env:options.configured===false?{}:{TELEGRAM_BOT_TOKEN:"synthetic-not-real",TELEGRAM_CHAT_ID:"-100123"}},
+    process:{env:options.configured===false?{}:{TELEGRAM_BOT_TOKEN:"synthetic-not-real",TELEGRAM_CHAT_ID:options.chatId??"-100123"}},
     async fetch(url:string,init:{body:string}) {
       calls.push({url,body:JSON.parse(init.body)});n++;
       if(options.fetch) return options.fetch(url,init);
@@ -76,6 +78,27 @@ test("097 SQL behavior in owned embedded PostgreSQL (not a native lock proof)",{
 });
 test("actual API uses durable SQL for inter-device delivery, receipt loss and no-dispatch boundaries",{timeout:180000},async t=>{
   const db=new PGlite();t.after(()=>db.close());await setupTelegramDatabase(db,true);
+  await t.test("a mutable username resolves once and cannot split one package across numeric chat identities",async()=>{
+    const f=await telegramScenario(db) as Fixture;
+    f.manifest.snapshot.script='Owned long package '.repeat(700);
+    await db.query('update public.content_videos set script=$2 where id=$1',[f.video,f.manifest.snapshot.script]);
+    let lookups=0,sends=0;const recipients:number[]=[];
+    const a=await handler(db,{chatId:'@OwnedQa',fetch:async(url,init)=>{
+      const payload=JSON.parse(init.body);
+      if(url.endsWith('/getChat')){lookups++;assert.deepEqual(payload,{chat_id:'@OwnedQa'});
+        return new Response(JSON.stringify({ok:true,result:{id:-100123,type:'supergroup',username:'OwnedQa'}}));}
+      assert.ok(url.endsWith('/sendMessage'));sends++;
+      const recipient=payload.chat_id==='@OwnedQa'?(sends===1?-100123:-100456):Number(payload.chat_id);
+      recipients.push(recipient);
+      return {ok:true,status:200,text:async()=>JSON.stringify({ok:true,result:{message_id:sends,date:1,
+        chat:{id:recipient,username:'OwnedQa'},text:payload.text}})};
+    }});
+    const result=await a.send(f);assert.equal(result.code,200,JSON.stringify(result.body));assert.ok(sends>1);
+    assert.deepEqual([...new Set(recipients)],[-100123],'One package must never follow a renamed username into a second chat');
+    assert.equal(lookups,1);assert.ok(a.calls.slice(1).every(call=>call.body.chat_id==='-100123'));
+    const ledger=await db.query<{recipient_sha256:string}>("select recipient_sha256 from content_telegram_deliveries where workspace_id=$1",[f.workspace]);
+    assert.equal(ledger.rows[0]!.recipient_sha256,delivery.telegramDeliveryHash(JSON.stringify(['telegram-recipient-v1','synthetic-not-real','-100123'])));
+  });
   await t.test("two independent handlers only dispatch once; status-only version bump also replays",async()=>{
     const f=await telegramScenario(db) as Fixture,a=await handler(db),b=await handler(db);
     const first=await a.send(f);assert.equal(first.code,200);assert.equal((first.body.data as Row).sent,true);

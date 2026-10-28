@@ -99,7 +99,8 @@ type Api = {
 };
 type SdkFailure = "missing" | "error" | "wrong-actor" | "throw";
 type Mode = "sent" | "network" | "type-error" | "abort" | "lookalike" | "error-lookalike"
-  | "wrong-crm-code" | "wrong-crm-status" | "http502" | "partial" | "unknown" | "http401" | "http403";
+  | "wrong-crm-code" | "wrong-crm-status" | "http502" | "partial" | "unknown" | "http401" | "http403"
+  | "recipient-refused" | "recipient-wrong-status" | "recipient-missing-proof" | "recipient-partial" | "recipient-stale";
 
 function fixture() {
   const actorId = "synthetic-A", workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -155,9 +156,15 @@ function fixture() {
       if (mode === "error-lookalike") throw Object.assign(Error("Synthetic lookalike"), { name: "CrmApiError", status: 401, code: "authentication_required" });
       if (mode === "wrong-crm-code") throw new api.CrmApiError(401, "different_code", "Synthetic different refusal");
       if (mode === "wrong-crm-status") throw new api.CrmApiError(403, "authentication_required", "Synthetic different status");
-      const status = mode === "http401" ? 401 : mode === "http403" ? 403 : mode === "http502" || mode === "partial" ? 502 : 200;
+      const recipient = mode.startsWith("recipient-");
+      const status = mode === "http401" ? 401 : mode === "http403" ? 403
+        : mode === "http502" || mode === "partial" || mode === "recipient-wrong-status" ? 502 : recipient ? 503 : 200;
       return { ok: status === 200, status, async text() {
+        if (mode === "recipient-stale") for (const listener of listeners) listener("SIGNED_IN", { user: { id: "synthetic-B" } });
         if (status !== 200) return JSON.stringify({ success: false, error: "Synthetic server refusal",
+          ...(recipient ? { code: "telegram_recipient_unconfirmed",
+            ...(mode === "recipient-missing-proof" ? {} : { data: { sent: false, phase: "recipient_lookup" } }),
+            ...(mode === "recipient-partial" ? { part: 2, totalParts: 4 } : {}) } : {}),
           ...(mode === "partial" ? { part: 2, totalParts: 4 } : {}) });
         if (mode === "unknown") return "{unreadable";
         return JSON.stringify({ success: true, mode: "telegram", data: {
@@ -274,7 +281,7 @@ test("a thrown SDK Error is not proof of the specific unsent auth refusal", asyn
 });
 
 for (const mode of ["network", "type-error", "abort", "lookalike", "error-lookalike", "wrong-crm-code", "wrong-crm-status",
-  "http502", "partial", "unknown"] as const) {
+  "http502", "partial", "unknown", "recipient-wrong-status", "recipient-missing-proof", "recipient-partial"] as const) {
   test(`ambiguous ${mode} retains its receipt and blocks replay after reload`, async (t) => {
     const f = fixture(); t.after(() => f.dispose()); f.mode(mode);
     await f.send(); const original = [...f.records.values()][0];
@@ -285,6 +292,26 @@ for (const mode of ["network", "type-error", "abort", "lookalike", "error-lookal
     assert.equal(f.posts.length, 1); assert.deepEqual([...f.records.values()], [original]); assert.match(f.notices.at(-1)!, /повторная отправка заблокирована/);
   });
 }
+
+test("confirmed pre-admission recipient refusal releases only its receipt for a later manual retry", async t => {
+  const f = fixture();t.after(() => f.dispose());f.mode("recipient-refused");
+  await f.send();
+  assert.equal(f.posts.length, 1, "No automatic lookup or delivery retry");assert.equal(f.records.size, 0);
+  assert.equal(f.counts().releaseCalls, 1);assert.equal(f.counts().statusWrites, 0);
+  assert.equal(f.counts().pending, false);assert.equal(f.counts().loading, null);
+  assert.equal(f.toasts.some(toast => toast.kind === "success"), false);
+  assert.match(f.notices.at(-1)!, /В этом запросе сообщения не отправлялись/);
+  assert.doesNotMatch(f.notices.at(-1)!, /часть сообщения могла быть доставлена/);
+  f.mode("sent");f.mount();await f.send();
+  assert.equal(f.posts.length, 2);assert.equal(f.receipt().state, "sent");assert.equal(f.counts().statusWrites, 1);
+});
+
+test("known unsent lookup releases its old attempt after account replacement without publishing late UI", async t => {
+  const f = fixture();t.after(() => f.dispose());f.mode("recipient-stale");
+  await f.send();assert.equal(f.posts.length, 1);assert.equal(f.records.size, 0);assert.equal(f.counts().releaseCalls, 1);
+  assert.deepEqual(f.toasts, []);assert.deepEqual(f.notices, [""]);assert.equal(f.counts().statusWrites, 0);
+  f.mode("sent");f.mount();await f.send();assert.equal(f.posts.length, 2);assert.equal(f.receipt().state, "sent");
+});
 
 for (const mode of ["http401", "http403"] as const) {
   test(`existing server ${mode} denial still releases its own receipt and clears loading`, async (t) => {

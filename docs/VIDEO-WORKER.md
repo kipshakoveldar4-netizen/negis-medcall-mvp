@@ -210,3 +210,10 @@ separate deployment gates. Do not enable a working worker on this evidence alone
 - This worker does not validate the separate direct/signed-upload or generated
   provider-video paths. Private staging/finalization and generated variants,
   provider-independent replay and cloud acceptance remain open.
+
+Read-only environment observation, 28 October: the installed Docker CLI's
+currently configured default endpoint returned no `docker_engine` pipe.
+No context was changed and no daemon, container, WSL service or cloud fallback
+was started. This does not prove that every Docker context is unavailable.
+Actual Linux worker/cgroup/seccomp/container acceptance remains open; the
+local Telegram recipient tests do not satisfy that separate gate.

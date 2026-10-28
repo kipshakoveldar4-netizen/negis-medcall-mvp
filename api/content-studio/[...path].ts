@@ -66,6 +66,7 @@ import {
   acknowledgeTelegramDeliveryPart,
   admitTelegramDelivery,
   beginTelegramDeliveryPart,
+  resolveTelegramRecipient,
   TelegramDeliveryError,
   telegramDeliveryHash,
 } from "../../lib/crm/telegram-delivery";
@@ -404,8 +405,7 @@ async function sendTelegramMessage(input: {
     && Number.isSafeInteger(message.date) && Number(message.date) >= 0
     && Number.isSafeInteger(chat.id) && Number(chat.id) !== 0
     && typeof message.text === "string" && message.text === input.text
-    && (String(chat.id) === input.chatId || (input.chatId.startsWith("@") && typeof chat.username === "string"
-      && `@${chat.username}`.toLowerCase() === input.chatId.toLowerCase()));
+    && String(chat.id) === input.chatId;
   const description =
     typeof body.description === "string" && body.description.trim() ? body.description
       : body.raw ? "Telegram returned a non-JSON response body."
@@ -771,8 +771,9 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse, conte
     const chunks = splitTelegramMessage(messageText);
     const parts = chunks.map((chunk, index) => chunks.length > 1
       ? `SAAF Content Studio — пакет ролика, часть ${index + 1}/${chunks.length}\n\n${chunk}` : chunk);
+    const recipientId = await resolveTelegramRecipient({ token, chatId, fetcher: fetch });
     const delivery = await admitTelegramDelivery({
-      actor: context, payload, isTest, packageText: messageText, parts, token, chatId,
+      actor: context, payload, isTest, packageText: messageText, parts, token, chatId: recipientId,
     });
 
     for (let index = 0; !delivery.replayed && index < parts.length; index += 1) {
@@ -780,7 +781,7 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse, conte
       const result = await sendTelegramMessage({
         safeFetch,
         token,
-        chatId,
+        chatId: recipientId,
         text: parts[index]!,
       });
 
@@ -831,6 +832,12 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse, conte
     });
   } catch (error) {
     if (error instanceof TelegramDeliveryError) {
+      if (error.code === "telegram_recipient_unconfirmed") {
+        return sendJson(res, 503, { success: false, code: error.code,
+          error: "Не удалось проверить получателя Telegram",
+          details: ["В этом запросе отправка не начиналась. Проверку можно повторить позже."],
+          data: { sent: false, phase: "recipient_lookup" } });
+      }
       return sendJson(res, error.status, {
         success: false,
         error: "Доставка Telegram не подтверждена",
@@ -1489,7 +1496,7 @@ async function handleBoundedVideoRequest(req: VercelRequest, res: VercelResponse
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const resource = normalizeRouteSegment(readPathSegment(req));
-  if (resource === "generate-video" || resource === "video-generation") {
+  if (resource === "generate-video" || resource === "video-generation" || resource === "send-telegram") {
     res.setHeader("Cache-Control", "private, no-store, max-age=0");
     res.setHeader("Vary", "Authorization");
   }

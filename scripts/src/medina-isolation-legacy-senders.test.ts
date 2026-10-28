@@ -136,6 +136,10 @@ function rootTelegramFixture(settings: Record<string, string | undefined>, deny?
   const app = evaluate(rootTelegramCode, {
     ...routeGuard, process: { env: env.raw },
     telegramPackageText() { events.push("package"); return "Synthetic local-only package"; },
+    async resolveTelegramRecipient(input: AnyObject) {
+      assert.equal(input.chatId, CHAT, "This characterization only uses its fixed numeric recipient");
+      return CHAT;
+    },
     async admitTelegramDelivery(input: AnyObject) {
       events.push("delivery:admit");
       assert.equal(input.actor.workspaceId, UUID);
@@ -324,7 +328,11 @@ function rootWebhookFixture(secret: string | undefined) {
 for (const variant of variants) {
   for (const setting of ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"] as const) {
     test(`root Telegram trims ${setting}: ${variant.name}`, { timeout: 2000 }, async () => {
-      const fixture = rootTelegramFixture({ TELEGRAM_BOT_TOKEN: BOT, TELEGRAM_CHAT_ID: CHAT, [setting]: variant.value });
+      // Root's current recipient boundary requires a valid numeric destination;
+      // keep the exact whitespace/absence matrix without inventing an alias.
+      const settingValue = setting === "TELEGRAM_CHAT_ID" && variant.trimmed
+        ? variant.name === "padded synthetic value" ? ` \t${CHAT}\r\n ` : CHAT : variant.value;
+      const fixture = rootTelegramFixture({ TELEGRAM_BOT_TOKEN: BOT, TELEGRAM_CHAT_ID: CHAT, [setting]: settingValue });
       const res = await fixture.call({ chatId: "SYNTHETIC_CALLER_DESTINATION" });
       assert.equal(fixture.outbound.length, variant.trimmed ? 1 : 0);
       assert.equal(res.statusCode, variant.trimmed ? 502 : 200);
@@ -334,8 +342,8 @@ for (const variant of variants) {
         assert.equal(fixture.events.includes("delivery:admit"), false);
       } else {
         const call = fixture.outbound[0];
-        assert.equal(call.url, `https://api.telegram.org/bot${setting === "TELEGRAM_BOT_TOKEN" ? variant.value!.trim() : BOT}/sendMessage`);
-        assert.equal(JSON.parse(call.init.body).chat_id, setting === "TELEGRAM_CHAT_ID" ? variant.value!.trim() : CHAT);
+        assert.equal(call.url, `https://api.telegram.org/bot${setting === "TELEGRAM_BOT_TOKEN" ? settingValue!.trim() : BOT}/sendMessage`);
+        assert.equal(JSON.parse(call.init.body).chat_id, setting === "TELEGRAM_CHAT_ID" ? settingValue!.trim() : CHAT);
         assert.ok(fixture.events.indexOf("auth:purpose-allowed") < fixture.events.indexOf("delivery:admit"));
         assert.ok(fixture.events.indexOf("delivery:begin") < fixture.events.indexOf("outbound:telegram"));
       }

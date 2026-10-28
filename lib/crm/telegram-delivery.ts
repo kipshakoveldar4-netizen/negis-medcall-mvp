@@ -24,6 +24,63 @@ export const telegramDeliveryHash = (value: string): string => createHash("sha25
 const unavailable = () => new TelegramDeliveryError(503, "telegram_delivery_unconfirmed");
 const invalid = () => new TelegramDeliveryError(400, "telegram_delivery_invalid");
 
+function canonicalTelegramChatId(value: unknown): string | null {
+  if (typeof value !== "string" || !/^-?[1-9][0-9]{0,15}$/.test(value)) return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && Math.abs(number) <= 2 ** 52 - 1 ? value : null;
+}
+
+/** Resolve a mutable public alias once, before admission; never send content to an alias. */
+export async function resolveTelegramRecipient(input: { token: string; chatId: string; fetcher: typeof fetch }): Promise<string> {
+  const refused = () => new TelegramDeliveryError(503, "telegram_recipient_unconfirmed");
+  if (typeof input.token !== "string" || !input.token || input.token.length > 8192) throw refused();
+  const numeric = canonicalTelegramChatId(input.chatId);
+  if (numeric) return numeric;
+  if (typeof input.chatId !== "string" || !/^@[a-zA-Z][a-zA-Z0-9_]{3,31}$/.test(input.chatId)) throw refused();
+  const controller = new AbortController();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      (async () => {
+        const response = await input.fetcher(`https://api.telegram.org/bot${input.token}/getChat`, {
+          method: "POST", redirect: "error", signal: controller.signal,
+          headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: input.chatId }),
+        });
+        if (controller.signal.aborted || !response.ok || response.status !== 200 || response.redirected || !response.body) {
+          try { void response.body?.cancel().catch(() => {}); } catch { /* An unconfirmed body is never retained. */ }
+          throw refused();
+        }
+        reader = response.body.getReader();
+        const chunks: Uint8Array[] = []; let bytes = 0, reads = 0;
+        while (true) {
+          const item = await reader.read();
+          if (controller.signal.aborted || ++reads > 65_537) throw refused();
+          if (item.done) break;
+          bytes += item.value.byteLength;
+          if (bytes > 64 * 1024) throw refused();
+          chunks.push(item.value);
+        }
+        const body = object(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks))));
+        const chat = object(body.result);
+        const id = typeof chat.id === "number" ? canonicalTelegramChatId(String(chat.id)) : null;
+        if (body.ok !== true || !id || !["channel", "supergroup"].includes(String(chat.type))
+          || (chat.active_usernames !== undefined && (!Array.isArray(chat.active_usernames)
+            || chat.active_usernames.some(value => typeof value !== "string")))) throw refused();
+        const names = [chat.username, ...(Array.isArray(chat.active_usernames) ? chat.active_usernames : [])];
+        if (!names.some(name => typeof name === "string" && `@${name}`.toLowerCase() === input.chatId.toLowerCase())) throw refused();
+        return id;
+      })(),
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { controller.abort(); reject(refused()); }, 10_000); }),
+    ]);
+  } catch { throw refused(); }
+  finally {
+    if (timer !== undefined) clearTimeout(timer);
+    controller.abort();
+    try { void reader?.cancel().catch(() => {}); } catch { /* Never let cleanup expose provider diagnostics. */ }
+  }
+}
+
 async function rpc(client: SupabaseClient, name: string, args: Row): Promise<Row> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -69,7 +126,7 @@ export async function admitTelegramDelivery(input: {
     || (!input.isTest && ((payload.id !== undefined && payload.videoId !== undefined && payload.id !== payload.videoId)
       || (payload.updatedAt !== undefined && payload.expectedUpdatedAt !== undefined && payload.updatedAt !== payload.expectedUpdatedAt)))
     || typeof input.token !== "string" || !input.token || input.token.length > 8192
-    || !/^(?:-?[1-9][0-9]{0,18}|@[a-zA-Z][a-zA-Z0-9_]{3,31})$/.test(input.chatId) || !input.packageText || Buffer.byteLength(input.packageText) > 240000
+    || canonicalTelegramChatId(input.chatId) !== input.chatId || !input.packageText || Buffer.byteLength(input.packageText) > 240000
     || !Array.isArray(input.parts) || input.parts.length < 1 || input.parts.length > 64
     || input.parts.some(part => typeof part !== "string" || !part || part.length > 4096)) throw invalid();
   const snapshot: Row = {};

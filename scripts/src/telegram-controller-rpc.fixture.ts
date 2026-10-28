@@ -10,6 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const delivery = await import(pathToFileURL(path.join(root, "lib/crm/telegram-delivery.ts")).href) as {
   TelegramDeliveryError: new (status: number, code: string) => Error;
   telegramDeliveryHash(value: string): string;
+  resolveTelegramRecipient(input: Row): Promise<string>;
   admitTelegramDelivery(input: Row, client: Row): Promise<Row>;
   beginTelegramDeliveryPart(value: Row, part: number): Promise<void>;
   acknowledgeTelegramDeliveryPart(value: Row, part: number, hash: string): Promise<void>;

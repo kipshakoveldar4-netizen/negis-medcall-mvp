@@ -2782,7 +2782,21 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       }
       if (!await isLibraryWriteVerified(write)) return;
       const body = await safeJson<unknown>(response);
+      const recipientUnsent = response.status === 503 && body?.success === false && body.code === "telegram_recipient_unconfirmed"
+        && typeof body.data === "object" && body.data !== null && !Array.isArray(body.data)
+        && (body.data as Record<string, unknown>).sent === false
+        && (body.data as Record<string, unknown>).phase === "recipient_lookup"
+        && body.part === undefined && body.totalParts === undefined;
+      // This request never admitted a delivery; attempt-scoped cleanup is safe
+      // even when the following session verification refuses the old callback.
+      if (recipientUnsent && receipt) releaseUnsentTelegramDelivery(window.localStorage, receipt);
       if (!await isLibraryWriteVerified(write)) return;
+      if (recipientUnsent) {
+        const message = "Не удалось проверить получателя Telegram. В этом запросе сообщения не отправлялись; проверку можно повторить позже.";
+        setNotice(message);
+        toast.error(message);
+        return;
+      }
       if (!response.ok || body?.success !== true) {
         throw new Error(telegramErrorMessage(body, test ? "Проверка Telegram не подтверждена" : "Доставка в Telegram не подтверждена"));
       }

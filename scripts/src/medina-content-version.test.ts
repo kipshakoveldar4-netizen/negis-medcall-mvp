@@ -85,6 +85,7 @@ const compiledServer = compile([
   select(server, [
     "DEMO_WORKSPACE_ID", "uuidPattern", "WORKSPACE_CONTEXT_KEY", "SERVER_OWNED_COLUMNS", "SERVICE_FAILURE_DETAIL",
     "CrmReferenceValidationError", "MortgageSelfLeadError", "AppointmentConflictError",
+    "AppointmentRequestError",
     "AppointmentOutsideScheduleError", "AppointmentServicesSchemaError",
     "isUuid", "asRecord", "readString", "readQueryString", "firstString", "readJsonArray", "hasAnyKey",
     "stripServerOwnedColumns", "buildPatchRow", "nextDemoId", "sendJson", "success", "errorBody",
