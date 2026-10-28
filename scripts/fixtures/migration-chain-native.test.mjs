@@ -442,6 +442,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'capture_growth_partner_source_v2','purge_growth_partner_sources','claim_growth_partner_source','read_growth_partner_source',
       'submit_growth_partner_company','read_growth_partner_company','review_growth_partner_company',
       'read_growth_partner_company_submission','read_growth_partner_company_review','list_growth_partner_companies',
+      'list_own_growth_partner_companies',
       'execute_growth_partner_terms','read_growth_partner_terms','confirm_growth_subscription_payment','read_crm_appointment_request_v2','create_crm_appointment_v2','patch_crm_appointment_journaled']) {
       const functions = (await db.query(`select p.oid::regprocedure::text as signature,has_function_privilege('service_role',p.oid,'EXECUTE') as allowed
         from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname=$1`, [name])).rows;

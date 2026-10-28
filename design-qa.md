@@ -164,8 +164,9 @@ onboarding; this is not a full-parity handoff. No separate mobile source exists.
   have 222/222 contracts/HTTP, 5/5 native HTTP and 11/11 focused browser evidence.
   Company submission/recovery and protected review now have separate local
   364/364 contract/module/HTTP, 23/23 native/HTTP and 22+16 browser receipts.
-  Real isolated Auth/Turnstile acceptance and cross-session application discovery
-  still remain. The canonical consent registry is empty;
+  Cross-session own discovery now has separate local 147/147 module/HTTP,
+  23/23 native/HTTP and 15/15 actual inbox/shell browser receipts. Real isolated
+  Auth/Turnstile and approved applicant entry acceptance still remain. The canonical consent registry is empty;
   unavailable config/consent cannot expose a usable live link. This is not public
   activation or completed company onboarding; full partner-mock parity stays open.
   Event history is now implemented through private local SQL 122 and verified
@@ -236,7 +237,8 @@ local layers do not establish real Auth, cloud or commercial acceptance.
 - [x] Desktop/mobile ready-state screenshots and same-page comparisons.
 - [x] Local server-issued own link and explicit public source-capture UI.
 - [x] Local applicant submission/recovery and platform-only company review.
-- [ ] Cross-session application discovery and complete approved real entry acceptance.
+- [x] Local cross-session own application discovery, without tab metadata/cookie.
+- [ ] Verified selected-company handoff and complete approved real entry acceptance.
 - [ ] Define authoritative initial-contact/next-contact events without invented metrics.
 - [x] Selected browser-to-native stage/booking submission and recovery from Explorer.
 - [ ] Separately authorize and verify an isolated cloud Preview; no release here.

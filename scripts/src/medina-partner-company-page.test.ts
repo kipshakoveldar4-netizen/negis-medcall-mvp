@@ -56,6 +56,9 @@ type Operation = "context" | "submit" | "read" | "close";
 type Options = { operation: Operation; body?: unknown; requestId?: string; sourceId?: string;
   signal: AbortSignal; isCurrent(): boolean };
 type CompanyRequest = (options: Options) => Promise<unknown>;
+type InboxOptions = { offset: number; state: "pending" | "approved" | "rejected" | null;
+  signal: AbortSignal; isCurrent(): boolean };
+type InboxRequest = (options: InboxOptions) => Promise<unknown>;
 type Init = RequestInit & { expectedUserId: string; dispatchGuard(): boolean };
 type Reply = { ok: boolean; status: number; json(): Promise<unknown> };
 type Call = { path: string; init: Init };
@@ -80,11 +83,15 @@ function clientFixture(config: { apiUrl?: (path: string) => string; respond?: (c
   };
   const client = evaluate(clientCode, clientFile, { "@/lib/api": api }) as {
     companyRequestForActor(actorId: string, isCurrent: () => boolean): CompanyRequest;
+    companyInboxRequestForActor(actorId: string, isCurrent: () => boolean): InboxRequest;
   };
   return { client, calls, trace, tokenReads: () => tokenReads };
 }
 function options(operation: Operation = "context", patch: Partial<Options> = {}): Options {
   return { operation, requestId, sourceId, body: submitBody, signal: new AbortController().signal, isCurrent: () => true, ...patch };
+}
+function inboxOptions(patch: Partial<InboxOptions> = {}): InboxOptions {
+  return { offset: 0, state: null, signal: new AbortController().signal, isCurrent: () => true, ...patch };
 }
 const isAbort = (error: unknown) => !!error && typeof error === "object" && "name" in error && error.name === "AbortError";
 
@@ -146,6 +153,7 @@ function hookRenderer() {
   return {
     hooks,
     mount(value: () => Child) { component = value; },
+    rerender() { dirty = true; },
     async flush() {
       for (let pass = 0; pass < 60; pass++) {
         if (mounted && dirty) {
@@ -172,15 +180,24 @@ function hookRenderer() {
 }
 
 type ChildProps = { actorId: string; request: CompanyRequest; isSessionCurrent(): boolean; onAccessDenied(): void };
-type Mount = { props: ChildProps; active: boolean; unmounts: number };
+type InboxChildProps = Omit<ChildProps, "request"> & { request: InboxRequest; onNewApplication(): void };
+type Mount<P = ChildProps> = { kind: "application" | "inbox"; props: P; active: boolean; unmounts: number };
 const session = (id: string | null) => id ? { user: { id, email: "synthetic@example.invalid" } } : null;
 type SessionReply = { data: { session: ReturnType<typeof session> }; error?: unknown };
-function pageFixture(t: TestContext, config: { configured?: boolean; transport?: Parameters<typeof clientFixture>[0] } = {}) {
-  const renderer = hookRenderer(), transport = clientFixture(config.transport), mounts: Mount[] = [];
+function pageFixture(t: TestContext, config: { configured?: boolean; search?: string; transport?: Parameters<typeof clientFixture>[0] } = {}) {
+  const renderer = hookRenderer(), transport = clientFixture(config.transport), mounts: Mount<ChildProps | InboxChildProps>[] = [];
   const listeners = new Set<(event: string, value: ReturnType<typeof session>) => void>();
   const sessionGate = deferred<SessionReply>();
   const signIns: { body: { email: string; password: string }; gate: ReturnType<typeof deferred<any>> }[] = [];
   const sdkTrace: string[] = [];
+  const navigations: string[] = [], history = ["/partner-company" + (config.search ? "?" + config.search : "")];
+  let historyIndex = 0;
+  const location = () => new URL(history[historyIndex], origin);
+  const navigate = (url: string) => {
+    navigations.push(url);
+    history.splice(historyIndex + 1); history.push(url); historyIndex++;
+    renderer.rerender();
+  };
   let shell: Props = {}, unsubscribes = 0, signOuts = 0, prevented = 0;
   const sdk = {
     onAuthStateChange(callback: (event: string, value: ReturnType<typeof session>) => void) {
@@ -197,20 +214,24 @@ function pageFixture(t: TestContext, config: { configured?: boolean; transport?:
     assert.ok(Object.hasOwn(target, key), `Actual page must not access signup or other SDK methods: ${String(key)}`);
     return Reflect.get(target, key);
   } });
-  function ApplicationDouble(props: Props) {
-    const ref = renderer.hooks.useRef<Mount | null>(null);
-    if (!ref.current) { ref.current = { props: props as ChildProps, active: false, unmounts: 0 }; mounts.push(ref.current); }
-    const record = ref.current; record.props = props as ChildProps;
-    renderer.hooks.useLayoutEffect(() => { record.active = true; return () => { record.active = false; record.unmounts++; }; }, []);
-    return jsx("section", { "data-application-actor": props.actorId });
+  function childDouble(kind: "application" | "inbox") {
+    return function BoundaryDouble(props: Props) {
+      const ref = renderer.hooks.useRef<Mount<ChildProps | InboxChildProps> | null>(null);
+      if (!ref.current) { ref.current = { kind, props: props as ChildProps | InboxChildProps, active: false, unmounts: 0 }; mounts.push(ref.current); }
+      const record = ref.current; record.props = props as ChildProps | InboxChildProps;
+      renderer.hooks.useLayoutEffect(() => { record.active = true; return () => { record.active = false; record.unmounts++; }; }, []);
+      return jsx("section", { [`data-${kind}-actor`]: props.actorId });
+    };
   }
   const icon = () => null;
   const page = evaluate(pageCode, pageFile, {
-    react: renderer.hooks, "react/jsx-runtime": { jsx, jsxs: jsx },
+    react: renderer.hooks, "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "fragment" },
     "lucide-react": { ArrowRight: icon, Building2: icon, ClipboardList: icon, Users: icon },
-    wouter: { Link: (props: Props) => jsx("a", props) },
+    wouter: { Link: (props: Props) => jsx("a", props), useLocation: () => [location().pathname, navigate],
+      useSearch: () => location().search.slice(1) },
     "@/components/portals/PortalShell": { PortalShell: (props: Props) => { shell = props; return jsx("main", { children: props.children }); } },
-    "@/components/contributors/PartnerCompanyApplication": { PartnerCompanyApplication: ApplicationDouble },
+    "@/components/contributors/PartnerCompanyApplication": { PartnerCompanyApplication: childDouble("application") },
+    "@/components/contributors/PartnerCompanyInbox": { PartnerCompanyInbox: childDouble("inbox") },
     "@/lib/supabase": { supabase: { auth }, hasSupabaseFrontendEnv: config.configured !== false },
     "./partner-company-client": transport.client,
   });
@@ -225,11 +246,25 @@ function pageFixture(t: TestContext, config: { configured?: boolean; transport?:
     const node = renderer.nodes().find(n => n.type === "input" && n.props.type === type); assert.ok(node, `Expected ${type} input`); return node;
   }
   return {
-    ...renderer, transport, mounts, signIns, sdkTrace, sessionGate,
+    ...renderer, transport, mounts, signIns, sdkTrace, sessionGate, navigations, location, navigate,
+    travel(delta: -1 | 1) {
+      const next = historyIndex + delta;
+      assert.ok(next >= 0 && next < history.length, "Expected an existing browser history entry");
+      historyIndex = next; renderer.rerender();
+    },
     shell: () => shell, signOuts: () => signOuts, prevented: () => prevented,
     emit(id: string | null, event = id ? "SIGNED_IN" : "SIGNED_OUT") { for (const callback of [...listeners]) callback(event, session(id)); },
     async ready(id: string | null) { await renderer.flush(); sessionGate.resolve({ data: { session: session(id) } }); await renderer.flush(); },
-    child() { const child = mounts.filter(m => m.active).at(-1); assert.ok(child, "Expected actual page to mount application boundary"); return child; },
+    child() {
+      const child = mounts.filter(m => m.active).at(-1);
+      assert.ok(child); assert.equal(child.kind, "application", "Expected actual page to mount application boundary");
+      return child as Mount;
+    },
+    inbox() {
+      const child = mounts.filter(m => m.active).at(-1);
+      assert.ok(child); assert.equal(child.kind, "inbox", "Expected actual page to mount inbox boundary");
+      return child as Mount<InboxChildProps>;
+    },
     input,
     async fill(email = "  Synthetic.Owner@Example.Invalid  ", password = "synthetic-password-only") {
       input("email").props.onChange({ target: { value: email } });
@@ -243,7 +278,9 @@ function pageFixture(t: TestContext, config: { configured?: boolean; transport?:
 }
 
 test("actual page and client transpile and export callable entry points", async t => {
-  const f = pageFixture(t); await f.flush(); assert.equal(typeof f.transport.client.companyRequestForActor, "function");
+  const f = pageFixture(t, { search: "new=1" }); await f.flush();
+  assert.equal(typeof f.transport.client.companyRequestForActor, "function");
+  assert.equal(typeof f.transport.client.companyInboxRequestForActor, "function");
 });
 
 for (const operation of ["context", "submit", "read", "close"] as const) {
@@ -288,11 +325,15 @@ for (const [name, apiUrl] of [
   ["same-origin fragment", (p: string) => `${origin}${p}#synthetic-fragment`],
 ] as const) {
   test(`client: ${name} is refused before token lookup or crmFetch`, async () => {
-    const f = clientFixture({ apiUrl });
-    await assert.rejects(f.client.companyRequestForActor(actorA, () => true)(options()), error => {
-      assert.ok(error instanceof CrmApiError); assert.equal(error.status, 503); assert.equal(error.code, "same_origin_required"); return true;
-    });
-    assert.equal(f.calls.length, 0); assert.equal(f.tokenReads(), 0); assert.deepEqual(f.trace, ["config"]);
+    for (const mode of ["form", "inbox"]) {
+      const f = clientFixture({ apiUrl });
+      const pending = mode === "form" ? f.client.companyRequestForActor(actorA, () => true)(options())
+        : f.client.companyInboxRequestForActor(actorA, () => true)(inboxOptions());
+      await assert.rejects(pending, error => {
+        assert.ok(error instanceof CrmApiError); assert.equal(error.status, 503); assert.equal(error.code, "same_origin_required"); return true;
+      });
+      assert.equal(f.calls.length, 0); assert.equal(f.tokenReads(), 0); assert.deepEqual(f.trace, ["config"]);
+    }
   });
 }
 
@@ -396,7 +437,7 @@ test("client: network and JSON failures stay rejected without retries", async ()
 });
 
 test("page: subscribes before session lookup and shows no login or application while bootstrap is held", async t => {
-  const f = pageFixture(t); await f.flush();
+  const f = pageFixture(t, { search: "new=1" }); await f.flush();
   assert.deepEqual(f.sdkTrace, ["subscribe", "getSession"]);
   assert.equal(f.nodes().filter(n => n.props.role === "status").length, 1);
   assert.equal(f.nodes().some(n => n.type === "form"), false); assert.equal(f.mounts.length, 0);
@@ -404,7 +445,7 @@ test("page: subscribes before session lookup and shows no login or application w
 });
 
 test("page: anonymous login has only existing-account credentials and never calls signup", async t => {
-  const f = pageFixture(t); await f.ready(null);
+  const f = pageFixture(t, { search: "new=1" }); await f.ready(null);
   assert.equal(f.input("email").props.autoComplete, "username");
   assert.equal(f.input("password").props.autoComplete, "current-password");
   assert.equal(f.nodes().filter(n => n.type === "button" && n.props.type === "submit").length, 1);
@@ -415,7 +456,7 @@ test("page: anonymous login has only existing-account credentials and never call
 });
 
 test("page: existing-account sign-in normalizes email, clears password, and blocks duplicate dispatch", async t => {
-  const f = pageFixture(t); await f.ready(null); await f.fill();
+  const f = pageFixture(t, { search: "new=1" }); await f.ready(null); await f.fill();
   f.submit(); f.submit(); await f.flush();
   assert.equal(f.prevented(), 2); assert.equal(f.signIns.length, 1);
   assert.deepEqual({ ...f.signIns[0].body }, { email: "synthetic.owner@example.invalid", password: "synthetic-password-only" });
@@ -429,7 +470,7 @@ test("page: existing-account sign-in normalizes email, clears password, and bloc
 
 for (const failure of ["returned", "thrown"] as const) {
   test(`page: ${failure} sign-in failure restores login without mounting an application`, async t => {
-    const f = pageFixture(t); await f.ready(null); await f.fill(); f.submit(); await f.flush();
+    const f = pageFixture(t, { search: "new=1" }); await f.ready(null); await f.fill(); f.submit(); await f.flush();
     if (failure === "returned") f.signIns[0].gate.resolve({ error: new Error("Synthetic rejection"), data: { session: null } });
     else f.signIns[0].gate.reject(new Error("Synthetic offline"));
     await f.flush(); assert.equal(f.input("password").props.disabled, false);
@@ -438,14 +479,14 @@ for (const failure of ["returned", "thrown"] as const) {
 }
 
 test("page: unconfigured sign-in never reaches the SDK or company transport", async t => {
-  const f = pageFixture(t, { configured: false }); await f.ready(null); await f.fill(); f.submit(); await f.flush();
+  const f = pageFixture(t, { search: "new=1", configured: false }); await f.ready(null); await f.fill(); f.submit(); await f.flush();
   assert.equal(f.signIns.length, 0); assert.equal(f.transport.calls.length, 0);
   assert.ok(f.nodes().some(n => n.props.role === "status")); assert.equal(f.input("password").props.disabled, false);
 });
 
 for (const outcome of ["success", "error", "rejection"] as const) {
   test(`page: bootstrap ${outcome} settles to the corresponding child or login`, async t => {
-    const f = pageFixture(t); await f.flush();
+    const f = pageFixture(t, { search: "new=1" }); await f.flush();
     if (outcome === "rejection") f.sessionGate.reject(new Error("Synthetic session lookup failure"));
     else f.sessionGate.resolve({ data: { session: session(actorA) }, error: outcome === "error" ? new Error("Synthetic session error") : null });
     await f.flush();
@@ -456,7 +497,7 @@ for (const outcome of ["success", "error", "rejection"] as const) {
 
 for (const late of ["actorA", "signedOut", "error", "rejection"] as const) {
   test(`page: late getSession ${late} cannot replace an observed auth event`, async t => {
-    const f = pageFixture(t); await f.flush(); f.emit(actorB); await f.flush(); const child = f.child();
+    const f = pageFixture(t, { search: "new=1" }); await f.flush(); f.emit(actorB); await f.flush(); const child = f.child();
     if (late === "rejection") f.sessionGate.reject(new Error("Synthetic late rejection"));
     else f.sessionGate.resolve({ data: { session: session(late === "actorA" ? actorA : null) },
       error: late === "error" ? new Error("Synthetic late error") : null });
@@ -466,13 +507,13 @@ for (const late of ["actorA", "signedOut", "error", "rejection"] as const) {
 }
 
 test("page: signed-out auth event wins over a late signed-in getSession", async t => {
-  const f = pageFixture(t); await f.flush(); f.emit(null); await f.flush();
+  const f = pageFixture(t, { search: "new=1" }); await f.flush(); f.emit(null); await f.flush();
   f.sessionGate.resolve({ data: { session: session(actorA) } }); await f.flush();
   assert.ok(f.input("email")); assert.equal(f.mounts.length, 0);
 });
 
 test("page: actor ABA retires the first child even when both events precede the next render", async t => {
-  const f = pageFixture(t); await f.ready(actorA);
+  const f = pageFixture(t, { search: "new=1" }); await f.ready(actorA);
   const old = f.child(), oldScope = old.props.isSessionCurrent, request = old.props.request;
   f.emit(actorB); assert.equal(oldScope(), false);
   f.emit(actorA); assert.equal(oldScope(), false, "An old A lifetime must not revive after A-B-A");
@@ -484,21 +525,21 @@ test("page: actor ABA retires the first child even when both events precede the 
 });
 
 test("page: token refresh for the same actor preserves the child and its request lifetime", async t => {
-  const f = pageFixture(t); await f.ready(actorA); const old = f.child(), request = old.props.request;
+  const f = pageFixture(t, { search: "new=1" }); await f.ready(actorA); const old = f.child(), request = old.props.request;
   f.emit(actorA, "TOKEN_REFRESHED"); await f.flush();
   assert.equal(f.child(), old); assert.equal(old.props.request, request); assert.equal(old.props.isSessionCurrent(), true);
   assert.equal(old.unmounts, 0);
 });
 
 test("page: sign-out retires the application immediately and renders existing-account login", async t => {
-  const f = pageFixture(t); await f.ready(actorA); const old = f.child();
+  const f = pageFixture(t, { search: "new=1" }); await f.ready(actorA); const old = f.child();
   f.emit(null); assert.equal(old.props.isSessionCurrent(), false); await f.flush();
   assert.equal(old.active, false); assert.equal(old.unmounts, 1); assert.ok(f.input("email"));
   assert.equal(f.shell().onSignOut, undefined);
 });
 
 test("page: a typed 403 reaches the actual parent denial callback and unmounts its application", async t => {
-  const f = pageFixture(t, { transport: { respond: async () => reply({ success: true, data: {} }, 403) } });
+  const f = pageFixture(t, { search: "new=1", transport: { respond: async () => reply({ success: true, data: {} }, 403) } });
   await f.ready(actorA); const old = f.child();
   await assert.rejects(old.props.request(options()), error => {
     assert.ok(error instanceof CrmApiError); assert.equal(error.status, 403); return true;
@@ -514,7 +555,7 @@ test("page: a typed 403 reaches the actual parent denial callback and unmounts i
 
 test("page/client: actor ABA during held JSON rejects the old request and cannot deny the new child", async t => {
   const json = deferred<unknown>(), entered = deferred<void>();
-  const f = pageFixture(t, { transport: { respond: async () => ({ ok: true, status: 200,
+  const f = pageFixture(t, { search: "new=1", transport: { respond: async () => ({ ok: true, status: 200,
     json() { entered.resolve(); return json.promise; } }) } });
   await f.ready(actorA); const old = f.child();
   const pending = old.props.request(options("submit")), rejected = assert.rejects(pending, isAbort);
@@ -527,26 +568,195 @@ test("page/client: actor ABA during held JSON rejects the old request and cannot
 });
 
 test("page: late sign-in rejection after actor change cannot update the retired login", async t => {
-  const f = pageFixture(t); await f.ready(null); await f.fill(); f.submit(); await f.flush();
+  const f = pageFixture(t, { search: "new=1" }); await f.ready(null); await f.fill(); f.submit(); await f.flush();
   f.emit(actorA); await f.flush(); const child = f.child();
   f.signIns[0].gate.reject(new Error("Synthetic late login failure")); await f.flush();
   assert.equal(f.child(), child); assert.equal(f.lateWrites(), 0); assert.equal(f.nodes().some(n => n.props.role === "status"), false);
 });
 
 test("page: late bootstrap completion after unmount cannot write state", async t => {
-  const f = pageFixture(t); await f.flush(); f.dispose();
+  const f = pageFixture(t, { search: "new=1" }); await f.flush(); f.dispose();
   f.sessionGate.resolve({ data: { session: session(actorA) } }); await f.flush();
   assert.equal(f.lateWrites(), 0); assert.equal(f.mounts.length, 0);
 });
 
 test("page: late sign-in success after unmount cannot write state or mount an application", async t => {
-  const f = pageFixture(t); await f.ready(null); await f.fill(); f.submit(); await f.flush(); f.dispose();
+  const f = pageFixture(t, { search: "new=1" }); await f.ready(null); await f.fill(); f.submit(); await f.flush(); f.dispose();
   f.signIns[0].gate.resolve({ error: null, data: { session: session(actorA) } }); await f.flush();
   assert.equal(f.lateWrites(), 0); assert.equal(f.mounts.length, 0);
 });
 
 test("page: authenticated sign-out delegates only to the existing SDK method", async t => {
-  const f = pageFixture(t); await f.ready(actorA); assert.equal(typeof f.shell().onSignOut, "function");
+  const f = pageFixture(t, { search: "new=1" }); await f.ready(actorA); assert.equal(typeof f.shell().onSignOut, "function");
   f.shell().onSignOut(); await f.flush(); assert.equal(f.signOuts(), 1);
   assert.deepEqual(f.sdkTrace, ["subscribe", "getSession", "signOut"]); assert.equal(f.transport.calls.length, 0);
+});
+
+for (const [offset, state] of [[0, null], [20, "pending"], [1_000_000, "approved"], [1, "rejected"]] as const) {
+  test(`inbox client: offset ${offset}, state ${state} uses only an exact private GET`, async () => {
+    const data = { synthetic: "current application page" };
+    const f = clientFixture({ respond: async () => reply({ success: true, data }) });
+    const opts = inboxOptions({ offset, state });
+    assert.equal(await f.client.companyInboxRequestForActor(actorA, () => true)(opts), data);
+    assert.equal(f.calls.length, 1);
+    const { path, init } = f.calls[0], url = new URL(path, origin);
+    assert.equal(url.pathname, "/api/crm/partner-company");
+    assert.deepEqual(Object.fromEntries(url.searchParams), { view: "list", offset: String(offset), ...(state ? { state } : {}) });
+    assert.equal(init.method, "GET"); assert.equal(init.body, undefined); assert.equal(init.headers, undefined);
+    assert.equal(init.expectedUserId, actorA); assert.equal(init.signal, opts.signal); assert.equal(init.dispatchGuard(), true);
+    assert.equal(init.credentials, "same-origin"); assert.equal(init.mode, "same-origin"); assert.equal(init.redirect, "error");
+    assert.equal(init.cache, "no-store"); assert.equal(init.referrerPolicy, "no-referrer");
+    assert.deepEqual(f.trace, ["config", "crmFetch", "token"]);
+  });
+}
+
+test("inbox client: invalid pagination and states fail before configuration, token or transport access", async () => {
+  for (const patch of [
+    ...[undefined, null, -1, 0.5, 1_000_001, NaN, Infinity, "0", [], {}, new Number(0)].map(offset => ({ offset })),
+    ...[undefined, "", "all", "PENDING", "pending&actorId=" + actorB, [], {}, false].map(state => ({ state })),
+  ]) {
+    const f = clientFixture();
+    await assert.rejects(f.client.companyInboxRequestForActor(actorA, () => true)({ ...inboxOptions(), ...patch } as InboxOptions), error => {
+      assert.ok(error instanceof CrmApiError); assert.equal(error.status, 400); assert.equal(error.code, "invalid_partner_company_query"); return true;
+    });
+    assert.equal(f.calls.length, 0); assert.equal(f.tokenReads(), 0); assert.deepEqual(f.trace, []);
+  }
+});
+
+test("inbox client: unrelated command, actor and body fields cannot turn a list into recovery or a write", async () => {
+  const f = clientFixture({ apiUrl: p => origin + p });
+  const opts = { ...inboxOptions(), operation: "close", actorId: actorB, email: "foreign@example.invalid", workspaceId: sourceId,
+    sourceId, requestId, body: submitBody };
+  await f.client.companyInboxRequestForActor(actorA, () => true)(opts);
+  assert.equal(f.calls.length, 1); assert.equal(f.calls[0].path, "/api/crm/partner-company?view=list&offset=0");
+  assert.equal(f.calls[0].init.method, "GET"); assert.equal(f.calls[0].init.body, undefined);
+  assert.equal(f.calls[0].init.expectedUserId, actorA);
+});
+
+test("inbox client: the shared request helper composes actor and view dispatch guards", async () => {
+  for (const [actorCurrent, viewCurrent] of [[true, true], [true, false], [false, true], [false, false]]) {
+    const gate = deferred<Reply>(), f = clientFixture({ respond: () => gate.promise });
+    const pending = f.client.companyInboxRequestForActor(actorA, () => actorCurrent)(inboxOptions({ isCurrent: () => viewCurrent }));
+    assert.equal(f.calls[0].init.dispatchGuard(), actorCurrent && viewCurrent);
+    const result = actorCurrent && viewCurrent ? pending : assert.rejects(pending, isAbort);
+    gate.resolve(reply()); await result;
+  }
+});
+
+for (const boundary of ["actor", "view"] as const) {
+  test(`inbox client: stale ${boundary} rejects both held-response and held-JSON completions`, async () => {
+    for (const phase of ["response", "json"]) {
+      let current = true, jsonReads = 0;
+      const response = deferred<Reply>(), json = deferred<unknown>(), entered = deferred<void>();
+      const f = clientFixture({ respond: () => phase === "response" ? response.promise : Promise.resolve({
+        ok: true, status: 200, json() { jsonReads++; entered.resolve(); return json.promise; },
+      }) });
+      const pending = f.client.companyInboxRequestForActor(actorA, () => boundary === "actor" ? current : true)(
+        inboxOptions({ isCurrent: () => boundary === "view" ? current : true }));
+      const rejected = assert.rejects(pending, isAbort);
+      if (phase === "json") await entered.promise;
+      current = false; assert.equal(f.calls[0].init.dispatchGuard(), false);
+      response.resolve({ ok: true, status: 200, async json() { jsonReads++; return { success: true, data: {} }; } });
+      json.resolve({ success: true, data: { synthetic: "must not deliver" } }); await rejected;
+      assert.equal(jsonReads, phase === "json" ? 1 : 0); assert.equal(f.calls.length, 1);
+    }
+  });
+}
+
+test("page/client: default mode mounts only the inbox and exposes the actual read-only GET transport", async t => {
+  const f = pageFixture(t); await f.ready(actorA); const inbox = f.inbox();
+  assert.equal(f.mounts.length, 1); assert.equal(inbox.props.actorId, actorA); assert.equal(inbox.props.isSessionCurrent(), true);
+  assert.equal(f.transport.calls.length, 0, "The parent must not issue a context, receipt or mutation request");
+  assert.equal(f.shell().homeHref, "/partner-company"); assert.equal(f.shell().title, "Мои заявки компаний");
+  await inbox.props.request(inboxOptions({ offset: 20, state: "rejected" }));
+  assert.equal(f.transport.calls.length, 1);
+  assert.equal(f.transport.calls[0].path, "/api/crm/partner-company?view=list&offset=20&state=rejected");
+  assert.equal(f.transport.calls[0].init.method, "GET"); assert.equal(f.transport.calls[0].init.body, undefined);
+  assert.equal(f.mounts.some(m => m.kind === "application"), false);
+  assert.deepEqual(f.sdkTrace, ["subscribe", "getSession"]);
+});
+
+test("page: only explicit new=1 selects the existing form on direct load", async t => {
+  for (const search of ["", "new=0", "new=true", "state=pending", "new=1", "new=1&state=pending"]) {
+    const f = pageFixture(t, { search }); await f.ready(actorA);
+    if (new URLSearchParams(search).get("new") === "1") {
+      assert.equal(f.child().props.isSessionCurrent(), true); assert.equal(f.shell().title, "Заявка компании");
+    } else assert.equal(f.inbox().props.isSessionCurrent(), true);
+    assert.equal(f.mounts.length, 1); assert.equal(f.transport.calls.length, 0);
+    f.dispose(); await f.flush();
+  }
+});
+
+test("page: actual new/back callbacks and synthetic browser Back/Forward keep modes separate", async t => {
+  const f = pageFixture(t); await f.ready(actorA); const firstInbox = f.inbox();
+  firstInbox.props.onNewApplication(); await f.flush(); const form = f.child();
+  assert.equal(f.location().search, "?new=1"); assert.equal(form.props.actorId, actorA);
+  assert.equal(firstInbox.active, false); assert.equal(firstInbox.unmounts, 1);
+  const back = f.nodes().find(n => n.type === "button" && n.props.type === "button"); assert.ok(back);
+  back.props.onClick(); await f.flush(); const secondInbox = f.inbox();
+  assert.equal(f.location().search, ""); assert.notEqual(secondInbox, firstInbox);
+  assert.equal(form.active, false); assert.equal(form.props.isSessionCurrent(), false);
+  const previousNavigations = f.navigations.length;
+  firstInbox.props.onNewApplication(); back.props.onClick(); await f.flush();
+  assert.equal(f.navigations.length, previousNavigations, "Retired new/back callbacks cannot change the current mode");
+  assert.equal(f.inbox(), secondInbox);
+  f.travel(-1); await f.flush(); assert.notEqual(f.child(), form);
+  f.travel(1); await f.flush(); assert.notEqual(f.inbox(), secondInbox);
+  f.shell().onNavigate(); await f.flush(); assert.equal(f.location().search, "");
+  assert.equal(f.transport.calls.length, 0);
+});
+
+for (const isNew of [false, true]) {
+  test(`page/client: ${isNew ? "form-inbox-form" : "inbox-form-inbox"} ABA cannot revive a held JSON request or denial callback`, async t => {
+    const json = deferred<unknown>(), entered = deferred<void>();
+    const f = pageFixture(t, { search: isNew ? "new=1" : "", transport: { respond: async () => ({
+      ok: true, status: 200, json() { entered.resolve(); return json.promise; },
+    }) } });
+    await f.ready(actorA); const old = isNew ? f.child() : f.inbox();
+    const pending = isNew ? f.child().props.request(options("submit")) : f.inbox().props.request(inboxOptions());
+    const rejected = assert.rejects(pending, isAbort); await entered.promise;
+    f.navigate(isNew ? "/partner-company" : "/partner-company?new=1"); await f.flush();
+    assert.equal(old.active, false); assert.equal(old.props.isSessionCurrent(), false);
+    f.navigate(isNew ? "/partner-company?new=1" : "/partner-company"); await f.flush();
+    const current = isNew ? f.child() : f.inbox(); assert.notEqual(current, old);
+    assert.equal(old.props.isSessionCurrent(), false); assert.equal(current.props.isSessionCurrent(), true);
+    assert.equal(f.transport.calls[0].init.dispatchGuard(), false);
+    json.resolve({ success: true, data: { synthetic: "retired mode" } }); await rejected;
+    old.props.onAccessDenied(); await f.flush();
+    assert.equal(isNew ? f.child() : f.inbox(), current); assert.equal(f.nodes().some(n => n.props.role === "alert"), false);
+    assert.equal(f.transport.calls.length, 1);
+  });
+
+  test(`page/client: a late 403 from retired ${isNew ? "form" : "inbox"} cannot deny the other mode`, async t => {
+    const response = deferred<Reply>(), f = pageFixture(t, { search: isNew ? "new=1" : "", transport: { respond: () => response.promise } });
+    await f.ready(actorA); const old = isNew ? f.child() : f.inbox();
+    const pending = isNew ? f.child().props.request(options()) : f.inbox().props.request(inboxOptions());
+    const rejected = assert.rejects(pending, isAbort);
+    f.navigate(isNew ? "/partner-company" : "/partner-company?new=1"); await f.flush();
+    const current = isNew ? f.inbox() : f.child();
+    response.resolve(reply({ success: false }, 403)); await rejected;
+    old.props.onAccessDenied(); await f.flush();
+    assert.equal(isNew ? f.inbox() : f.child(), current); assert.equal(f.nodes().some(n => n.props.role === "alert"), false);
+    assert.equal(current.props.isSessionCurrent(), true); assert.equal(f.lateWrites(), 0);
+  });
+}
+
+test("page: actor ABA retires the inbox new-form callback before another render", async t => {
+  const f = pageFixture(t); await f.ready(actorA); const old = f.inbox();
+  f.emit(actorB); f.emit(actorA);
+  assert.equal(old.props.isSessionCurrent(), false); old.props.onNewApplication(); old.props.onAccessDenied();
+  await f.flush(); const current = f.inbox();
+  assert.notEqual(current, old); assert.equal(current.props.actorId, actorA); assert.equal(f.navigations.length, 0);
+  assert.equal(f.nodes().some(n => n.props.role === "alert"), false);
+  current.props.onNewApplication(); await f.flush(); assert.equal(f.child().props.actorId, actorA);
+});
+
+test("page: retained shell sign-out cannot log out B, a new A lifetime, or an unmounted page", async t => {
+  const f = pageFixture(t); await f.ready(actorA); const oldSignOut = f.shell().onSignOut;
+  f.emit(actorB); oldSignOut(); assert.equal(f.signOuts(), 0); await f.flush();
+  assert.equal(f.inbox().props.actorId, actorB); oldSignOut(); assert.equal(f.signOuts(), 0);
+  f.emit(actorA); oldSignOut(); assert.equal(f.signOuts(), 0); await f.flush();
+  const currentSignOut = f.shell().onSignOut; currentSignOut(); assert.equal(f.signOuts(), 1);
+  f.dispose(); currentSignOut(); await f.flush(); assert.equal(f.signOuts(), 1);
+  assert.equal(f.transport.calls.length, 0);
 });

@@ -7,7 +7,7 @@ import { startNativePostgres } from './native-postgres.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export async function startPartnerCompanyNativeBase(until = 125) {
   assert.equal(process.env.MEDINA_TEST_POSTGRES_NATIVE, '1');
-  assert.ok([124, 125].includes(until));
+  assert.ok([124, 125, 126].includes(until));
   const chain = (await readReviewedChain(path.join(root, 'migrations'))).filter(entry => Number(entry.file.slice(0, 3)) <= until);
   const fixture = await startNativePostgres();
   try {

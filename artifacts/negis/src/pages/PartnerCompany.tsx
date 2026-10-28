@@ -1,10 +1,11 @@
 import { useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import { ArrowRight, Building2, ClipboardList, Users } from "lucide-react";
-import { Link } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 import { PortalShell } from "@/components/portals/PortalShell";
 import { PartnerCompanyApplication } from "@/components/contributors/PartnerCompanyApplication";
+import { PartnerCompanyInbox } from "@/components/contributors/PartnerCompanyInbox";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
-import { companyRequestForActor } from "./partner-company-client";
+import { companyInboxRequestForActor, companyRequestForActor } from "./partner-company-client";
 
 type Session = Readonly<{ id: string | null; epoch: number }>;
 const navigation = [
@@ -14,6 +15,8 @@ const navigation = [
 ];
 
 export default function PartnerCompany() {
+  const [, navigate] = useLocation();
+  const isNew = new URLSearchParams(useSearch()).get("new") === "1";
   const [session, setSession] = useState<Session | null>(null);
   const live = useRef<Session>({ id: null, epoch: 0 });
   useLayoutEffect(() => {
@@ -27,21 +30,29 @@ export default function PartnerCompany() {
     void supabase.auth.getSession().then(({ data, error }) => { if (!observed) apply(error ? null : data.session?.user.id ?? null); }, () => { if (!observed) apply(null); });
     return () => { alive = false; live.current = { id: null, epoch: live.current.epoch + 1 }; data.subscription.unsubscribe(); };
   }, []);
-  return <PortalShell title="Заявка компании" homeHref="/partner-company" roleLabel="Подключение к Medina OS" activeId="company" items={navigation} onNavigate={() => {}}
-    onSignOut={session?.id ? () => void supabase.auth.signOut() : undefined}>
+  return <PortalShell title={isNew ? "Заявка компании" : "Мои заявки компаний"} homeHref="/partner-company" roleLabel="Подключение к Medina OS" activeId="company" items={navigation} onNavigate={() => navigate("/partner-company")}
+    onSignOut={session?.id ? () => { if (live.current === session) void supabase.auth.signOut(); } : undefined}>
     {!session ? <p role="status">Проверяем вход…</p> : session.id
-      ? <Company key={session.epoch} actorId={session.id} isCurrent={() => live.current === session} />
+      ? <Company key={`${session.epoch}:${isNew}`} actorId={session.id} isCurrent={() => live.current === session} isNew={isNew} navigate={navigate} />
       : <CompanyLogin key={session.epoch} isCurrent={() => live.current === session} />}
   </PortalShell>;
 }
 
-function Company({ actorId, isCurrent }: { actorId: string; isCurrent(): boolean }) {
+function Company({ actorId, isCurrent, isNew, navigate }: { actorId: string; isCurrent(): boolean; isNew: boolean; navigate(path: string): void }) {
   const [denied, setDenied] = useState(false);
-  const request = useRef(companyRequestForActor(actorId, isCurrent)).current;
+  const active = useRef(true);
+  useLayoutEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  const current = () => active.current && isCurrent();
+  const request = useRef(companyRequestForActor(actorId, current)).current;
+  const inboxRequest = useRef(companyInboxRequestForActor(actorId, current)).current;
+  const refuse = () => { if (current()) setDenied(true); };
   return denied ? <section className="portal-form-layout space-y-4" role="alert"><h2 className="font-medium">Доступ к заявке изменился</h2>
-    <p>Проверьте подтверждение личной почты и текущий аккаунт. Старая форма скрыта.</p>
+    <p>Проверьте текущий аккаунт и права доступа. Для новой заявки нужна подтверждённая личная почта. Прежние данные скрыты.</p>
     <Link href="/login" className="neu-btn"><ArrowRight size={16} />Вход для команды</Link></section>
-    : <PartnerCompanyApplication actorId={actorId} request={request} isSessionCurrent={isCurrent} onAccessDenied={() => { if (isCurrent()) setDenied(true); }} />;
+    : isNew ? <><button type="button" className="neu-btn mb-4" onClick={() => { if (current()) navigate("/partner-company"); }}><ClipboardList size={16} />Мои заявки</button>
+      <PartnerCompanyApplication actorId={actorId} request={request} isSessionCurrent={current} onAccessDenied={refuse} /></>
+    : <PartnerCompanyInbox actorId={actorId} request={inboxRequest} isSessionCurrent={current} onAccessDenied={refuse}
+      onNewApplication={() => { if (current()) navigate("/partner-company?new=1"); }} />;
 }
 
 function CompanyLogin({ isCurrent }: { isCurrent(): boolean }) {

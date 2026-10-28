@@ -93,6 +93,20 @@ export async function handlePartnerCompanyEntry(req: VercelRequest, res: VercelR
 export async function handlePartnerCompanyRecovery(req: VercelRequest, res: VercelResponse) {
   headers(res);
   const actor = await requireAuthenticatedUser(req);
+  if (req.method === "GET" && req.query.view !== undefined) {
+    const rawOffset = req.query.offset ?? "0", state = req.query.state ?? null;
+    if (req.query.view !== "list" || Object.keys(req.query).some(k => !["path", "view", "offset", "state"].includes(k)) || !emptyBody(req)
+      || typeof rawOffset !== "string" || !/^(?:0|[1-9]\d{0,6})$/.test(rawOffset) || Number(rawOffset) > 1000000
+      || (state !== null && state !== "pending" && state !== "approved" && state !== "rejected")) return fail(res, 400, "invalid_partner_company_query");
+    const db = getSupabaseServerClient(); if (!db) return unconfirmed(res);
+    try {
+      const { data, error } = await db.rpc("list_own_growth_partner_companies", { p_actor: actor.id, p_offset: Number(rawOffset), p_state: state });
+      if (error) return ["P1211", "P1121"].includes(error.code ?? "")
+        ? fail(res, 403, "partner_company_access_denied") : unconfirmed(res);
+      const page = parsePartnerCompanyPage(data, { offset: Number(rawOffset), state });
+      return page ? res.status(200).json({ success: true, data: page }) : unconfirmed(res);
+    } catch { return unconfirmed(res); }
+  }
   let requestId: unknown, sourceId: unknown;
   const close = req.method === "POST";
   if (req.method === "GET") {

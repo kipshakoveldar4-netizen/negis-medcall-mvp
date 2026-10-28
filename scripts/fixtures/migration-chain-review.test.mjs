@@ -8,12 +8,23 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-125, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 117);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 117 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-126, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 118);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 118 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
+});
+
+test('126 adds only a service-only own-company inbox with no body, table, provider or financial writes',()=>{
+  const e=chain.find(v=>v.file.startsWith('126_'));
+  assert.deepEqual(e.evidence.tables,[]);assert.deepEqual(e.evidence.rls,[]);
+  assert.deepEqual(e.evidence.functions.map(f=>f.name),['public.list_own_growth_partner_companies']);
+  assert.deepEqual(e.evidence.dynamicSqlLines,[]);assert.deepEqual(e.evidence.extensions,[]);assert.deepEqual(e.evidence.storageCatalogueLines,[]);
+  assert.match(e.source,/a\.applicant_auth_user_id=p_actor/);assert.match(e.source,/s\.role='owner' and s\.status='active'/);
+  assert.match(e.source,/offset p_offset limit 21/);assert.match(e.source,/P1262/);
+  assert.match(e.source,/item:=public\.read_growth_partner_company\(p_actor,candidate\.id\)/);
+  assert.doesNotMatch(e.source,/grant\s+(?:select|insert|update|delete)|(?:insert into|update|delete from) public\./i);
 });
 
 test('125 closes absent company commands without rewriting 121, direct browser access, finance or provider effects',()=>{

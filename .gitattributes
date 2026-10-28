@@ -118,3 +118,4 @@
 /migrations/123_operator_workday_read.sql text eol=lf
 /migrations/124_operator_lead_search.sql text eol=lf
 /migrations/125_partner_company_command_recovery.sql text eol=lf
+/migrations/126_partner_company_applicant_inbox.sql text eol=lf

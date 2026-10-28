@@ -211,10 +211,8 @@ test('actual PartnerCompanyApplication in owned Chromium; synthetic identity/tra
     assert.equal(await ev(`return !!document.querySelector('.pca-result a[href="/dashboard"]');`), false, 'Pending status does not expose an approved-only CTA');
     controls.approve(companyIds.a, saved.requestId);
     await refresh(); await wait(`document.querySelector('.pca-result')?.innerText.includes('Одобрена')`);
-    assert.equal(await ev(`const a=document.querySelector('.pca-result a[href="/dashboard"]');
-      const props=a?.[Object.keys(a).find(k=>k.startsWith('__reactProps$'))];
-      return !!a&&a.getAttribute('href')==='/dashboard'&&!a.getAttribute('target')&&typeof props?.onClick==='undefined';`), true,
-    'Approved CTA is a hard same-window href, not a client-side click handler');
+    assert.equal(await ev(`return !!document.querySelector('.pca-result a[href="/dashboard"]');`), false,
+      'A generic dashboard must not pretend to select this approved application workspace');
     assert.equal(requests('submit').length, 1); assert.equal(controls.commits, 1);
     assert.deepEqual(await metadata(), [saved]);
     await fit('approved');
@@ -231,7 +229,7 @@ test('actual PartnerCompanyApplication in owned Chromium; synthetic identity/tra
     assert.equal(receipt.state, 'committed'); assert.equal(receipt.application.state, 'approved');
     assert.equal(receipt.application.sourceState, 'expired'); assert.ok(Date.parse(receipt.application.expiresAt) < Date.now());
     assert.equal(await ev(`return /закрыта|отменена|отклонена/i.test(document.querySelector('.pca-result').innerText);`), false);
-    assert.equal(await ev(`return !!document.querySelector('.pca-result a[href="/dashboard"]');`), true, 'Expired attribution does not revoke approved company access');
+    assert.equal(await ev(`return !!document.querySelector('.pca-result a[href="/dashboard"]');`), false, 'No unverified target-workspace shortcut');
     assert.equal(await hasButton(labels.close), false); assert.equal(requests('close').length, 0);
     assert.equal(controls.applications.size, 1); assert.deepEqual(await metadata(), [saved]);
   });

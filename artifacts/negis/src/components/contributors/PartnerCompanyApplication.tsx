@@ -403,7 +403,6 @@ export function PartnerCompanyApplication({ actorId, isSessionCurrent, request, 
           <div><dt>Статус</dt><dd>{applicationStates[receipt.application.state]}</dd></div>
           <div><dt>Направление</dt><dd>{purposes[receipt.application.company.purpose]}</dd></div>
           <div><dt>Подана</dt><dd>{displayDate(receipt.application.submittedAt)} (Asia/Almaty)</dd></div></dl>
-        {receipt.application.state === "approved" && <div className="pca-actions"><a href="/dashboard" className="pca-button pca-primary"><Building2 size={17} aria-hidden="true" />Открыть CRM</a></div>}
       </section>}
       {receipt?.state === "abandoned" && <section className="pca-result" aria-label="Исходная отправка закрыта"><h3>Исходная отправка закрыта</h3>
         <p role="status">Неподтверждённая отправка закрыта. Уже сохранённые заявки не удаляются.</p>

@@ -157,6 +157,12 @@ try {
             assert.deepEqual(args,{p_owner:actor,p_offset:0,p_state:null});
             return {data:{items:[],offset:0,state:null,hasMore:false},error:null};
           }
+          if (name === 'list_own_growth_partner_companies') {
+            assert.ok([actor,ordinary].includes(args.p_actor));
+            assert.ok([0,20].includes(args.p_offset));assert.ok([null,'pending'].includes(args.p_state));
+            assert.deepEqual(Object.keys(args).sort(),['p_actor','p_offset','p_state']);
+            return {data:{items:[],offset:args.p_offset,state:args.p_state,hasMore:false},error:null};
+          }
           assert.equal(name,'read_growth_partner_company_review');
           assert.deepEqual(args,{p_owner:actor,p_application:applicationId,p_revision:revision,
             p_request:requestId,p_action:'approve',p_close:true});
@@ -183,6 +189,12 @@ try {
       }
       try {
         await companyCheck('partner-company','GET',200,{query:{requestId,sourceId},rpc:'read_growth_partner_company_submission'});
+        await companyCheck('partner-company','GET',200,{query:{view:'list'},rpc:'list_own_growth_partner_companies'});
+        await companyCheck('partner-company','GET',200,{query:{view:'list',offset:'20',state:'pending'},token:'fixture.ordinary.signature',rpc:'list_own_growth_partner_companies'});
+        await companyCheck('partner-company','GET',401,{query:{view:'list'},token:null});
+        await companyCheck('partner-company','GET',400,{query:{view:'list',requestId,sourceId}});
+        await companyCheck('partner-company','GET',400,{query:{view:'list',workspaceId:sourceId}});
+        await companyCheck('partner-company','POST',400,{query:{view:'list'}});
         await companyCheck('partner-company','POST',200,{body:{operation:'close',requestId,sourceId},rpc:'read_growth_partner_company_submission'});
         await companyCheck('platform-partner-companies','GET',200,{rpc:'list_growth_partner_companies'});
         await companyCheck('platform-partner-companies','POST',200,{body:{operation:'close',requestId,applicationId,revision,action:'approve'},rpc:'read_growth_partner_company_review'});

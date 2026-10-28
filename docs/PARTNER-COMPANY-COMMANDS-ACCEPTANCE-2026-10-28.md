@@ -92,3 +92,9 @@ does not discover old applications. Cross-session lookup and the real applicant
 entry/signup policy remain part of complete onboarding before public activation.
 Public abuse quotas and production retention/operational acceptance are not
 established by local closure/queue tests.
+
+Later local increment: the tab-only discovery limit is addressed by
+[the applicant inbox](PARTNER-COMPANY-INBOX-ACCEPTANCE-2026-10-28.md). It does
+not alter these historical results or claim public/cloud acceptance. The later
+increment also removes the generic dashboard shortcut; targeted company handoff
+was not proved by the original approved-receipt link.

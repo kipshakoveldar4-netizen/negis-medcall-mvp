@@ -123,6 +123,7 @@ c07f599caca533412618f4a7875fccc4891582356396e9b549b487a19e06749d 121_partner_com
 789e5443268b1c4079686b9e6a69585834f6ca42cd1095d47cad8c2b592217f3 123_operator_workday_read.sql
 0ffb000be6c33ff6cf431bf6ae269ac39499a5b7dc762235ef37adf62b5f287b 124_operator_lead_search.sql
 018dcdbbe7cb8f6f01b9476f723cd6fc3cc34f678066bc8979fcb03602ab874c 125_partner_company_command_recovery.sql
+54aa252bf9252aeac1cd489230f485924deba6a64d5264260c96b23f76e2b6b5 126_partner_company_applicant_inbox.sql
 `.trim().split('\n').map(line => line.split(' '));
 
 export const migrationReview = Object.freeze(Object.fromEntries(reviewed.map(([sha256, file]) => [file, sha256])));
