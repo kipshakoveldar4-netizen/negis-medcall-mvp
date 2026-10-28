@@ -197,6 +197,7 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   "operator-inbox": { kind: "bootstrap", methods: ["GET", "PATCH"] },
   "operator-leads": { kind: "bootstrap", methods: ["GET", "PATCH"] },
   "operator-workday": { kind: "bootstrap", methods: ["GET"] },
+  "operator-lead-search": { kind: "bootstrap", methods: ["GET"] },
   "operator-services": { kind: "bootstrap", methods: ["GET"] },
   "operator-bookings": { kind: "bootstrap", methods: ["GET", "POST"] },
   "operator-arrivals": { kind: "bootstrap", methods: ["GET", "PATCH"] },

@@ -12,6 +12,7 @@ import { handlePartnerEntry } from "../../lib/crm/partner-entry";
 import { handleCreatorJobs, handleCreatorJobReads } from "../../lib/crm/creator-jobs";
 import { handleOperatorLeads, handleClinicOperatorLeads } from "../../lib/crm/operator-leads";
 import { handleOperatorWorkday } from "../../lib/crm/operator-workday";
+import { handleOperatorLeadSearch } from "../../lib/crm/operator-lead-search";
 import { handleOperatorServices } from "../../lib/crm/operator-services";
 import { handleOperatorBookings } from "../../lib/crm/operator-bookings";
 import { handleClinicOperatorArrivals, handleOperatorArrivals } from "../../lib/crm/operator-arrivals";
@@ -336,6 +337,7 @@ async function dispatch(
     case "operator-inbox": return handleOperatorInbox(req, res);
     case "operator-leads": return handleOperatorLeads(req, res);
     case "operator-workday": return segments.length === 1 ? handleOperatorWorkday(req, res) : notFound(res);
+    case "operator-lead-search": return segments.length === 1 ? handleOperatorLeadSearch(req, res) : notFound(res);
     case "operator-services": return handleOperatorServices(req, res);
     case "operator-bookings": return handleOperatorBookings(req, res);
     case "operator-arrivals": return handleOperatorArrivals(req, res);

@@ -1,13 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  ArrowRight, Building2, CalendarCheck2, CalendarClock, ChevronLeft, ChevronRight,
-  CircleAlert, CircleCheck, ClipboardList, Clock3, LoaderCircle, Phone,
-  RefreshCw, UserCheck, Users,
+  CalendarCheck2, CalendarClock, ChevronLeft, ChevronRight,
+  CircleAlert, CircleCheck, ClipboardList, LoaderCircle, Phone,
+  RefreshCw, UserCheck,
 } from "lucide-react";
 import { operatorApi, OperatorApiError } from "@/lib/operatorApi";
-import { OperatorLeads } from "./OperatorLeads";
+import { OperatorLeadExplorer } from "./OperatorLeadExplorer";
 import {
-  operatorArrivalCheckLabels, operatorBookingStatusLabels, operatorLeadScopeLabels,
+  operatorArrivalCheckLabels, operatorBookingStatusLabels,
 } from "../../../../../lib/crm/operator-contracts";
 import {
   OPERATOR_WORKDAY_PAGE_SIZE, parseOperatorWorkday,
@@ -23,12 +23,6 @@ type WorkdayScope = {
 };
 type WorkdayRequest = { scope: WorkdayScope; offset: number; revision: number };
 type WorkdayResponse = { request: WorkdayRequest; data: OperatorWorkdayReport | null; error: string };
-type SelectedScope = {
-  request: WorkdayRequest;
-  report: OperatorWorkdayReport;
-  requestId: string;
-  leadScope: OperatorWorkdayCompany["leadScope"];
-};
 
 const MAX_OFFSET = 1_000_000;
 const localDateFormat = new Intl.DateTimeFormat("ru-RU", {
@@ -90,7 +84,7 @@ function Visit({ item, company }: { item: OperatorWorkdayVisit; company: Operato
   </li>;
 }
 
-export function OperatorWorkday({ actorId, isSessionCurrent, onAccessDenied, onCooperations }: {
+export function OperatorWorkday({ actorId, isSessionCurrent, onAccessDenied }: {
   actorId: string;
   isSessionCurrent: () => boolean;
   onAccessDenied: () => void;
@@ -106,10 +100,9 @@ export function OperatorWorkday({ actorId, isSessionCurrent, onAccessDenied, onC
 
   const [request, setRequest] = useState<WorkdayRequest>({ scope: renderedScope, offset: 0, revision: 0 });
   const [response, setResponse] = useState<WorkdayResponse | null>(null);
-  const [selection, setSelection] = useState<{ scope: WorkdayScope; requestId: string } | null>(null);
   const mounted = useRef(false);
+  const unmounted = useRef(false);
   const active = useRef<{ request: WorkdayRequest; controller: AbortController } | null>(null);
-  const selectedScope = useRef<SelectedScope | null>(null);
   const live = useRef({ request, response, scope: renderedScope, isSessionCurrent, onAccessDenied });
   live.current = { request, response, scope: renderedScope, isSessionCurrent, onAccessDenied };
 
@@ -117,8 +110,6 @@ export function OperatorWorkday({ actorId, isSessionCurrent, onAccessDenied, onC
   if (request.scope !== renderedScope) {
     setRequest({ scope: renderedScope, offset: 0, revision: request.revision + 1 });
     setResponse(null);
-    setSelection(null);
-    selectedScope.current = null;
   }
 
   function current(original: WorkdayRequest) {
@@ -134,7 +125,6 @@ export function OperatorWorkday({ actorId, isSessionCurrent, onAccessDenied, onC
   function clearResponse() {
     active.current?.controller.abort();
     active.current = null;
-    selectedScope.current = null;
     live.current.response = null;
     setResponse(null);
   }
@@ -169,17 +159,17 @@ export function OperatorWorkday({ actorId, isSessionCurrent, onAccessDenied, onC
     original.scope.expired = true;
     clearResponse();
     setResponse({ request: original, data: null, error: "Доступ к рабочему дню изменился. Обновите профиль." });
-    setSelection(null);
     live.current.onAccessDenied();
   }
 
   useLayoutEffect(() => {
     mounted.current = true;
+    unmounted.current = false;
     return () => {
       mounted.current = false;
+      unmounted.current = true;
       active.current?.controller.abort();
       active.current = null;
-      selectedScope.current = null;
     };
   }, []);
 
@@ -228,17 +218,6 @@ export function OperatorWorkday({ actorId, isSessionCurrent, onAccessDenied, onC
   const error = !available
     ? renderedScope.denied ? "Доступ к рабочему дню изменился. Обновите профиль." : "Рабочий день недоступен для текущего профиля."
     : result?.error ?? "";
-  const selected = report?.companies.find(company => selection?.scope === renderedScope && company.requestId === selection.requestId)
-    ?? report?.companies[0] ?? null;
-  if (!report || !selected) selectedScope.current = null;
-  else if (selectedScope.current?.request !== request || selectedScope.current.report !== report
-    || selectedScope.current.requestId !== selected.requestId || selectedScope.current.leadScope !== selected.leadScope) {
-    selectedScope.current = { request, report, requestId: selected.requestId, leadScope: selected.leadScope };
-  }
-  const renderedSelection = selectedScope.current;
-  const selectionCurrent = () => renderedSelection !== null && selectedScope.current === renderedSelection
-    && current(renderedSelection.request) && live.current.response?.request === renderedSelection.request
-    && live.current.response.data === renderedSelection.report;
   const companies = new Map(report?.companies.map(company => [company.requestId, company]));
   const today = report?.today;
 
@@ -250,7 +229,7 @@ export function OperatorWorkday({ actorId, isSessionCurrent, onAccessDenied, onC
     </header>
     {error && <p className="operator-workday__state operator-workday__error" role="alert"><CircleAlert size={20} aria-hidden="true" /><span>{error}</span></p>}
     {pending && <p className="operator-workday__state" role="status"><LoaderCircle size={20} className="operator-workday__spinner" aria-hidden="true" /><span>Загружаем рабочий день…</span></p>}
-    {report && <>
+    {report &&
       <div className="operator-workday__summary">
         <p className="operator-workday__caption">По всем подтверждённым компаниям</p>
         <dl className="operator-workday__metrics" aria-label="Сводка рабочего дня">
@@ -263,39 +242,24 @@ export function OperatorWorkday({ actorId, isSessionCurrent, onAccessDenied, onC
           <p>Записи и приходы за всё время</p>
           {report.summary.undatedBookings !== "0" && <p>Записей без времени: {countLabel(report.summary.undatedBookings)}</p>}
         </div>
-      </div>
+      </div>}
       <div className="operator-workday__body">
-        <section className="operator-workday__leads" aria-label="Заявки по компании">
-          <h3>Мои заявки</h3>
-          {selected ? <>
-            <div className="operator-workday__scope"><Building2 size={20} aria-hidden="true" />
-              <label>Компания<select className="neu-input" value={selected.requestId} onChange={event => {
-                const requestId = event.target.value;
-                if (!selectionCurrent() || !report.companies.some(company => company.requestId === requestId) || requestId === selected.requestId) return;
-                selectedScope.current = null;
-                setSelection({ scope: renderedScope, requestId });
-              }}>{report.companies.map(company => <option key={company.requestId} value={company.requestId}>{company.displayName}</option>)}</select></label>
-              <span className="operator-workday__lead-scope">{operatorLeadScopeLabels[selected.leadScope]}</span>
-              <p className="operator-workday__selected-date"><Clock3 size={14} aria-hidden="true" /><CompanyDate company={selected} /></p>
-            </div>
-            <OperatorLeads key={`${actorId}:${request.revision}:${selected.requestId}:${selected.leadScope}`}
-              actorId={request.scope.actorId} requestId={selected.requestId} leadScope={selected.leadScope}
-              isSessionCurrent={selectionCurrent} onAccessDenied={() => { if (selectionCurrent()) deny(request); }} />
-          </> : <div className="operator-workday__empty"><Users size={28} aria-hidden="true" /><h4>Пока нет подтверждённых компаний</h4>
-            <button type="button" className="neu-btn" onClick={() => {
-              if (current(request) && live.current.response?.data === report) onCooperations();
-            }}>Предложения о сотрудничестве<ArrowRight size={16} aria-hidden="true" /></button>
-          </div>}
-        </section>
+        <div className="operator-workday__leads">
+          {available && <OperatorLeadExplorer key={actorId} actorId={actorId}
+            isSessionCurrent={() => !unmounted.current && scope.current === renderedScope && scopeCurrent(renderedScope) && live.current.isSessionCurrent()}
+            onAccessDenied={() => {
+              if (scope.current === renderedScope && scopeCurrent(renderedScope)) deny(live.current.request);
+            }} />}
+        </div>
         <aside className="operator-workday__today" aria-label="Записи на сегодня">
           <header className="operator-workday__today-heading"><h3>Сегодня</h3><CalendarClock size={20} aria-hidden="true" /></header>
           <p className="operator-workday__caption">Местное время компаний</p>
-          {report.companies.length > 0 && <details className="operator-workday__company-days"><summary>Даты компаний</summary>
+          {report && report.companies.length > 0 && <details className="operator-workday__company-days"><summary>Даты компаний</summary>
             <ul>{report.companies.map(company => <li key={company.requestId}><strong>{company.displayName}</strong><CompanyDate company={company} /></li>)}</ul>
           </details>}
           {today?.state === "unavailable_timezone" && <div className="operator-workday__unavailable" role="status">
             <CircleAlert size={20} aria-hidden="true" /><div><p>Записи на сегодня недоступны</p><p>Нужен поддерживаемый часовой пояс компаний:</p>
-              <ul>{report.companies.filter(company => company.timeZone === null).map(company => <li key={company.requestId}>{company.displayName}</li>)}</ul>
+              <ul>{report?.companies.filter(company => company.timeZone === null).map(company => <li key={company.requestId}>{company.displayName}</li>)}</ul>
             </div>
           </div>}
           {today?.state === "ready" && <>
@@ -319,8 +283,8 @@ export function OperatorWorkday({ actorId, isSessionCurrent, onAccessDenied, onC
               </nav>
             </footer>
           </>}
+          {!report && <p className="operator-workday__state" role="status">{pending ? "Загружаем записи…" : "Записи на сегодня недоступны."}</p>}
         </aside>
       </div>
-    </>}
   </section>;
 }

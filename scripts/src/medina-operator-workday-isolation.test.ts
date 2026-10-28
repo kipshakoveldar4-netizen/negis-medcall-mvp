@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Script } from "node:vm";
 
 // Actual workday, hooks, DTO parser, operatorApi, crmFetch and token helper.
-// Reconciled host, SDK, fetch and OperatorLeads boundary are synthetic, not
+// Reconciled host, SDK, fetch and OperatorLeadExplorer boundary are synthetic, not
 // React DOM/browser/installed-SDK acceptance. No network or environment is read.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const ts = createRequire(path.join(root, "package.json"))("typescript") as typeof import("typescript");
@@ -31,7 +31,7 @@ type Host = {
   elements(value: Child): Element[];
   text(value: Child): string;
 };
-type Mutation = "none" | "unpin-actor" | "skip-parser";
+type Mutation = "none" | "unpin-actor" | "skip-parser" | "unguarded-explorer";
 
 // Fixture shapes stay test-local; the actual production parser validates them below.
 type CompanyFixture = {
@@ -77,6 +77,16 @@ function compile(source: string, fileName: string, mutation: Mutation = "none") 
             return ts.factory.updateCallExpression(node, node.expression, node.typeArguments,
               node.arguments.map((arg, index) => index === 4 ? ts.factory.createIdentifier("undefined") : arg));
           }
+        }
+        if (mutation === "unguarded-explorer" && ts.isJsxSelfClosingElement(node)
+          && ts.isIdentifier(node.tagName) && node.tagName.text === "OperatorLeadExplorer") {
+          const properties = node.attributes.properties.map(attribute => {
+            if (!ts.isJsxAttribute(attribute) || attribute.name.getText() !== "isSessionCurrent") return attribute;
+            mutations++;
+            return ts.factory.updateJsxAttribute(attribute, attribute.name,
+              ts.factory.createJsxExpression(undefined, ts.factory.createIdentifier("isSessionCurrent")));
+          });
+          return ts.factory.updateJsxSelfClosingElement(node, node.tagName, node.typeArguments, ts.factory.createJsxAttributes(properties));
         }
         return ts.visitEachChild(node, visit, context);
       };
@@ -181,6 +191,7 @@ type Pending = {
   succeed(data: unknown): void;
   bodyLater(data: unknown): () => void;
   headersOnly(status: number): void;
+  fail(status: number): void;
 };
 class SyntheticResponse extends Response {
   override readonly json: () => Promise<unknown>;
@@ -189,25 +200,32 @@ class SyntheticResponse extends Response {
     this.json = readJson;
   }
 }
-type Boundary = { actorId: string; requestId: string; leadScope: string; isSessionCurrent(): boolean; onAccessDenied(): void };
+type Boundary = { actorId: string; isSessionCurrent(): boolean; onAccessDenied(): void };
 async function runtime(t: TestContext, options: { holdSdk?: boolean; mutation?: Mutation } = {}) {
   const h = await host, source = await sources, render = h.renderer();
   const window = eventTarget(), document = { ...eventTarget(), visibilityState: "visible" };
   const requests: Pending[] = [], lookups: Array<ReturnType<typeof deferred<void>>> = [], denials: string[] = [];
-  const boundaries: Boundary[] = [], childActions: string[] = [];
+  const boundaries: Boundary[] = [], childActions: string[] = [], renderGuards: boolean[] = [];
+  let nextProbe = 0;
   let actor: string | null = A, sdkActor: string | null = A;
   const icons = Object.fromEntries(source.icons.map(name => [name, Symbol(name)]));
   const hooks: Renderer["hooks"] = { ...render.hooks, useId() { return render.hooks.useRef("synthetic-workday-caption").current; } };
   const modules: Record<string, Record<string, unknown>> = {};
-  function OperatorLeads(props: Boundary) {
+  function OperatorLeadExplorer(props: Boundary) {
+    assert.deepEqual(Object.keys(props).sort(), ["actorId", "isSessionCurrent", "onAccessDenied"], "Only the independent profile boundary belongs to Workday");
     boundaries.push(props);
-    const mounted = hooks.useRef(false);
+    renderGuards.push(props.isSessionCurrent());
+    const mounted = hooks.useRef(false), instance = hooks.useRef(null);
+    if (instance.current === null) instance.current = ++nextProbe;
+    const [draft, setDraft] = hooks.useState("");
     hooks.useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-    // A boundary probe only: no lead business logic, requests or state machine.
-    return h.jsx("output", { "data-synthetic-leads": props.requestId, "data-actor": props.actorId,
-      children: h.jsx("button", { "data-boundary-probe": true, onClick() {
-        if (mounted.current && props.isSessionCurrent()) childActions.push(`${props.actorId}:${props.requestId}`);
-      }, children: `synthetic-child:${props.actorId}:${props.requestId}` }) });
+    // Opaque local draft and mount identity only; no lead/filter business logic.
+    return h.jsx("output", { "data-synthetic-explorer": true, "data-instance": instance.current, "data-actor": props.actorId,
+      children: [h.jsx("input", { "data-boundary-draft": true, value: draft, onChange(event: { target: { value: string } }) {
+        if (mounted.current && props.isSessionCurrent()) setDraft(event.target.value);
+      } }), h.jsx("button", { "data-boundary-probe": true, onClick() {
+        if (mounted.current && props.isSessionCurrent()) childActions.push(`${props.actorId}:${instance.current}`);
+      }, children: `synthetic-child:${props.actorId}` })] });
   }
   function load(name: string): Record<string, unknown> {
     if (modules[name]) return modules[name];
@@ -228,7 +246,7 @@ async function runtime(t: TestContext, options: { holdSdk?: boolean; mutation?: 
           return { error: null, data: { session: sdkActor ? { user: { id: sdkActor }, access_token: `synthetic-token-${sdkActor}` } : null } };
         },
       } } };
-      if (specifier === "./OperatorLeads") return { OperatorLeads };
+      if (specifier === "./OperatorLeadExplorer") return { OperatorLeadExplorer };
       if (specifier.endsWith("operator-workday-contracts")) return contracts;
       if (specifier.endsWith("operator-contracts")) return prices;
       if (specifier.endsWith(".css")) return {};
@@ -260,6 +278,10 @@ async function runtime(t: TestContext, options: { holdSdk?: boolean; mutation?: 
               assert.equal(request.settled, false); request.settled = true;
               resolve(new SyntheticResponse(status, () => { request.bodyReads++; return new Promise<never>(() => {}); }));
             },
+            fail(status) {
+              assert.equal(request.settled, false); request.settled = true;
+              resolve(new SyntheticResponse(status, () => { request.bodyReads++; return Promise.resolve({ success: false, error: "Synthetic Today unavailable" }); }));
+            },
           };
           requests.push(request);
         });
@@ -278,19 +300,22 @@ async function runtime(t: TestContext, options: { holdSdk?: boolean; mutation?: 
     const result = render.nodes().find(node => node.type === "button" && h.elements(node).some(child => child.type === icons[icon]));
     assert.ok(result, `Missing ${icon} button`); return result;
   }
-  function selector() {
-    const result = render.nodes().find(node => node.type === "select");
-    assert.ok(result, "Missing company selector"); return result;
-  }
   function pending() {
     const result = [...requests].reverse().find(request => !request.settled);
     assert.ok(result, "Missing pending workday fetch"); return result;
   }
   function contactText(): string[] { return render.content().match(/contact-[a-zA-Z0-9-]+/g) ?? []; }
-  function child() { return render.nodes().filter(node => node.props["data-synthetic-leads"]); }
-  return { render, requests, lookups, denials, boundaries, childActions, window, document, mount, button, selector, pending, contactText, child,
-    options: () => Array.from(h.elements(selector()).filter(node => node.type === "option"), node => String(node.props.value)),
-    selected: () => String(selector().props.value),
+  function child() { return render.nodes().filter(node => node.props["data-synthetic-explorer"]); }
+  function draft() {
+    const input = render.nodes().find(node => node.props["data-boundary-draft"]);
+    assert.ok(input, "Missing independently mounted Explorer draft probe"); return input;
+  }
+  function explorer() {
+    assert.equal(child().length, 1);
+    assert.equal(boundaries.at(-1)!.isSessionCurrent(), true, "Mounted Explorer needs a live guarded profile scope");
+    return { instance: child()[0]!.props["data-instance"], actor: child()[0]!.props["data-actor"], draft: draft().props.value };
+  }
+  return { render, requests, lookups, denials, boundaries, childActions, renderGuards, window, document, mount, button, pending, contactText, child, draft, explorer,
     probes: () => render.nodes().filter(node => node.props["data-boundary-probe"]),
     setActor(next: string | null) { actor = next; sdkActor = next; },
     setSdkActor(next: string | null) { sdkActor = next; },
@@ -303,87 +328,84 @@ function change(node: Element, value: string) { (node.props.onChange as (event: 
 
 test("positive control: actual next-page handler sends an original-actor uncached read and replaces contacts", async t => {
   const r = await runtime(t); await r.seed();
-  assert.deepEqual(r.options(), [C, D]); assert.equal(r.selected(), C);
+  change(r.draft(), "opaque-independent-draft"); await r.render.flush(); const explorer = r.explorer();
   assert.equal(r.child().length, 1); assert.equal(r.boundaries.at(-1)!.actorId, A);
-  assert.equal(r.boundaries.at(-1)!.requestId, C); assert.equal(r.boundaries.at(-1)!.leadScope, "assigned");
   assert.equal(r.button("ChevronRight").props.disabled, false);
   click(r.button("ChevronRight")); await r.render.beforeEffects();
-  assert.deepEqual(r.contactText(), []); assert.equal(r.child().length, 0);
+  assert.deepEqual(r.contactText(), []); assert.deepEqual(r.explorer(), explorer);
   await r.render.flush();
   assert.equal(r.pending().url, "/api/crm/operator-workday?offset=20");
   assert.equal(new Headers(r.pending().init.headers).get("Authorization"), `Bearer synthetic-token-${A}`);
   await r.reply(report(20, "page20"));
-  assert.ok(r.contactText().includes("contact-page20-20")); assert.equal(r.child().length, 1);
+  assert.ok(r.contactText().includes("contact-page20-20")); assert.deepEqual(r.explorer(), explorer);
+  assert.equal(r.button("ChevronRight").props.disabled, true); assert.equal(r.button("ChevronLeft").props.disabled, false);
 });
 
-test("company selection uses the complete approved manifest, not only the twenty agenda rows", async t => {
-  const r = await runtime(t), companies = Array.from({ length: 25 }, (_, i) => company(id(101 + i)));
-  await r.seed(report(0, "manifest", companies));
-  assert.deepEqual(r.options(), companies.map(item => item.requestId));
-  const last = companies.at(-1)!;
-  const calls = r.requests.length, oldBoundary = r.boundaries.at(-1)!, oldProbe = r.probes()[0]!;
-  change(r.selector(), last.requestId); await r.render.beforeEffects();
-  assert.equal(oldBoundary.isSessionCurrent(), false); click(oldProbe);
-  await r.render.flush();
-  assert.equal(r.selected(), last.requestId); assert.equal(r.boundaries.at(-1)!.requestId, last.requestId);
-  assert.equal(r.boundaries.at(-1)!.leadScope, "clinic");
-  assert.equal(r.requests.length, calls, "Selecting a manifested company is not a new workday query");
-  assert.deepEqual(r.childActions, []);
-  click(r.probes()[0]!); assert.deepEqual(r.childActions, [`${A}:${last.requestId}`]);
+test("a valid profile mounts only the independent Explorer boundary before the first Today report", async t => {
+  const r = await runtime(t); r.mount(); await r.render.beforeEffects();
+  assert.equal(r.renderGuards[0], true, "A valid initial child render must not be mistaken for a retired parent before layout setup");
+  assert.deepEqual(r.contactText(), []); assert.equal(r.explorer().actor, A);
+  change(r.draft(), "draft-before-today"); await r.render.flush(); const explorer = r.explorer();
+  assert.equal(r.requests.length, 1); assert.equal(r.lookups.length, 1);
+  assert.equal(r.render.nodes().some(node => node.type === "select"), false, "The parent must not own a company selector");
+  await r.reply(report()); assert.deepEqual(r.explorer(), explorer);
 });
 
-test("forged company selection cannot create a child outside the approved manifest", async t => {
-  const r = await runtime(t); await r.seed();
-  const writes = r.render.writes(), calls = r.requests.length, contacts = r.contactText();
-  change(r.selector(), FOREIGN); await r.render.flush();
-  assert.equal(r.selected(), C); assert.equal(r.boundaries.at(-1)!.requestId, C);
-  assert.equal(r.render.writes(), writes); assert.equal(r.requests.length, calls);
-  assert.deepEqual(r.contactText(), contacts);
-});
+for (const outcome of ["503", "malformed"] as const) {
+  test(`Today ${outcome} after refresh removes only its own contacts and preserves the mounted Explorer draft`, async t => {
+    const r = await runtime(t); await r.seed();
+    change(r.draft(), "independent-draft"); await r.render.flush();
+    const explorer = r.explorer(), boundary = r.boundaries.at(-1)!, probe = r.probes()[0]!;
+    click(r.button("RefreshCw")); await r.render.beforeEffects();
+    assert.deepEqual(r.contactText(), []); assert.deepEqual(r.explorer(), explorer); assert.equal(boundary.isSessionCurrent(), true);
+    await r.render.flush();
+    if (outcome === "503") { r.pending().fail(503); await r.render.flush(); }
+    else await r.reply(report(20, "wrongpage"));
+    assert.deepEqual(r.contactText(), []); assert.deepEqual(r.explorer(), explorer); assert.deepEqual(r.denials, []);
+    assert.ok(r.render.nodes().some(node => node.props.role === "alert"));
+    click(probe); assert.deepEqual(r.childActions, [`${A}:${explorer.instance}`]);
+    click(r.button("RefreshCw")); await r.render.flush(); await r.reply(report(0, "recovered"));
+    assert.ok(r.contactText().includes("contact-recovered-0")); assert.deepEqual(r.explorer(), explorer);
+  });
+}
 
-test("selected company disappearance clears the old child before effects and retires its retained guard", async t => {
-  const r = await runtime(t); await r.seed();
-  change(r.selector(), D); await r.render.flush();
-  const oldBoundary = r.boundaries.at(-1)!, oldProbe = r.probes()[0]!;
-  click(r.button("RefreshCw")); await r.render.beforeEffects();
-  assert.equal(r.child().length, 0); assert.deepEqual(r.contactText(), []);
-  assert.equal(oldBoundary.isSessionCurrent(), false);
-  await r.render.flush(); await r.reply(report(0, "survivor", [company(C)]));
-  assert.deepEqual(r.options(), [C]); assert.equal(r.selected(), C);
-  click(oldProbe); oldBoundary.onAccessDenied(); await r.render.flush();
-  assert.deepEqual(r.childActions, []); assert.deepEqual(r.denials, []);
-  assert.equal(r.boundaries.at(-1)!.requestId, C);
-  assert.ok(r.contactText().includes("contact-survivor-0"));
-});
+for (const outcome of ["company-disappeared", "empty-today", "empty-manifest"] as const) {
+  test(`Today ${outcome} cannot remove or reset the independently authorized Explorer`, async t => {
+    const r = await runtime(t); await r.seed();
+    change(r.draft(), "independent-draft"); await r.render.flush();
+    const explorer = r.explorer(), boundary = r.boundaries.at(-1)!;
+    click(r.button("RefreshCw")); await r.render.flush();
+    await r.reply(outcome === "company-disappeared" ? report(0, "survivor", [company(C)])
+      : report(0, "empty", outcome === "empty-manifest" ? [] : [company(C), company(D)], 0));
+    assert.deepEqual(r.explorer(), explorer); assert.equal(boundary.isSessionCurrent(), true);
+    assert.equal(r.render.nodes().some(node => node.type === "select"), false);
+    if (outcome === "company-disappeared") assert.ok(r.contactText().includes("contact-survivor-0"));
+    else assert.deepEqual(r.contactText(), []);
+    assert.deepEqual(r.denials, []);
+  });
+}
 
-test("an empty approved manifest removes company selection, contacts and the previous child", async t => {
-  const r = await runtime(t); await r.seed(); const old = r.boundaries.at(-1)!;
-  click(r.button("RefreshCw")); await r.render.flush(); await r.reply(report(0, "empty", [], 0));
-  assert.equal(r.render.nodes().some(node => node.type === "select"), false);
-  assert.equal(r.child().length, 0); assert.deepEqual(r.contactText(), []);
-  assert.equal(old.isSessionCurrent(), false);
-});
-
-test("company C to D to C never revives the first C child's selection guard or denial callback", async t => {
-  const r = await runtime(t); await r.seed();
-  const original = r.boundaries.at(-1)!, originalProbe = r.probes()[0]!;
-  change(r.selector(), D); await r.render.flush();
-  change(r.selector(), C); await r.render.flush();
-  assert.equal(r.boundaries.at(-1)!.isSessionCurrent(), true); assert.equal(original.isSessionCurrent(), false);
-  const writes = r.render.writes(), calls = r.requests.length, contacts = r.contactText();
-  click(originalProbe); original.onAccessDenied(); await r.render.flush();
-  assert.equal(r.render.writes(), writes); assert.equal(r.requests.length, calls);
-  assert.deepEqual(r.childActions, []); assert.deepEqual(r.denials, []); assert.deepEqual(r.contactText(), contacts);
-});
-
-test("a current child denial expires the whole approved report and removes its contact and selection boundary", async t => {
-  const r = await runtime(t); await r.seed(); const current = r.boundaries.at(-1)!;
-  current.onAccessDenied(); await r.render.beforeEffects();
-  assert.deepEqual(r.contactText(), []); assert.equal(r.child().length, 0);
-  assert.equal(current.isSessionCurrent(), false); assert.deepEqual(r.denials, [A]);
-  const calls = r.requests.length; await r.render.flush();
-  current.onAccessDenied(); await r.render.flush(); assert.deepEqual(r.denials, [A]); assert.equal(r.requests.length, calls);
-});
+for (const state of ["initial-pending", "page-pending", "refresh-pending", "today-error"] as const) {
+  test(`a retained live-profile Explorer denial targets the current ${state} request and expires both siblings once`, async t => {
+    const r = await runtime(t);
+    if (state === "initial-pending") { r.mount(); await r.render.flush(); } else await r.seed();
+    const boundary = r.boundaries.at(-1)!, probe = r.probes()[0]!;
+    if (state !== "initial-pending") {
+      click(r.button(state === "page-pending" ? "ChevronRight" : "RefreshCw")); await r.render.flush();
+    }
+    const current = r.pending();
+    if (state === "today-error") { current.fail(503); await r.render.flush(); }
+    assert.equal(boundary.isSessionCurrent(), true);
+    boundary.onAccessDenied(); await r.render.beforeEffects();
+    assert.deepEqual(r.contactText(), []); assert.equal(r.child().length, 0);
+    assert.equal(current.init.signal?.aborted, true); assert.equal(boundary.isSessionCurrent(), false); assert.deepEqual(r.denials, [A]);
+    const writes = r.render.writes(), calls = r.requests.length;
+    click(probe); boundary.onAccessDenied(); await r.render.flush();
+    assert.equal(r.render.writes(), writes); assert.deepEqual(r.childActions, []); assert.deepEqual(r.denials, [A]); assert.equal(r.requests.length, calls);
+    if (!current.settled) { current.succeed(report(state === "page-pending" ? 20 : 0, "denied-late")); await r.render.flush(); }
+    assert.deepEqual(r.contactText(), []); assert.equal(r.child().length, 0);
+  });
+}
 
 test("valid terminal current status and an independent clinic confirmation remain separate", async t => {
   const r = await runtime(t), value = report(20, "terminal");
@@ -406,33 +428,45 @@ test("missing company timezone makes Today unavailable, not a zero, without inve
   value.companies[0] = { ...value.companies[0]!, timeZone: null, localDate: null, dayStart: null, dayEnd: null };
   value.today = { state: "unavailable_timezone", total: null, actionable: null, items: [], hasMore: false };
   assert.ok(parseOperatorWorkday(value, 0));
-  r.mount(); await r.render.flush(); await r.reply(value);
-  assert.deepEqual(r.contactText(), []); assert.equal(r.child().length, 1); assert.deepEqual(r.options(), [C, D]);
+  r.mount(); await r.render.flush(); const explorer = r.explorer(); await r.reply(value);
+  assert.deepEqual(r.contactText(), []); assert.deepEqual(r.explorer(), explorer);
   assert.match(r.render.content(), /Записи на сегодня недоступны/);
 });
 
-for (const action of ["page", "company", "refresh"] as const) {
+test("Today retains confirmed company-local calendar dates and times independently of the Explorer", async t => {
+  const r = await runtime(t), value = report();
+  value.companies[0] = { ...value.companies[0]!, timeZone: "Pacific/Honolulu", dayStart: "2026-10-28T10:00:00Z", dayEnd: "2026-10-29T10:00:00Z" };
+  assert.ok(parseOperatorWorkday(value, 0));
+  await r.seed(value);
+  const times = r.render.nodes().filter(node => node.type === "time");
+  assert.ok(times.some(node => node.props.dateTime === "2026-10-28"));
+  assert.ok(times.some(node => node.props.dateTime === "2026-10-28T10:00:00Z" && node.props.children === "00:00"));
+  assert.ok(times.some(node => node.props.dateTime === "2026-10-28T10:00:01Z" && node.props.children === "10:00"));
+  assert.match(r.render.content(), /Pacific\/Honolulu/); assert.equal(r.explorer().actor, A);
+});
+
+for (const action of ["page", "refresh"] as const) {
   test(`retained old ${action} handler cannot adopt a replacement page or clear its contacts`, async t => {
     const r = await runtime(t); await r.seed();
-    const old = action === "company" ? r.selector() : r.button(action === "page" ? "ChevronRight" : "RefreshCw");
+    const old = r.button(action === "page" ? "ChevronRight" : "RefreshCw"), explorer = r.explorer();
     click(r.button("ChevronRight")); await r.render.flush(); await r.reply(report(20, "replacement"));
     const contacts = r.contactText(), writes = r.render.writes(), calls = r.requests.length;
-    if (action === "company") change(old, D); else click(old);
+    click(old);
     await r.render.flush();
     assert.equal(r.render.writes(), writes); assert.equal(r.requests.length, calls);
-    assert.deepEqual(r.contactText(), contacts); assert.equal(r.selected(), C);
+    assert.deepEqual(r.contactText(), contacts); assert.deepEqual(r.explorer(), explorer);
     assert.equal(r.requests.at(-1)!.url, "/api/crm/operator-workday?offset=20");
   });
 }
 
-for (const action of ["page", "company", "refresh"] as const) {
+for (const action of ["page", "refresh"] as const) {
   test(`retained A ${action} handler cannot write before B effects or clear B after publication`, async t => {
     const r = await runtime(t); await r.seed();
-    const old = action === "company" ? r.selector() : r.button(action === "page" ? "ChevronRight" : "RefreshCw");
-    const invoke = () => action === "company" ? change(old, D) : click(old);
+    const old = r.button(action === "page" ? "ChevronRight" : "RefreshCw"), oldBoundary = r.boundaries.at(-1)!;
+    const invoke = () => click(old);
     r.mount(B); await r.render.beforeEffects();
     let writes = r.render.writes(); invoke(); assert.equal(r.render.writes(), writes);
-    assert.deepEqual(r.contactText(), []); assert.equal(r.child().length, 0);
+    assert.deepEqual(r.contactText(), []); assert.equal(oldBoundary.isSessionCurrent(), false); assert.equal(r.explorer().actor, B);
     await r.render.flush();
     assert.equal(new Headers(r.pending().init.headers).get("Authorization"), `Bearer synthetic-token-${B}`);
     await r.reply(report(0, "actorB"));
@@ -443,17 +477,45 @@ for (const action of ["page", "company", "refresh"] as const) {
   });
 }
 
-for (const action of ["page", "company", "refresh"] as const) {
+for (const action of ["page", "refresh"] as const) {
   test(`retained original A ${action} handler stays retired after A to B to A on the same page`, async t => {
     const r = await runtime(t); await r.seed();
-    const old = action === "company" ? r.selector() : r.button(action === "page" ? "ChevronRight" : "RefreshCw");
+    const old = r.button(action === "page" ? "ChevronRight" : "RefreshCw");
     r.mount(B); await r.render.flush(); await r.reply(report(0, "actorB"));
     r.mount(A); await r.render.flush(); await r.reply(report(0, "freshA"));
     const contacts = r.contactText(), calls = r.requests.length, writes = r.render.writes();
-    if (action === "company") change(old, D); else click(old);
+    click(old);
     await r.render.flush();
     assert.equal(r.render.writes(), writes); assert.equal(r.requests.length, calls);
     assert.deepEqual(r.contactText(), contacts); assert.deepEqual(r.denials, []);
+  });
+}
+
+for (const replacement of ["B", "A-to-B-to-A"] as const) {
+  test(`retired Explorer guards, draft handlers and denial callbacks cannot affect replacement ${replacement}`, async t => {
+    const r = await runtime(t); await r.seed();
+    change(r.draft(), "original-profile-draft"); await r.render.flush();
+    const original = r.explorer(), boundary = r.boundaries.at(-1)!, probe = r.probes()[0]!, draft = r.draft();
+    r.mount(B); await r.render.beforeEffects();
+    assert.equal(boundary.isSessionCurrent(), false); assert.equal(r.explorer().actor, B);
+    assert.notEqual(r.explorer().instance, original.instance); assert.equal(r.explorer().draft, "");
+    let writes = r.render.writes();
+    boundary.onAccessDenied(); click(probe); change(draft, "retired-draft");
+    assert.equal(r.render.writes(), writes); assert.deepEqual(r.denials, []);
+    await r.render.flush(); await r.reply(report(0, "actorB"));
+    if (replacement === "A-to-B-to-A") {
+      const oldB = r.boundaries.at(-1)!;
+      r.mount(A); await r.render.beforeEffects();
+      assert.equal(boundary.isSessionCurrent(), false); assert.equal(oldB.isSessionCurrent(), false);
+      writes = r.render.writes(); boundary.onAccessDenied(); oldB.onAccessDenied();
+      assert.equal(r.render.writes(), writes); assert.deepEqual(r.denials, []);
+      await r.render.flush(); await r.reply(report(0, "freshA"));
+    }
+    const explorer = r.explorer(), contacts = r.contactText(), calls = r.requests.length;
+    writes = r.render.writes(); boundary.onAccessDenied(); click(probe); change(draft, "retired-again"); await r.render.flush();
+    assert.equal(boundary.isSessionCurrent(), false); assert.equal(r.render.writes(), writes); assert.equal(r.requests.length, calls);
+    assert.deepEqual(r.explorer(), explorer); assert.deepEqual(r.contactText(), contacts);
+    assert.deepEqual(r.childActions, []); assert.deepEqual(r.denials, []);
   });
 }
 
@@ -498,11 +560,26 @@ test("A to B to A has distinct lifetimes and noncooperative late successes canno
 
 test("a same-actor false guard clears contacts and permanently expires the existing lifetime", async t => {
   const r = await runtime(t); await r.seed(); const calls = r.requests.length, oldBoundary = r.boundaries.at(-1)!;
+  const oldProbe = r.probes()[0]!, oldDraft = r.draft();
   r.mount(A, () => false); await r.render.beforeEffects();
   assert.deepEqual(r.contactText(), []); assert.equal(r.child().length, 0); assert.equal(oldBoundary.isSessionCurrent(), false);
   await r.render.flush(); r.mount(A, () => true); await r.render.flush();
   r.window.dispatch("focus"); r.document.dispatch("visibilitychange"); await r.render.flush();
   assert.equal(r.requests.length, calls); assert.deepEqual(r.contactText(), []); assert.equal(r.child().length, 0);
+  const writes = r.render.writes(); click(oldProbe); change(oldDraft, "expired"); oldBoundary.onAccessDenied(); await r.render.flush();
+  assert.equal(r.render.writes(), writes); assert.deepEqual(r.childActions, []); assert.deepEqual(r.denials, []);
+});
+
+test("the passed Explorer guard observes a live parent refusal without a render and cannot revive after the guard returns true", async t => {
+  const r = await runtime(t); let current = true;
+  r.mount(A, () => current); await r.render.flush(); await r.reply(report());
+  const boundary = r.boundaries.at(-1)!;
+  current = false; assert.equal(boundary.isSessionCurrent(), false);
+  current = true; assert.equal(boundary.isSessionCurrent(), false, "A refused profile lifetime must remain retired");
+  r.mount(A, () => true); await r.render.beforeEffects();
+  assert.deepEqual(r.contactText(), []); assert.equal(r.child().length, 0);
+  const writes = r.render.writes(); boundary.onAccessDenied(); await r.render.flush();
+  assert.equal(r.render.writes(), writes); assert.deepEqual(r.denials, []);
 });
 
 test("same-actor guard failure while SDK lookup waits prevents dispatch and late state writes", async t => {
@@ -525,7 +602,7 @@ test("same-actor guard failure while actual operatorApi awaits JSON permanently 
 for (const status of [401, 403]) {
   test(`${status} headers without a body expire access, clear the child, and notify exactly once`, async t => {
     const r = await runtime(t); await r.seed();
-    const oldNext = r.button("ChevronRight"), oldSelect = r.selector(), oldRefresh = r.button("RefreshCw"), oldChild = r.boundaries.at(-1)!;
+    const oldNext = r.button("ChevronRight"), oldDraft = r.draft(), oldProbe = r.probes()[0]!, oldRefresh = r.button("RefreshCw"), oldChild = r.boundaries.at(-1)!;
     click(oldRefresh); await r.render.flush(); const denied = r.pending();
     denied.headersOnly(status); await r.render.flush();
     assert.equal(denied.bodyReads, 0, "Access denial must not await a missing response body");
@@ -533,38 +610,43 @@ for (const status of [401, 403]) {
     assert.equal(oldChild.isSessionCurrent(), false); assert.deepEqual(r.denials, [A]);
     const renderedDenialAlert = r.render.nodes().some(node => node.props.role === "alert");
     const writes = r.render.writes(), calls = r.requests.length, lookups = r.lookups.length;
-    click(oldNext); change(oldSelect, D); click(oldRefresh); oldChild.onAccessDenied();
+    click(oldNext); change(oldDraft, "retired-draft"); click(oldProbe); click(oldRefresh); oldChild.onAccessDenied();
     assert.equal(r.render.writes(), writes, "Retained handlers cannot write to the denied request");
     r.window.dispatch("focus"); r.document.dispatch("visibilitychange");
     await r.render.flush();
     r.mount(A, () => true); await r.render.flush();
     assert.equal(r.requests.length, calls); assert.equal(r.lookups.length, lookups);
+    assert.deepEqual(r.childActions, []);
     assert.deepEqual(r.denials, [A]); assert.deepEqual(r.contactText(), []); assert.equal(r.child().length, 0);
     assert.equal(renderedDenialAlert, true, "Denial must render its alert without relying on a later parent render");
   });
 }
 
-test("focus immediately hides contacts and child; late old-page JSON cannot replace a newly confirmed page", async t => {
+test("focus immediately hides Today contacts but preserves Explorer; late old-page JSON cannot replace a newly confirmed page", async t => {
   const r = await runtime(t); await r.seed();
+  change(r.draft(), "focus-draft"); await r.render.flush(); const explorer = r.explorer();
   click(r.button("ChevronRight")); await r.render.flush();
   const old = r.pending(), release = old.bodyLater(report(20, "latepage"));
   await r.render.flush(); assert.equal(old.bodyReads, 1);
   r.window.dispatch("focus"); await r.render.beforeEffects();
-  assert.deepEqual(r.contactText(), []); assert.equal(r.child().length, 0); assert.equal(old.init.signal?.aborted, true);
+  assert.deepEqual(r.contactText(), []); assert.deepEqual(r.explorer(), explorer); assert.equal(old.init.signal?.aborted, true);
   await r.render.flush(); await r.reply(report(20, "focused"));
   click(r.button("ChevronLeft")); await r.render.flush(); await r.reply(report(0, "newpage"));
   const contacts = r.contactText(), writes = r.render.writes(); release(); await r.render.flush();
   assert.equal(r.render.writes(), writes); assert.deepEqual(r.contactText(), contacts); assert.deepEqual(r.denials, []);
+  assert.deepEqual(r.explorer(), explorer);
 });
 
 test("visibility restoration revalidates the current page; a hidden event does not dispatch", async t => {
   const r = await runtime(t); await r.seed();
+  change(r.draft(), "visibility-draft"); await r.render.flush(); const explorer = r.explorer();
   const calls = r.requests.length; r.document.visibilityState = "hidden"; r.document.dispatch("visibilitychange"); await r.render.flush();
   assert.equal(r.requests.length, calls); assert.ok(r.contactText().length > 0);
   r.document.visibilityState = "visible"; r.document.dispatch("visibilitychange"); await r.render.beforeEffects();
-  assert.deepEqual(r.contactText(), []); assert.equal(r.child().length, 0);
+  assert.deepEqual(r.contactText(), []); assert.deepEqual(r.explorer(), explorer);
   await r.render.flush(); assert.equal(r.requests.length, calls + 1); await r.reply(report(0, "visible"));
   assert.ok(r.contactText().includes("contact-visible-0"));
+  assert.deepEqual(r.explorer(), explorer);
 });
 
 test("retained original focus callback cannot clear or revalidate a later actor", async t => {
@@ -590,8 +672,9 @@ for (const status of [401, 403]) {
 for (const invalid of ["wrong-offset", "private-root", "private-company", "foreign-visit", "duplicate-company", "partial-manifest",
   "missing-status-buckets", "extra-status-bucket", "noncanonical-status-count", "status-sum-mismatch",
   "terminal-actionable-contradiction", "today-plus-undated-overflow", "nonpositive-duration", "visible-confirmed-overflow", "visible-status-overflow"] as const) {
-  test(`actual workday refuses ${invalid} without publishing contacts or a company child`, async t => {
+  test(`actual workday refuses ${invalid} without Today contacts while preserving the independent profile boundary`, async t => {
     const r = await runtime(t); r.mount(); await r.render.flush();
+    change(r.draft(), "independent-draft"); await r.render.flush(); const explorer = r.explorer();
     const value = report() as ReportFixture & Record<string, unknown>;
     if (invalid === "wrong-offset") value.offset = 20;
     if (invalid === "private-root") value.accessToken = "synthetic-forbidden";
@@ -617,16 +700,20 @@ for (const invalid of ["wrong-offset", "private-root", "private-company", "forei
     }
     assert.equal(parseOperatorWorkday(value, 0), null, "This must genuinely be an invalid DTO");
     await r.reply(value);
-    assert.deepEqual(r.contactText(), []); assert.equal(r.child().length, 0); assert.deepEqual(r.denials, []);
+    assert.deepEqual(r.contactText(), []); assert.deepEqual(r.explorer(), explorer); assert.deepEqual(r.denials, []);
     assert.ok(r.render.nodes().some(node => node.props.role === "alert"));
   });
 }
 
 test("unmount aborts transport and noncooperative late success cannot write or leave focus listeners", async t => {
   const r = await runtime(t); r.mount(); await r.render.flush(); const old = r.pending();
+  const boundary = r.boundaries.at(-1)!, probe = r.probes()[0]!, draft = r.draft();
   r.render.mount(null); await r.render.beforeEffects(); assert.equal(old.init.signal?.aborted, true);
-  const writes = r.render.writes(); old.succeed(report(0, "unmounted")); await r.render.flush();
+  assert.equal(boundary.isSessionCurrent(), false);
+  const writes = r.render.writes(); boundary.onAccessDenied(); click(probe); change(draft, "unmounted");
+  old.succeed(report(0, "unmounted")); await r.render.flush();
   assert.equal(r.render.writes(), writes); assert.deepEqual(r.contactText(), []); assert.deepEqual(r.denials, []);
+  assert.deepEqual(r.childActions, []);
   assert.equal(r.window.callbacks("focus").length, 0); assert.equal(r.document.callbacks("visibilitychange").length, 0);
   r.window.dispatch("focus"); r.document.dispatch("visibilitychange"); await r.render.flush(); assert.equal(r.requests.length, 1);
 });
@@ -647,4 +734,13 @@ test("negative control: bypassing only the actual parser really publishes wrong-
   await r.reply(value);
   assert.ok(r.contactText().includes("contact-wrongpage-20"), "The in-memory mutant must publish the rejected page's contact");
   assert.throws(() => assert.deepEqual(r.contactText(), [], "Page isolation invariant"), assert.AssertionError);
+});
+
+test("negative control: replacing only the Explorer lifetime guard with the raw parent guard revives a retired boundary", async t => {
+  const r = await runtime(t, { mutation: "unguarded-explorer" }); await r.seed();
+  const boundary = r.boundaries.at(-1)!;
+  r.mount(A, () => false); await r.render.beforeEffects();
+  assert.deepEqual(r.contactText(), []); assert.equal(r.child().length, 0);
+  assert.equal(boundary.isSessionCurrent(), true, "The in-memory mutant must actually retain the unsafe original parent guard");
+  assert.throws(() => assert.equal(boundary.isSessionCurrent(), false, "Retired Explorer lifetime invariant"), assert.AssertionError);
 });

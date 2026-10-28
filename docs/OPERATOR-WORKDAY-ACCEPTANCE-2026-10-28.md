@@ -160,6 +160,9 @@ If the browser/runtime cannot validate a server timezone, parsing safely refuses
 - The source mock's global lead search/stage filters are not implemented by the
   guarded per-company lead list. That remaining product/design gap is explicit,
   not a fake global count/filter; it needs a separate scoped read/interaction cycle.
+  This describes the original 123 checkpoint. The later local 124/Explorer cycle
+  now implements that read/filter scope; its distinct evidence and still-open
+  integration/cloud gates are in [the search receipt](OPERATOR-LEAD-SEARCH-ACCEPTANCE-2026-10-28.md).
 
 Six earlier disjoint agents handled UI, contract tests, lifetime tests, existing
 actor regression adaptation, read-only review and rollout criteria. Additional

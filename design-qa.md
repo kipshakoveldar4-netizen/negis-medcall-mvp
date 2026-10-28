@@ -66,8 +66,16 @@ Machine-readable final ready/interaction evidence: `final/browser-report.json`.
    receipt now remain visible, while service/receipt details expand through a
    native disclosure. Counts use a compact line. The actual 30/30 browser pass
    includes opening/closing that disclosure, not just its static appearance.
+6. Operator global-search iteration: desktop now has a genuine complete-scope
+   search/company/group bar, not filters over an inbox page. Initial mobile
+   wrapping group buttons pushed the first lead below the viewport (P2):
+   `lead-search/iteration-1-operator-mobile.png`. Replaced only small-screen group
+   buttons with a native select carrying the same seven counts and guarded action.
+   Current mobile evidence and an actual-browser assertion confirm the first lead
+   appears before the bottom of the initial 375x900 viewport, even with the 143px
+   fixture toolbar. Desktop keeps its original button interaction.
 
-Current individual screenshots and all three same-input full-view comparisons
+Historical workday individual screenshots and full-view comparisons
 are in `output/design-qa/contributors-2026-10-28/workday/`. They supersede older
 operator ready captures, not the historical backend receipts. Source normalization
 and fixture-toolbar crop are identical to those above; each desktop viewport is
@@ -82,6 +90,31 @@ browser imported the frozen UI after its last source edit. Two visible Today
 rows fit in the desktop viewport; the first available lead appears in the mobile
 viewport even with the 143px fixture toolbar. There is no separate mobile source.
 
+Latest individual screenshots, all three combined full-view comparisons and
+machine report are in `output/design-qa/contributors-2026-10-28/lead-search/`.
+The approved 1487x1058 sources are still proportionally normalized to 1440 wide;
+1440x1000 implementation captures exclude only the 59px fixture toolbar and are
+not stretched. Comparison canvases remain 2888x1040 with an 8px gutter. Actual
+matching interaction states are now captured: operator `in_progress`, partner
+October 2026, creator all jobs. `*-reference-desktop.png` identifies those inputs;
+`*-desktop.png` / `*-mobile.png` retain default ready views. Example identities,
+counts and historical dates are synthetic and intentionally not copied as product
+facts from the generated source. No separate mobile source exists.
+
+Latest combined inputs and native-sized desktop/mobile images were opened and
+inspected. Focused operator comparisons are `operator-header-focus.png`
+(1808x280, two 900x280 crops) and `operator-filters-focus.png` (1476x160;
+720x155 source and 734x160 implementation crops, unscaled and padded). The latter
+compares the same active in-progress state. Full views, not the limited header
+crop, confirm all summary labels fit. These supplement, not replace, the full
+comparison. New stage/company/detail/denial screenshots are saved individually.
+
+Final `lead-search/browser-report.json`: 49 layout checks, 53 screenshots, no
+runtime exceptions, console errors, blocked external attempts or real API network
+requests. The owned browser ran after all application-source edits; both final
+31/31 runs completed normally. The final one adds matching-state captures only.
+The former mobile P2 is resolved locally. Partner-link parity remains blocked.
+
 ## Fidelity Surfaces
 
 - Typography: existing local Inter, restrained 400/500/600 weights, no viewport
@@ -93,7 +126,9 @@ viewport even with the 143px fixture toolbar. There is no separate mobile source
 - Images: three individually generated generic content-production illustrations,
   optimized to 640 px WebP (about 25/39/35 KB), with explicit illustration alt text.
   They are not customer media, company locations or evidence of accepted work.
-- Copy/content: counts are page-scoped when the API is paginated; money is exact
+- Copy/content: creator counts remain explicitly current-page scoped. Operator
+  lead counts use the complete authorized search/company scope across all pages,
+  and group selection never changes their meaning. Partner money is exact
   minor-unit data from the original DTO. The fixture's example balances are not
   actual earnings. Missing agreements, unknown outcomes and denials remain truthful.
 
@@ -111,12 +146,18 @@ viewport even with the 143px fixture toolbar. There is no separate mobile source
   failure/retry, unavailable timezone and withdrawal states have separate native,
   HTTP, strict-parser, lifetime and real-browser receipts. See
   `docs/OPERATOR-WORKDAY-ACCEPTANCE-2026-10-28.md`; no cloud release is claimed.
-- [P2] The operator source's all-company lead search/stage-filter bar is not
-  implemented by the current per-company guarded lead workflow. This is a real
-  remaining product gap, not proof that the fixture's single lead is the full
-  global list. Initial-contact success also has no authoritative event definition;
-  the UI explicitly says tracking is unavailable rather than inventing its count.
-  Preserve these distinctions in further implementation and design acceptance.
+- Resolved locally: the operator all-company lead search/group/company bar is
+  implemented by 124/API/Explorer, with complete native authorization and counts,
+  20-row replacement pages and small-screen native selection. Actual browser
+  search/filter/card/open/close/denial and original booking-read identity pass.
+  Full browser-to-native stage/booking submission remains distinct from these
+  read-only browser cases and the passing split-layer native/UI mutation tests.
+  See `docs/OPERATOR-LEAD-SEARCH-ACCEPTANCE-2026-10-28.md`.
+- Open product definition: initial-contact success and next-contact events still
+  have no authoritative definition. Tracking is explicitly unavailable; created
+  time is labelled UTC, not passed off as a planned next-contact time. Summary
+  has three backed metrics rather than a fabricated fourth. Sidebar sections
+  without a distinct supported workflow were not added as fake destinations.
 - Resolved: creator nearest-deadline shortcut now uses the existing job detail
   and explicitly labels current-page scope. Actual 375/1440 open/close checks
   passed; source has no global-total authority, so no overall nearest claim is
@@ -145,18 +186,26 @@ The source/fixture/bundle gate passed 79/79 before those last two visual-only
 edits. These are local layers with synthetic Auth/API where explicitly stated,
 not an accepted cloud deployment or a summed readiness percentage.
 
+Latest search evidence: 759/759 exact cumulative native SQL/HTTP, 24/24 focused
+native/HTTP, 1052/1052 portal UI, 1447/1447 operator regression, 82/82 review/
+checkout/fixture/bundle and 35+30 shared Auth/API tests. Full standard build with
+353 compiled cold-start checks and final browser 31/31 pass. These overlapping
+local layers do not establish real Auth, cloud or commercial acceptance.
+
 ## Implementation Checklist
 
 - [x] Shared scoped shell, previous font, reduced-motion behavior, actual navigation.
 - [x] Operator scoped leads, separate cooperation/profile, original actor guards.
 - [x] Local complete operator summary, company-local Today and compact disclosure.
+- [x] Local complete authorized lead search/company/groups and compact mobile select.
 - [x] Partner exact aggregate balances and actual terms/code workflow.
 - [x] Own confirmation history, UTC month filter, desktop table/mobile cards.
 - [x] Creator actual assignments, responsive rows, page filters and original commands.
 - [x] Current-page nearest deadline and existing detail open/close at 375/1440.
 - [x] Desktop/mobile ready-state screenshots and same-page comparisons.
 - [ ] Complete verified partner-link entry and company onboarding.
-- [ ] Resolve operator all-company search/filter and initial-contact definition gaps.
+- [ ] Define authoritative initial-contact/next-contact events without invented metrics.
+- [ ] Complete browser-to-native stage/booking submission from the new Explorer.
 - [ ] Separately authorize and verify an isolated cloud Preview; no release here.
 
 final result: blocked

@@ -8,7 +8,8 @@ import { exerciseOperatorWorkdayHttp } from './operator-workday-native-http-case
 
 test('complete own operator workday on owned PostgreSQL, without cloud or provider facilities',{timeout:300000},async t=>{
   assert.equal(process.env.MEDINA_TEST_POSTGRES_NATIVE,'1');
-  const chain=await readReviewedChain(fileURLToPath(new URL('../../migrations/',import.meta.url))),last=chain.at(-1);
+  // Historical 123 protocol; current-chain composition is tested separately.
+  const chain=(await readReviewedChain(fileURLToPath(new URL('../../migrations/',import.meta.url)))).filter(e=>Number(e.file.slice(0,3))<=123),last=chain.at(-1);
   assert.equal(last.file,'123_operator_workday_read.sql');
   const fixture=await startNativePostgres();t.after(()=>fixture.close());const db=await fixture.connect();
   await db.query(`create role anon nologin;create role authenticated nologin;create role service_role nologin bypassrls;

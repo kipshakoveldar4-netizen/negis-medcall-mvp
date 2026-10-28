@@ -3,6 +3,8 @@ import { parseCreatorCommandIdentity, parseCreatorJobAction, type CreatorJob, ty
 import { parseContributorApplication, type ContributorProfile } from "../../lib/crm/contributor-contracts";
 import { partnerHistoryMonth, type PartnerHistoryItem } from "../../lib/crm/partner-history-contracts";
 import type { OperatorWorkdayReport } from "../../lib/crm/operator-workday-contracts";
+import { OPERATOR_LEAD_SEARCH_PAGE_SIZE, operatorLeadGroups, parseOperatorLeadSearchQuery, type OperatorLeadSearchReport, type OperatorSearchLead } from "../../lib/crm/operator-lead-search-contracts";
+import { normalizePhone } from "../../lib/crm/phone";
 
 export const portalDesignIds = {
   contributor: "33333333-3333-4333-8333-333333333333",
@@ -12,6 +14,8 @@ export const portalDesignIds = {
   job: "77777777-7777-4777-8777-777777777777",
   jobReview: "77777777-7777-4777-8777-777777777778",
   jobChanges: "77777777-7777-4777-8777-777777777779",
+  operatorRequest: "00000000-0000-4000-8000-000000000801",
+  operatorRequestTwo: "00000000-0000-4000-8000-000000000806",
 } as const;
 export const portalDesignViews = ["partner", "creator", "operator"] as const;
 export const portalDesignStates = ["ready", "empty", "error", "denied", "signed-out", "pending", "suspended"] as const;
@@ -32,6 +36,18 @@ const clone = <T>(value: T): T => structuredClone(value);
 const ok = (data: unknown) => Response.json({ success: true, data });
 const fail = (status: number, error = "Fixture: request refused") => Response.json({ success: false, error }, { status });
 const uuid = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+const leadGroups = ["new", "in_progress", "postponed", "booked", "lost", "other",
+  ...Array(21).fill("new"), ...Array(5).fill("in_progress"), ...Array(2).fill("postponed")] as OperatorSearchLead["group"][];
+const searchLeads: OperatorSearchLead[] = leadGroups.map((group, index) => ({
+  id: index === 0 ? "00000000-0000-4000-8000-000000000802" : `60000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+  requestId: index % 2 === 0 ? portalDesignIds.operatorRequest : portalDesignIds.operatorRequestTwo,
+  name: ["ТЕСТ O1 контакт", "ТЕСТ Қарлығаш Әлия", "ТЕСТ Александра Соколова", "ТЕСТ 100%_контакт", "ТЕСТ 100XYконтакт", "ТЕСТ Особый статус"][index]
+    ?? `ТЕСТ Заявка ${String(index + 1).padStart(2, "0")}`,
+  phone: index < 2 ? "+70000000991" : `+7000000${String(index).padStart(4, "0")}`,
+  status: group === "other" ? "fixture_unknown" : group, stageId: null,
+  stageName: ({ new: "Новая", in_progress: "В работе", postponed: "Отложена", booked: "Записана", lost: "Потеряна", other: "Особый статус" })[group],
+  group, source: "fixture", createdAt: new Date(Date.UTC(2026, 9, 17, 9, -index)).toISOString(),
+}));
 
 // Browser doubles only. No SDK, environment, disk, real payments or referrals.
 export function createPortalDesignStore(input: string | URL = "/contributors?mode=partner") {
@@ -41,6 +57,7 @@ export function createPortalDesignStore(input: string | URL = "/contributors?mod
   let actor: string | null = state === "signed-out" ? null : actorForView();
   let denied = false, lose = false, failBefore = false, acceptingRequests = false;
   let operator = createOperatorBrowserFixture();
+  let secondCooperationEnded = false;
   let expandedWorkday = false, missingWorkdayZone = false;
   const authListeners = new Set<(event: string, session: ReturnType<typeof session>) => void>();
   const listeners = new Set<() => void>();
@@ -87,6 +104,18 @@ export function createPortalDesignStore(input: string | URL = "/contributors?mod
     } });
   }
   seed();
+  async function operatorInbox() {
+    const inbox = (await operator.request(new URL("http://fixture.invalid/api/crm/operator-inbox")).json()).data;
+    if (state === "empty") return { items: [], hasMore: false };
+    const first = inbox.items[0];
+    return { ...inbox, items: [...inbox.items, { ...first, id: portalDesignIds.operatorRequestTwo,
+      displayName: "ТЕСТ O2 Қамқор", leadScope: "clinic", status: first.status === "accepted" && secondCooperationEnded ? "ended" : first.status }] };
+  }
+  async function acceptedCompanies(): Promise<OperatorLeadSearchReport["companies"]> {
+    return (await operatorInbox()).items.filter((item: any) => item.status === "accepted")
+      .map((item: any) => ({ requestId: item.id, displayName: item.displayName, leadScope: item.leadScope }))
+      .sort((a: { requestId: string }, b: { requestId: string }) => a.requestId < b.requestId ? -1 : 1);
+  }
   const ownedKey = (owner: string, id: string) => `${owner}:${id}`;
   function creatorOutcome(owner: string, requestId: string) {
     return clone(receipts.get(ownedKey(owner, requestId))?.result ?? fences.get(ownedKey(owner, requestId)) ?? { state: "unconfirmed", requestId });
@@ -187,12 +216,39 @@ export function createPortalDesignStore(input: string | URL = "/contributors?mod
       }
       const operatorProfile = (await operator.request(new URL("http://fixture.invalid/api/crm/operator-account")).json()).data;
       if (["pending", "suspended"].includes(state) || operatorProfile.status !== "approved") return fail(403);
+      if (route === "operator-lead-search") {
+        if (method !== "GET") return fail(405);
+        if (body != null || [...url.searchParams.keys()].some(key => url.searchParams.getAll(key).length !== 1)) return fail(400);
+        const query = parseOperatorLeadSearchQuery(Object.fromEntries(url.searchParams));
+        if (!query) return fail(400);
+        const companies = await acceptedCompanies();
+        if (query.requestId !== null && !companies.some(company => company.requestId === query.requestId)) return fail(403);
+        const needle = query.search.toLocaleLowerCase("ru");
+        const digits = /^[+()0-9 .-]+$/.test(query.search) ? normalizePhone(query.search).replace(/\D/g, "") : "";
+        const filtered = searchLeads.filter(lead => {
+          const company = companies.find(company => company.requestId === lead.requestId);
+          return company && (query.requestId === null || lead.requestId === query.requestId)
+            && (!needle || [lead.name, lead.phone, company.displayName].some(value => value.toLocaleLowerCase("ru").includes(needle))
+              || digits.length > 0 && normalizePhone(lead.phone).replace(/\D/g, "").includes(digits));
+        });
+        const totals = Object.fromEntries(["all", ...operatorLeadGroups].map(group => [group,
+          String(group === "all" ? filtered.length : filtered.filter(lead => lead.group === group).length)])) as OperatorLeadSearchReport["totals"];
+        const selected = filtered.filter(lead => query.group === "all" || lead.group === query.group);
+        const items = selected.slice(query.offset, query.offset + OPERATOR_LEAD_SEARCH_PAGE_SIZE);
+        const report: OperatorLeadSearchReport = { generatedAt: "2026-10-28T09:00:00Z", offset: query.offset,
+          filters: { search: query.search, group: query.group, requestId: query.requestId }, companies, totals,
+          matched: totals[query.group], items, hasMore: selected.length > query.offset + items.length,
+          stageOptions: companies.filter(company => items.some(lead => lead.requestId === company.requestId))
+            .map(company => ({ requestId: company.requestId, items: [] })) };
+        return ok(report);
+      }
       if (route === "operator-workday" && method === "GET") {
         const rawOffset = url.searchParams.get("offset") ?? "0";
         if ([...url.searchParams.keys()].some(key => key !== "offset") || url.searchParams.getAll("offset").length > 1
           || !/^(?:0|[1-9]\d{0,6})$/.test(rawOffset) || Number(rawOffset) > 1000000) return fail(400);
-        const inbox = (await operator.request(new URL("http://fixture.invalid/api/crm/operator-inbox")).json()).data;
-        const accepted = state === "empty" ? [] : inbox.items.filter((item: any) => item.status === "accepted");
+        const inbox = await operatorInbox();
+        const accepted = inbox.items.filter((item: any) => item.status === "accepted");
+        const available = searchLeads.filter(lead => accepted.some((item: any) => item.id === lead.requestId));
         const offset = Number(rawOffset), ready = accepted.length > 0;
         const items: OperatorWorkdayReport["today"]["items"] = ready ? [
           { appointmentId: "99999999-9999-4999-8999-999999999991", requestId: accepted[0].id, startsAt: "2026-10-28T08:00:00Z", endsAt: "2026-10-28T08:30:00Z", status: "arrived", clientName: "ТЕСТ O1 контакт", clientPhone: "+70000000991", service: "ТЕСТ O1 услуга", doctorName: "ТЕСТ O1 специалист", clinicConfirmedAt: "2026-10-28T08:30:00Z", operatorCheckResult: null },
@@ -214,7 +270,7 @@ export function createPortalDesignStore(input: string | URL = "/contributors?mod
           companies: accepted.map((item: any) => ({ requestId: item.id, displayName: item.displayName, leadScope: item.leadScope,
             timeZone: missingWorkdayZone ? null : "UTC", localDate: missingWorkdayZone ? null : "2026-10-28",
             dayStart: missingWorkdayZone ? null : "2026-10-28T00:00:00Z", dayEnd: missingWorkdayZone ? null : "2026-10-29T00:00:00Z" })),
-          summary: { availableLeads: ready ? "1" : "0", assignedLeads: ready ? "1" : "0", clinicLeads: "0", attributedBookings: bookings, clinicConfirmedArrivals: ready ? "1" : "0", undatedBookings: "0", contacts: "not_tracked",
+          summary: { availableLeads: String(available.length), assignedLeads: String(available.filter(lead => lead.requestId === portalDesignIds.operatorRequest).length), clinicLeads: String(available.filter(lead => lead.requestId === portalDesignIds.operatorRequestTwo).length), attributedBookings: bookings, clinicConfirmedArrivals: ready ? "1" : "0", undatedBookings: "0", contacts: "not_tracked",
             bookingStatuses: { scheduled, confirmed: "0", arrived: ready ? "1" : "0", no_show: "0", cancelled: "0", unknown: "0" } },
           today: missingWorkdayZone && ready
             ? { state: "unavailable_timezone", total: null, actionable: null, items: [], hasMore: false }
@@ -237,14 +293,32 @@ export function createPortalDesignStore(input: string | URL = "/contributors?mod
           }
           if (previous) return previous.intent === JSON.stringify(body) ? ok(previous.result) : fail(409);
           if (fences.has(key)) return ok(fences.get(key));
-          const inbox = (await operator.request(new URL("http://fixture.invalid/api/crm/operator-inbox")).json()).data;
+          const inbox = await operatorInbox();
           const row = inbox.items.find((item: any) => item.id === body.id);
           if (!row || row.status !== "accepted" || body.action !== "end") return fail(409);
-          operator.endCooperation();
+          if (row.id === portalDesignIds.operatorRequestTwo) secondCooperationEnded = true;
+          else operator.endCooperation();
           const result = { state: "committed", commandId, action: "end", targetId: row.id, requestId: row.id, statusAtCommit: "ended", committedAt: new Date().toISOString() };
           receipts.set(key, { intent: JSON.stringify(body), result }); return ok(result);
         }
-        if (method === "GET" && state === "empty") return ok({ items: [], hasMore: false });
+        if (method === "GET") return ok(await operatorInbox());
+      }
+      if (["operator-leads", "operator-bookings", "operator-services", "operator-arrivals"].includes(route)) {
+        if (method !== "GET") return fail(403);
+        const requestId = url.searchParams.get("requestId");
+        if (!(await acceptedCompanies()).some(company => company.requestId === requestId)) return fail(403);
+        const leads = searchLeads.filter(lead => lead.requestId === requestId), leadId = url.searchParams.get("leadId");
+        if (route === "operator-leads") {
+          const rawOffset = url.searchParams.get("offset") ?? "0";
+          if (!/^(?:0|[1-9]\d{0,6})$/.test(rawOffset) || Number(rawOffset) > 1000000) return fail(400);
+          const offset = Number(rawOffset);
+          return ok({ items: leads.slice(offset, offset + 20).map(({ requestId, group, ...lead }) => lead),
+            hasMore: leads.length > offset + 20, stages: [], stageEditingAvailable: false });
+        }
+        if (route === "operator-bookings") return leads.some(lead => lead.id === leadId) ? ok({ timeZone: "UTC" }) : fail(403);
+        const scoped = new URL(url);
+        scoped.searchParams.set("requestId", portalDesignIds.operatorRequest);
+        return operator.request(scoped, { method });
       }
       return operator.request(new URL(url.pathname + url.search, "http://fixture.invalid"), { method });
     }
@@ -262,6 +336,7 @@ export function createPortalDesignStore(input: string | URL = "/contributors?mod
     setState(next: PortalDesignState) {
       state = next; denied = false; operator = createOperatorBrowserFixture(); acceptingRequests = false;
       expandedWorkday = false; missingWorkdayZone = false;
+      secondCooperationEnded = false;
       receipts.clear(); fences.clear(); seed(); switchActor(state === "signed-out" ? null : actorForView());
     },
     deny(value = true) { denied = value; },

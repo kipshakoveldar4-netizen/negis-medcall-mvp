@@ -32,6 +32,8 @@ import { exercisePartnerHistory } from './partner-history-cases.mjs';
 import { exercisePartnerHistoryHttp } from './partner-history-native-http-cases.mjs';
 import { exerciseOperatorWorkday } from './operator-workday-cases.mjs';
 import { exerciseOperatorWorkdayHttp } from './operator-workday-native-http-cases.mjs';
+import { exerciseOperatorLeadSearch } from './operator-lead-search-cases.mjs';
+import { exerciseOperatorLeadSearchHttp } from './operator-lead-search-native-http-cases.mjs';
 import { exerciseAppointmentActor,exerciseAppointmentActorDependencies } from './appointment-actor-cases.mjs';
 import { exerciseAppointmentReadiness,exerciseAppointmentReadinessBeforeCutover,exerciseAppointmentPatchReadinessBeforeCutover,exerciseAppointmentVersionReadinessBeforeCutover,exerciseAppointmentEntryReadinessBeforeCutover,exerciseAppointmentJournalReadinessBeforeCutover } from './appointment-actor-readiness-cases.mjs';
 import { exerciseAppointmentVersionEntryBefore,exerciseAppointmentVersionEntry } from './appointment-version-entry-cases.mjs';
@@ -296,6 +298,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     });
     if(entry.file==='122_partner_history_read.sql'){await exercisePartnerHistory(db,fixture,entry.source,t);await exercisePartnerHistoryHttp(db,fixture,t);}
     if(entry.file==='123_operator_workday_read.sql'){await exerciseOperatorWorkday(db,fixture,entry.source,t);await exerciseOperatorWorkdayHttp(db,fixture,t);}
+    if(entry.file==='124_operator_lead_search.sql'){await exerciseOperatorLeadSearch(db,fixture,entry.source,t);await exerciseOperatorLeadSearchHttp(db,fixture,t);}
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
       await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{
@@ -427,7 +430,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       'read_lead_team_analytics', 'read_generated_video_workflow', 'read_platform_subscription_operation',
       'prepare_site_deletion_operation', 'read_site_deletion_operations', 'execute_site_deletion_operation', 'close_site_deletion_operation',
       'apply_growth_contributor', 'review_growth_contributor','execute_clinic_operator_command_v2','execute_growth_operator_command_v2',
-      'read_operator_request_command_v2','close_operator_request_command_v2','read_growth_partner_ledger','read_growth_partner_history','read_growth_operator_workday',
+      'read_operator_request_command_v2','close_operator_request_command_v2','read_growth_partner_ledger','read_growth_partner_history','read_growth_operator_workday','read_growth_operator_lead_search',
       'read_growth_creator_jobs','execute_growth_creator_job_v2','read_growth_creator_command_v2','close_growth_creator_command_v2',
       'read_growth_creator_directory','read_growth_creator_job_detail',
       'capture_growth_partner_source_v2','purge_growth_partner_sources','claim_growth_partner_source','read_growth_partner_source',

@@ -19,6 +19,12 @@ Full mockup parity remains blocked (`design-qa.md`: `blocked`): the confirmed pa
 link is still absent. At that checkpoint shared operator analytics/agenda were
 also absent; the current local 123/API/UI cycle implements them with complete
 server authority, not inbox-page sums. See [current workday evidence and gates](OPERATOR-WORKDAY-ACCEPTANCE-2026-10-28.md).
+The next local 124/API/Explorer slice adds complete authorized lead search,
+company/group filters, exact counts and independent report lifetimes. Final
+759/759 cumulative native, 1052/1052 UI, 1447/1447 operators and 31/31 local
+browser results retain their separate synthetic/HTTP/native boundaries. Full
+browser-to-native mutation and cloud acceptance remain gates; see
+[exact search evidence](OPERATOR-LEAD-SEARCH-ACCEPTANCE-2026-10-28.md).
 The preceding local cycle
 adds protected own history (SQL 122) and the creator's current-page nearest
 deadline: 25/25 native/HTTP, 186/186 parser/isolation, 25/25 root boundary and

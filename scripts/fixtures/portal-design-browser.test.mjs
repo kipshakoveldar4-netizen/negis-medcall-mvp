@@ -31,12 +31,14 @@ const compiled = await bundle({ write: false, bundle: true, format: 'esm', platf
     export { parsePartnerLedger } from '../../lib/crm/partner-contracts.ts';
     export { parsePartnerHistory } from '../../lib/crm/partner-history-contracts.ts';
     export { parseOperatorWorkday } from '../../lib/crm/operator-workday-contracts.ts';
+    export { parseOperatorLeadSearchQuery, parseOperatorLeadSearchReport, operatorLeadSearchPath, operatorLeadGroups } from '../../lib/crm/operator-lead-search-contracts.ts';
     export { parsePartnerTermsSnapshot } from '../../lib/crm/partner-terms-contracts.ts';
     export { parseOperatorCommandResult } from '../../lib/crm/operator-contracts.ts';`,
 } });
 const { createPortalDesignStore, portalDesignIds: ids, portalDesignLocation, portalDesignHref, portalDesignStates,
   parseContributorProfile, parseCreatorJobPage, parseCreatorJobDetail, parseCreatorCommandResult,
   parsePartnerLedger, parsePartnerHistory, parseOperatorWorkday, parsePartnerTermsSnapshot, parseOperatorCommandResult,
+  parseOperatorLeadSearchQuery, parseOperatorLeadSearchReport, operatorLeadSearchPath, operatorLeadGroups,
 } = await import('data:text/javascript;base64,' + Buffer.from(compiled.outputFiles[0].text).toString('base64'));
 const url = route => new URL('/api/crm/' + route, 'http://fixture.invalid');
 const request = (store, route, body, method = 'POST') => store.request(url(route), {
@@ -128,8 +130,9 @@ test('empty, error, denial, pending and suspended scenarios recover only by expl
 test('synthetic complete workday is parser-valid, read-only and removes an ended cooperation from totals and Today', async () => {
   const store = createPortalDesignStore('/operator');
   const report = await data(request(store, 'operator-workday?offset=0'));
-  assert.ok(parseOperatorWorkday(report, 0)); assert.equal(report.companies.length, 1);
-  assert.equal(report.summary.availableLeads, '1'); assert.equal(report.today.total, '2'); assert.equal(report.today.actionable, '1');
+  assert.ok(parseOperatorWorkday(report, 0)); assert.equal(report.companies.length, 2);
+  assert.equal(report.summary.availableLeads, '34'); assert.equal(report.summary.assignedLeads, '17'); assert.equal(report.summary.clinicLeads, '17');
+  assert.equal(report.today.total, '2'); assert.equal(report.today.actionable, '1');
   assert.equal(report.summary.contacts, 'not_tracked');
   store.expandWorkday();
   const expanded = await data(request(store, 'operator-workday?offset=0'));
@@ -148,6 +151,95 @@ test('synthetic complete workday is parser-valid, read-only and removes an ended
   store.endCooperation(); const empty = await data(request(store, 'operator-workday?offset=0'));
   assert.ok(parseOperatorWorkday(empty, 0)); assert.deepEqual(empty.companies, []); assert.equal(empty.today.total, '0');
   store.suspendOperator(); assert.equal((await request(store, 'operator-workday')).status, 403);
+});
+
+test('synthetic all-company lead search uses the actual strict parser, complete counters and replacement 20-row pages', async () => {
+  const store = createPortalDesignStore('/operator');
+  const read = async (parameters = {}) => {
+    const query = parseOperatorLeadSearchQuery(parameters); assert.ok(query);
+    const report = await data(request(store, operatorLeadSearchPath(query)));
+    assert.deepEqual(parseOperatorLeadSearchReport(report, query), report);
+    assert.deepEqual(report.stageOptions, report.companies.filter(company => report.items.some(lead => lead.requestId === company.requestId))
+      .map(company => ({ requestId: company.requestId, items: [] })));
+    return report;
+  };
+  const first = await read(), second = await read({ offset: '20' });
+  assert.deepEqual(first.companies.map(company => company.requestId), [ids.operatorRequest, ids.operatorRequestTwo]);
+  assert.deepEqual(first.totals, { all: '34', new: '22', in_progress: '6', booked: '1', postponed: '3', lost: '1', other: '1' });
+  assert.equal(first.matched, '34'); assert.equal(first.items.length, 20); assert.equal(first.hasMore, true);
+  assert.equal(second.items.length, 14); assert.equal(second.hasMore, false); assert.deepEqual(second.totals, first.totals);
+  const all = [...first.items, ...second.items]; assert.equal(new Set(all.map(lead => lead.id)).size, 34);
+  const inbox = await data(request(store, 'operator-inbox'));
+  assert.deepEqual(first.companies, inbox.items.filter(item => item.status === 'accepted')
+    .map(item => ({ requestId: item.id, displayName: item.displayName, leadScope: item.leadScope })));
+  for (const group of ['all', ...operatorLeadGroups]) for (const offset of ['0', '20', '40']) {
+    const report = await read({ group, offset });
+    assert.deepEqual(report.totals, first.totals); assert.deepEqual(report.companies, first.companies);
+    assert.equal(report.matched, first.totals[group]);
+    assert.deepEqual(report.items, all.filter(lead => group === 'all' || lead.group === group).slice(Number(offset), Number(offset) + 20));
+  }
+  for (const company of first.companies) {
+    const report = await read({ requestId: company.requestId });
+    assert.equal(report.matched, '17'); assert.equal(report.hasMore, false); assert.deepEqual(report.companies, first.companies);
+    assert.deepEqual(report.items, all.filter(lead => lead.requestId === company.requestId));
+    const old = await data(request(store, `operator-leads?requestId=${company.requestId}`));
+    assert.deepEqual(old.items, report.items.map(({ requestId, group, ...lead }) => lead));
+    assert.equal(old.stageEditingAvailable, false); assert.deepEqual(old.stages, []);
+    const lead = report.items[0];
+    assert.deepEqual(await data(request(store, `operator-bookings?requestId=${company.requestId}&leadId=${lead.id}`)), { timeZone: 'UTC' });
+    assert.equal((await request(store, `operator-bookings?requestId=${company.requestId}&leadId=${all.find(item => item.requestId !== company.requestId).id}`)).status, 403);
+    assert.equal((await request(store, `operator-leads?requestId=${company.requestId}`, { leadId: lead.id, stageId: crypto.randomUUID(), expectedStageId: null, expectedStatus: lead.status }, 'PATCH')).status, 403);
+  }
+  const expectedNames = new Map([
+    ['%', ['ТЕСТ 100%_контакт']], ['_', ['ТЕСТ 100%_контакт']], ['%_', ['ТЕСТ 100%_контакт']],
+    ['  аЛеКсАнДрА  ', ['ТЕСТ Александра Соколова']], ['қарлығаш', ['ТЕСТ Қарлығаш Әлия']],
+    ['+7 (000) 000-09-91', ['ТЕСТ O1 контакт', 'ТЕСТ Қарлығаш Әлия']],
+    ['8 (000) 000-09-91', ['ТЕСТ O1 контакт', 'ТЕСТ Қарлығаш Әлия']],
+    ['0070000000991', ['ТЕСТ O1 контакт', 'ТЕСТ Қарлығаш Әлия']],
+    ['0991', ['ТЕСТ O1 контакт', 'ТЕСТ Қарлығаш Әлия']], ['ТЕСТ 991', []], ['%991', []],
+  ]);
+  for (const [search, names] of expectedNames) {
+    const report = await read({ search });
+    assert.deepEqual(report.items.map(lead => lead.name), names); assert.equal(report.totals.all, String(names.length));
+    assert.deepEqual(report.companies, first.companies);
+    for (const group of ['new', 'in_progress', 'postponed']) {
+      const selected = await read({ search, group }); assert.deepEqual(selected.totals, report.totals);
+      assert.equal(selected.matched, report.totals[group]);
+    }
+  }
+  const companySearch = await read({ search: 'қамқор' }); assert.equal(companySearch.matched, '17');
+  assert.ok(companySearch.items.every(lead => lead.requestId === ids.operatorRequestTwo));
+  const missing = await read({ search: 'ТЕСТ нет такого контакта' });
+  assert.deepEqual(missing.items, []); assert.equal(missing.totals.all, '0'); assert.deepEqual(missing.companies, first.companies);
+  assert.ok(store.calls.every(call => call.method === 'GET' || call.method === 'PATCH' && call.path.startsWith('/api/crm/operator-leads?')));
+});
+
+test('lead search fixture refuses caller authority, duplicate parameters and writes, and removes revoked contacts', async () => {
+  const store = createPortalDesignStore('/operator');
+  for (const query of ['workspaceId=foreign', 'actorId=foreign', 'limit=100', 'group=unknown', 'offset=01', 'offset=-1', 'offset=1000001',
+    'offset=0&offset=20', 'search=a&search=b', 'group=new&group=all', `requestId=${ids.operatorRequest}&requestId=${ids.operatorRequestTwo}`, 'search=%00', `search=${'a'.repeat(121)}`]) {
+    assert.equal((await request(store, 'operator-lead-search?' + query)).status, 400, query);
+  }
+  assert.equal((await request(store, `operator-lead-search?requestId=${crypto.randomUUID()}`)).status, 403);
+  assert.equal((await request(store, 'operator-lead-search', {})).status, 405);
+  assert.equal((await store.request(url('operator-lead-search'), { headers: { Authorization: `Bearer ${store.token()}` }, body: '{}' })).status, 400);
+  const commandId = crypto.randomUUID();
+  assert.equal((await data(request(store, 'operator-inbox', { id: ids.operatorRequestTwo, action: 'end', commandId }, 'PATCH'))).state, 'committed');
+  const query = parseOperatorLeadSearchQuery({}), remaining = await data(request(store, 'operator-lead-search'));
+  assert.ok(parseOperatorLeadSearchReport(remaining, query)); assert.equal(remaining.totals.all, '17');
+  assert.deepEqual(remaining.companies.map(company => company.requestId), [ids.operatorRequest]);
+  const workday = await data(request(store, 'operator-workday'));
+  assert.ok(parseOperatorWorkday(workday, 0)); assert.equal(workday.summary.availableLeads, '17');
+  store.deny(); assert.equal((await request(store, 'operator-lead-search')).status, 403);
+  store.deny(false); store.switchActor(ids.other); assert.equal((await request(store, 'operator-lead-search')).status, 403);
+  store.switchActor(ids.operator); store.endCooperation();
+  const empty = await data(request(store, 'operator-lead-search'));
+  assert.ok(parseOperatorLeadSearchReport(empty, query)); assert.deepEqual(empty.companies, []); assert.equal(empty.matched, '0');
+  store.setState('empty'); assert.ok(parseOperatorLeadSearchReport(await data(request(store, 'operator-lead-search')), query));
+  for (const [state, status] of [['pending', 403], ['suspended', 403], ['error', 503], ['denied', 403], ['signed-out', 401]]) {
+    store.setState(state); const response = await request(store, 'operator-lead-search');
+    assert.equal(response.status, status); assert.equal((await response.json()).data, undefined);
+  }
 });
 
 test('synthetic auth rejects foreign, old-session, unauthenticated and aborted dispatches', async () => {

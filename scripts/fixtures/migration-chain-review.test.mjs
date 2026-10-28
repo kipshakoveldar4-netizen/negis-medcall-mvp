@@ -8,12 +8,20 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-123, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 115);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 115 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-124, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 116);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 116 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
+});
+
+test('124 adds only a complete authorized search reader without business writes or browser grants',()=>{
+  const e=chain.find(v=>v.file.startsWith('124_'));
+  assert.deepEqual(e.evidence.tables,[]);assert.deepEqual(e.evidence.functions.map(f=>f.name),['public.read_growth_operator_lead_search']);
+  assert.deepEqual(e.evidence.dynamicSqlLines,[]);assert.deepEqual(e.evidence.extensions,[]);assert.deepEqual(e.evidence.storageCatalogueLines,[]);
+  assert.match(e.source,/report_clock as materialized/);assert.match(e.source,/cardinality\(v_locked\)/);assert.match(e.source,/strpos\(/);
+  assert.doesNotMatch(e.source,/(?:insert into|update|delete from) public\./i);
 });
 
 test('123 adds only a complete own-workday reader and private native-zone helper without business writes',()=>{

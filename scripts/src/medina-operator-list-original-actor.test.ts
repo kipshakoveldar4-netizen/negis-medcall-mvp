@@ -178,9 +178,9 @@ async function fixture(t: TestContext, target: Target, guarded = true, actorId =
       if (name === "lucide-react") return icons;
       if (name.endsWith("/crm/operator-contracts")) return load("contracts");
       if (name.endsWith("/crm/operator-workday-contracts")) return workdayContracts;
-      // Run the complete Workday component and its read hook. Its leads child
-      // is an opaque boundary here; the leads target still executes real leads.
-      if (key === "workday" && name === "./OperatorLeads") return { OperatorLeads: Symbol("OperatorLeadsBoundary") };
+      // Workday's independent search child has its own lifetime suite; this
+      // target still exercises the complete parent read and actual transports.
+      if (key === "workday" && name === "./OperatorLeadExplorer") return { OperatorLeadExplorer: Symbol("OperatorLeadExplorerBoundary") };
       if (key === "workday" && name === "./OperatorWorkday.css") return {};
       if (name === "@/lib/api") {
         const crm = load("crm") as { crmFetch(url: string, init: Init): Promise<Response> };
