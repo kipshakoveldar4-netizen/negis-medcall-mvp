@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { Session, User } from '@supabase/supabase-js';
-import { supabase } from '@/lib/supabase';
+import { supabase, sessionAuth } from '@/lib/supabase';
 import { DEFAULT_VERTICAL, readVertical, type Vertical } from '../../../../lib/vertical/terms';
 import { isWorkspacePurpose, type WorkspacePurpose } from '../../../../lib/crm/workspace-purpose';
 import { useLocation } from 'wouter';
@@ -894,7 +894,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const setupSupabaseAuth = async () => {
     /* Set up the persistent listener FIRST so we don't miss events */
     subscriptionRef.current?.unsubscribe();
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, sess) => {
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((_event, sess) => {
       if (!mountedRef.current || isSignOutPending()) return;
       const revision = beginAuthResolution(sess?.user ?? null);
       setSession(sess);
@@ -1138,7 +1138,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         if (!ownsSignOut()) return;
         if (!isDemoMode) {
-          const { error } = await supabase.auth.signOut();
+          const { error } = await sessionAuth.signOut({ isCurrent: ownsSignOut });
           // A remounted provider may already own a newer exit. This response
           // must not clear its marker or publish an old completion/error.
           if (!ownsSignOut()) return;

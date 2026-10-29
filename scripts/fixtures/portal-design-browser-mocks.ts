@@ -16,6 +16,25 @@ export const supabase = { auth: {
   signUp: async () => ({ data: { session: null }, error: null }),
 } };
 
+// Visual dispatch contract only; no native SDK storage or write-authority model.
+function currentScope(scope: { isCurrent(): boolean; signal?: AbortSignal }) {
+  if (typeof scope?.isCurrent !== "function" || !scope.isCurrent() || scope.signal?.aborted) {
+    throw Error("Synthetic sessionAuth requires a current caller scope");
+  }
+}
+export const sessionAuth = {
+  onAuthStateChange: supabase.auth.onAuthStateChange,
+  signInWithPassword(_credentials: unknown, scope: Parameters<typeof currentScope>[0]) {
+    currentScope(scope); return supabase.auth.signInWithPassword();
+  },
+  signUp(_credentials: unknown, scope: Parameters<typeof currentScope>[0]) {
+    currentScope(scope); return supabase.auth.signUp();
+  },
+  signOut(scope: Parameters<typeof currentScope>[0]) {
+    currentScope(scope); return supabase.auth.signOut();
+  },
+};
+
 // Never retain a native fetch fallback, even for unknown same-origin routes.
 window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   const request = input instanceof Request ? input : null;

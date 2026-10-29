@@ -177,6 +177,9 @@ async function fixture(t: TestContext, prefill?: Bag) {
   }
   const helper = evaluate(code.helper, (id) => { throw new Error(`Unexpected helper import: ${id}`); });
   const importer = evaluate(code.importer, (id) => { throw new Error(`Unexpected importer import: ${id}`); });
+  const sessionAuth = { onAuthStateChange(fn: (event: string, session: Bag) => void) {
+    listeners.add(fn); return { data: { subscription: { unsubscribe: () => listeners.delete(fn) } } };
+  } };
   const page = evaluate(code.page, (id) => {
     if (id === "react") return new Proxy({}, { get: (_, key) => runtime.hooks[key as keyof typeof runtime.hooks] });
     if (id === "react/jsx-runtime") return { jsx: (type: unknown, props: unknown) => ({ type, props }), jsxs: (type: unknown, props: unknown) => ({ type, props }) };
@@ -190,13 +193,11 @@ async function fixture(t: TestContext, prefill?: Bag) {
     if (id === "@/lib/authSignOut") return { getSignOutRevision: () => signOut.revision, isSignOutPending: () => signOut.pending };
     if (id === "@/lib/serverAuth") return { getSupabaseAccessToken: async () => "synthetic" };
     if (id === "@/lib/supabase") return { hasSupabaseFrontendEnv: true, supabase: {
-      auth: { onAuthStateChange(fn: (event: string, session: Bag) => void) {
-        listeners.add(fn); return { data: { subscription: { unsubscribe: () => listeners.delete(fn) } } };
-      } },
+      auth: sessionAuth,
       storage: { from(bucket: string) { return { uploadToSignedUrl(storagePath: string, token: string, file: unknown, opts: unknown) {
         const gate = deferred<any>(); storage.push({ bucket, storagePath, token, file, opts, ...gate }); return gate.promise;
       } }; } },
-    } };
+    }, sessionAuth };
     if (id === "@/lib/api") return {
       apiUrl: (url: string) => url, CrmApiError: Error, crmErrorMessage: (_e: unknown, fallback: string) => fallback,
       async crmFetch(url: string, init: Bag) {

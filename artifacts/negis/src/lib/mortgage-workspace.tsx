@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import { useAuth } from "@/contexts/AuthContext";
 import { crmFetch } from "@/lib/api";
 import { readWorkspaceId } from "@/lib/demoStorage";
-import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
 import { requireWorkspaceTimeZone, workspaceLocalDateTime, workspaceDateTimeToIso } from "@/lib/clinicDateTime";
 import type { MortgageActivity, MortgageActivityDraft, MortgageActivityStatus, MortgageContact, MortgagePriority, MortgageSnapshot, MortgageSnapshotQuery } from "../../../../lib/crm/mortgage-contract";
 
@@ -33,7 +33,7 @@ export function MortgageScope({ children }: { children: ReactNode }) {
   const [authEpoch, setAuthEpoch] = useState(0);
   useLayoutEffect(() => {
     if (!hasSupabaseFrontendEnv) return;
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((_event, session) => {
       const nextActor = session?.user.id || "";
       authObserved.current = true;
       if (observedActor.current === nextActor) return;
@@ -66,7 +66,7 @@ function MortgageSession({ scope, live, children }: { scope: Scope; live: { curr
     // Every setup owns a fresh controller, including StrictMode effect replay.
     setLifetime((previous) => ({ controller, epoch: (previous?.epoch ?? 0) + 1 }));
     const subscription = hasSupabaseFrontendEnv
-      ? supabase.auth.onAuthStateChange((_event, session) => {
+      ? sessionAuth.onAuthStateChange((_event, session) => {
           if ((session?.user.id || "") !== captured.actorId) {
             invalidated.current = "auth";
             controller.abort();

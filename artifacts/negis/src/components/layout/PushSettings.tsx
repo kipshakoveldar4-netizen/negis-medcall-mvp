@@ -4,7 +4,7 @@ import { toast } from "sonner";
 
 import { crmFetch } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
-import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
 import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
 import {
   describePushSupport,
@@ -85,7 +85,7 @@ function usePushScope() {
   useLayoutEffect(() => {
     if (!hasSupabaseFrontendEnv) return;
     let active = true;
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, next) => {
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((_event, next) => {
       if (!active) return;
       const actor = next?.user.id || "";
       if (actor === lifetime.current.sdkActor) return;

@@ -120,7 +120,8 @@ async function fixture(t: TestContext, patch: Json = {}) {
   const subscribers = new Set<(event: string, session: any) => void>();
   const storage = new Map<string, string>();
   const store = { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) };
-  const sdk = { hasSupabaseFrontendEnv: true, supabase: { auth: {
+  const sdk = { hasSupabaseFrontendEnv: true,
+    get sessionAuth() { return { onAuthStateChange: this.supabase.auth.onAuthStateChange }; }, supabase: { auth: {
     async getSession() { return gate ? gate.promise : { data: { session }, error: null }; },
     onAuthStateChange(callback: (event: string, session: any) => void) {
       subscribers.add(callback); return { data: { subscription: { unsubscribe() { subscribers.delete(callback); } } } };

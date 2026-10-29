@@ -5,7 +5,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { crmErrorMessage, crmFetch } from "@/lib/api";
 import { isRealWorkspace, readWorkspaceId } from "@/lib/demoStorage";
 import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
-import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
 import { capitalize, termsFor, type Terms } from "../../../../../lib/vertical/terms";
 
 // Справочник исполнителей — врачей или мастеров — и их график.
@@ -265,7 +265,7 @@ function DoctorScheduleEditor({ auth, workspaceId }: { auth: ReturnType<typeof u
     lifetime.mounted = true;
     lifetime.run++;
     lifetime.controller = new AbortController();
-    const subscription = hasSupabaseFrontendEnv ? supabase.auth.onAuthStateChange((_event, session) => {
+    const subscription = hasSupabaseFrontendEnv ? sessionAuth.onAuthStateChange((_event, session) => {
       if ((session?.user.id || "") !== actorId) retire();
     }).data.subscription : null;
     return () => {

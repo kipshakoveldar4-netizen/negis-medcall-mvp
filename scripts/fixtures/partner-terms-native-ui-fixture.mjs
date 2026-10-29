@@ -42,6 +42,8 @@ export async function partnerUiNativeBundle(f){
     const session=()=>actor?{user:{id:actor},access_token:tokens[actor]}:null;
     export function change(next){actor=next;for(const fn of [...listeners])fn('SIGNED_IN',session());}
     export const supabase={auth:{getSession:async()=>({data:{session:session()},error:null}),onAuthStateChange:fn=>{listeners.add(fn);return{data:{subscription:{unsubscribe:()=>listeners.delete(fn)}}};},signOut:async()=>{change(null);return{error:null};}}};
+    // Observer-only portal compatibility; this fixture never dispatches auth writes.
+    export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange};
     export const useAuth=()=>({signOut:async()=>{await supabase.auth.signOut();}});`;
   const entry=`import React,{StrictMode,useState}from'react';import{createRoot}from'react-dom/client';import{flushSync}from'react-dom';
     import{Contributors}from ${component(path.join(control,'src/screens/Contributors.tsx'))};

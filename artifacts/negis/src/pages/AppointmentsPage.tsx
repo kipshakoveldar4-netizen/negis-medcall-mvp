@@ -35,7 +35,7 @@ import { formatArrivalPrice } from "../../../../lib/crm/operator-contracts";
 import { formatSlot, freeSlots, groupSlots, minuteOfClinicDay, occupiedGridSlots, workingIntervals } from "@/lib/dayGrid";
 import { capitalize, termsFor, type Terms } from "../../../../lib/vertical/terms";
 import { leadStageDefinitionFromUnknown } from "@/lib/leadPipeline";
-import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
 
 type AppointmentStatus = "scheduled" | "confirmed" | "arrived" | "no_show" | "cancelled";
 type CalendarView = "grid" | "day" | "week" | "month" | "list";
@@ -1350,7 +1350,7 @@ export function AppointmentsPage() {
   useLayoutEffect(() => {
     if (!hasSupabaseFrontendEnv) return;
     let mounted = true;
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((event, session) => {
       if (!mounted) return;
       const nextActor = event === "SIGNED_OUT" ? "" : session?.user.id || "";
       mutationAuthObserved.current = true;

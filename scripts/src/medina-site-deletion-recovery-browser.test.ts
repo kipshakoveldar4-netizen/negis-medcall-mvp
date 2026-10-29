@@ -48,6 +48,7 @@ export const f={ids,calls:[],notices:[],rows:[],holdReads:0,holdWrites:0,commitW
   overflow:[...document.querySelectorAll('#root *')].filter(n=>{const r=n.getBoundingClientRect();return r.width>0&&(r.left<-.5||r.right>innerWidth+.5);}).map(n=>n.tagName+':'+n.textContent.slice(0,50))};},
 };
 export const hasSupabaseFrontendEnv=true,supabase={auth:{async getSession(){if(lookup)await lookup.promise;return{data:{session},error:null};},onAuthStateChange(fn){sdk.add(fn);return{data:{subscription:{unsubscribe(){sdk.delete(fn);}}}};}}};
+export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange};
 for(const key of ['getItem','setItem','removeItem','clear'])Storage.prototype[key]=()=>{if(key==='getItem')return null;throw Error('Browser persistence forbidden');};
 globalThis.fetch=(input,init={})=>{
  const url=new URL(String(input),location.origin),method=(init.method||'GET').toUpperCase();

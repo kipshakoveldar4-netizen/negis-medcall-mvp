@@ -1604,7 +1604,7 @@ const generationCallbackPrograms = (async () => {
     auth: compile(await readFile(path.join(repoRoot, "artifacts/negis/src/lib/serverAuth.ts"), "utf8"),
       ["getSupabaseAccessToken"], ["getSupabaseAccessToken"]),
     storage: compile(await readFile(path.join(repoRoot, "artifacts/negis/src/lib/demoStorage.ts"), "utf8"),
-      ["WORKSPACE_SELECTOR_KEY", "readWorkspaceId", "workspaceScopedKey", "UUID_PATTERN", "isRealWorkspace"],
+      ["WORKSPACE_SELECTOR_KEY", "workspaceReadScope", "readWorkspaceId", "workspaceScopedKey", "UUID_PATTERN", "isRealWorkspace"],
       ["WORKSPACE_SELECTOR_KEY", "readWorkspaceId", "workspaceScopedKey", "isRealWorkspace"]),
   };
 })();
@@ -1807,7 +1807,8 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     },
   } };
   const auth = evaluateGenerationFixture<{ getSupabaseAccessToken: (expected?: string) => Promise<string> }>(programs.auth, {
-    supabase: sdk, hasSupabaseFrontendEnv: true, isSignOutPending: () => false, getSignOutRevision: () => 0,
+    supabase: sdk, sessionAuth: { onAuthStateChange: sdk.auth.onAuthStateChange },
+    hasSupabaseFrontendEnv: true, isSignOutPending: () => false, getSignOutRevision: () => 0,
   });
   const result = kind === "photo"
     ? { creativeUrl: "https://example.invalid/local-a.png", assetId: "asset-a", fileName: "local-a.png",
@@ -1954,7 +1955,8 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   }]));
   const photoScopeCleanups = new Map<LocalGenerationSession["sessionRef"], () => void>();
   const lifetime = withLifetime ? generationLifetime(programs.lifetime, {
-    ...storage, ...auth, supabase: sdk, hasSupabaseFrontendEnv: true, useAuth: () => authState,
+    ...storage, ...auth, supabase: sdk, sessionAuth: { onAuthStateChange: sdk.auth.onAuthStateChange },
+    hasSupabaseFrontendEnv: true, useAuth: () => authState,
     onChildUnmount(sessionRef: LocalGenerationSession["sessionRef"]) { photoScopeCleanups.get(sessionRef)?.(); photoScopeCleanups.delete(sessionRef); },
   }) : undefined;
   const mounted = lifetime?.render();
@@ -1987,7 +1989,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const bindings = {
     ...paidGeneration, ...telegramDeliveryGuard, ...storage, ...setters, ...api, ...auth, ...briefModule, ...usageParser, window, localStorage,
     navigator: { locks: telegramLocks },
-    ...videoRefs, supabase: sdk,
+    ...videoRefs, supabase: sdk, sessionAuth: { onAuthStateChange: sdk.auth.onAuthStateChange },
     ...evaluateGenerationFixture<Record<string, unknown>>(programs.verifiedUpload, {}),
     ...initialLibraryRefs, form: state.Form, videos: state.Videos, activeId: state.ActiveId,
     useMemo: (callback: () => unknown) => callback(),

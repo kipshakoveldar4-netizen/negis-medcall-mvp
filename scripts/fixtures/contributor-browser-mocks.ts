@@ -25,6 +25,24 @@ export const supabase = { auth: {
   signUp: async () => ({ data: { session: null }, error: null }),
   signOut: async () => { switchActor(null); return { error: null }; },
 } };
+// Synthetic UI dispatch only; no native SDK storage or persistence model.
+function currentScope(scope: { isCurrent(): boolean; signal?: AbortSignal }) {
+  if (typeof scope?.isCurrent !== "function" || !scope.isCurrent() || scope.signal?.aborted) {
+    throw Error("Synthetic sessionAuth requires a current caller scope");
+  }
+}
+export const sessionAuth = {
+  onAuthStateChange: supabase.auth.onAuthStateChange,
+  signInWithPassword(_credentials: unknown, scope: Parameters<typeof currentScope>[0]) {
+    currentScope(scope); return supabase.auth.signInWithPassword();
+  },
+  signUp(_credentials: unknown, scope: Parameters<typeof currentScope>[0]) {
+    currentScope(scope); return supabase.auth.signUp();
+  },
+  signOut(scope: Parameters<typeof currentScope>[0]) {
+    currentScope(scope); return supabase.auth.signOut();
+  },
+};
 async function request(path: string, body: unknown, method: string, valid: () => boolean) {
   if (!valid()) throw Error("Account changed");
   calls.push({ path, method, actor });

@@ -1,4 +1,5 @@
-import { createClient } from '@supabase/supabase-js'
+import { createClient, navigatorLock, processLock, type LockFunc } from '@supabase/supabase-js'
+import { createAuthSessionAuthority } from './authSessionAuthority'
 
 const env = import.meta.env as Record<string, string | undefined>
 const configuredSupabaseUrl = env.VITE_SUPABASE_URL
@@ -25,7 +26,29 @@ export const arrivedByRecoveryLink = (() => {
   return raw.includes('type=recovery')
 })()
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+const sharedLock: LockFunc = (name, timeout, callback) => globalThis.navigator?.locks
+  ? navigatorLock(name, timeout, callback) : processLock(name, timeout, callback)
+const memory = new Map<string, string>()
+const authority = createAuthSessionAuthority({ url: supabaseUrl, key: supabaseAnonKey,
+  storage: {
+    getItem: key => typeof window === 'undefined' ? memory.get(key) ?? null : window.localStorage.getItem(key),
+    setItem: (key, value) => { if (typeof window === 'undefined') memory.set(key, value); else window.localStorage.setItem(key, value) },
+    removeItem: key => { if (typeof window === 'undefined') memory.delete(key); else window.localStorage.removeItem(key) },
+  },
+  lock: (name, timeout, callback) => {
+    if (!globalThis.navigator?.locks) return Promise.reject(new Error('Безопасная смена аккаунта недоступна в этом браузере.'))
+    return sharedLock(name, timeout, callback)
+  },
+})
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: { storageKey: authority.storageKey, storage: authority.storage, lock: sharedLock },
+})
+export const sessionAuth = {
+  signInWithPassword: authority.signInWithPassword, signUp: authority.signUp,
+  signOut: authority.signOut, setSession: authority.setSession, verifyOtp: authority.verifyOtp,
+  capture: authority.capture, isCurrent: authority.isCurrent,
+  onAuthStateChange: (callback: Parameters<typeof authority.observe>[1]) => authority.observe(supabase.auth, callback),
+}
 export const hasSupabaseFrontendEnv = Boolean(configuredSupabaseUrl && configuredSupabaseAnonKey)
 
 /** Три исхода проверки пароля. «Не знаю» — отдельный исход, а не «неверный». */

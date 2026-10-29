@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { ArrowRight } from 'lucide-react';
-import { supabase } from '@/lib/supabase';
+import { supabase, sessionAuth } from '@/lib/supabase';
 import { isSyntheticEmail, loginOrEmailToAuthEmail } from '../../../../lib/auth/staff-logins';
 import { useAuth } from '@/contexts/AuthContext';
 import { z } from 'zod';
@@ -32,6 +32,7 @@ type LoginValues      = z.infer<typeof loginSchema>;
 type ResetValues      = z.infer<typeof resetSchema>;
 type NewPasswordValues = z.infer<typeof newPasswordSchema>;
 type ModalState = 'idle' | 'choice' | 'login' | 'reset' | 'newpassword';
+type ModalLifetime = { state: ModalState; closing?: boolean };
 
 
 const roleRoute = (role: string | null, purpose: WorkspacePurpose | null = null) => {
@@ -45,38 +46,107 @@ const roleRoute = (role: string | null, purpose: WorkspacePurpose | null = null)
 };
 
 export default function Landing() {
-  const [modalState, setModalState] = useState<ModalState>('idle');
+  const [modal, setModal] = useState<ModalLifetime>({ state: 'idle' });
+  const modalState = modal.state;
   const [pressed,    setPressed]    = useState(false);
   const [visible,    setVisible]    = useState(false);
   const [isLoading,  setIsLoading]  = useState(false);
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState('');
   const [error,      setError]      = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [, setLocation] = useLocation();
   const { session, userRole, isLoading: authLoading, clinicId, isDemoMode, workspacePurpose } = useAuth();
   const modalRef = useRef<HTMLDivElement>(null);
+  const liveModal = useRef<ModalLifetime | null>(modal);
+  const mounted = useRef<object | null>(null);
+  const loginAttempt = useRef<AbortController | null>(null);
+  const authUserId = useRef(session?.user.id ?? null);
+  const contextUserId = useRef(session?.user.id ?? null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /* Auto-redirect if already authenticated (e.g. after dev login or page refresh) */
   useEffect(() => {
-    if (!authLoading && clinicId && (session || isDemoMode)) {
+    if (mounted.current && liveModal.current === modal && (session?.user.id ?? null) === authUserId.current
+      && !authLoading && clinicId && (session || isDemoMode)) {
       setLocation(roleRoute(userRole, workspacePurpose));
     }
-  }, [authLoading, session, clinicId, userRole, isDemoMode, workspacePurpose]);
+  }, [authLoading, session, clinicId, userRole, isDemoMode, workspacePurpose, modal]);
 
   const loginForm       = useForm<LoginValues>      ({ resolver: zodResolver(loginSchema) });
   const resetForm       = useForm<ResetValues>      ({ resolver: zodResolver(resetSchema) });
   const newPasswordForm = useForm<NewPasswordValues>({ resolver: zodResolver(newPasswordSchema) });
 
+  const isModalCurrent = () => mounted.current !== null && liveModal.current === modal;
+  const retireLogin = () => {
+    loginAttempt.current?.abort();
+    loginAttempt.current = null;
+    loginForm.setValue('password', '');
+    setLoginLoading(false);
+    setLoginError('');
+  };
+  const setModalState = (state: ModalState) => {
+    if (!isModalCurrent()) return;
+    if (closeTimer.current !== null) clearTimeout(closeTimer.current);
+    closeTimer.current = null;
+    retireLogin();
+    const next = { state };
+    liveModal.current = next;
+    setModal(next);
+  };
+  useLayoutEffect(() => {
+    const lifetime = {};
+    mounted.current = lifetime;
+    if (!liveModal.current) {
+      const next: ModalLifetime = { state: 'idle' };
+      liveModal.current = next;
+      setModal(next);
+    }
+    const { data } = sessionAuth.onAuthStateChange((event, nextSession) => {
+      if (mounted.current !== lifetime) return;
+      const id = nextSession?.user.id ?? null;
+      const changed = authUserId.current !== id || event === 'SIGNED_IN' || event === 'SIGNED_OUT';
+      authUserId.current = id;
+      if (!changed) return;
+      retireLogin();
+      const next = { state: liveModal.current?.state ?? 'idle', closing: liveModal.current?.closing };
+      liveModal.current = next;
+      setModal(next);
+    });
+    return () => {
+      mounted.current = null;
+      liveModal.current = null;
+      loginAttempt.current?.abort();
+      loginAttempt.current = null;
+      if (closeTimer.current !== null) clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+      data.subscription.unsubscribe();
+    };
+  }, []);
+  useLayoutEffect(() => {
+    const id = session?.user.id ?? null;
+    if (contextUserId.current === id) return;
+    contextUserId.current = id;
+    retireLogin();
+    const next = { state: liveModal.current?.state ?? 'idle', closing: liveModal.current?.closing };
+    liveModal.current = next;
+    setModal(next);
+  }, [session?.user.id]);
+
   /* PASSWORD_RECOVERY is handled on the dedicated /reset-password page */
 
   useEffect(() => {
-    if (modalState !== 'idle') {
-      requestAnimationFrame(() => setVisible(true));
+    if (modalState !== 'idle' && !modal.closing) {
+      const frame = requestAnimationFrame(() => { if (isModalCurrent()) setVisible(true); });
+      return () => cancelAnimationFrame(frame);
     } else {
       setVisible(false);
     }
-  }, [modalState]);
+    return undefined;
+  }, [modal]);
 
   const openModal = () => {
+    if (!isModalCurrent()) return;
     // Условие — применённое членство, а не голая сессия: у вошедшего без
     // клиники roleRoute вёл на защищённый маршрут, тот отбрасывал обратно
     // сюда, и кнопка «Войти» становилась бесконечным пинг-понгом без выхода.
@@ -87,8 +157,22 @@ export default function Landing() {
   };
 
   const closeModal = () => {
+    if (!isModalCurrent() || modal.closing) return;
+    const lifetime = mounted.current;
+    retireLogin();
+    const closing = { state: modalState, closing: true };
+    liveModal.current = closing;
+    setModal(closing);
     setVisible(false);
-    setTimeout(() => setModalState('idle'), 220);
+    if (closeTimer.current !== null) clearTimeout(closeTimer.current);
+    const timer = setTimeout(() => {
+      if (mounted.current !== lifetime || closeTimer.current !== timer || !liveModal.current?.closing) return;
+      closeTimer.current = null;
+      const next: ModalLifetime = { state: 'idle' };
+      liveModal.current = next;
+      setModal(next);
+    }, 220);
+    closeTimer.current = timer;
   };
 
   const handleCircleClick = () => {
@@ -99,13 +183,23 @@ export default function Landing() {
 
   /* ── Login ── */
   const handleLogin = async (data: LoginValues) => {
-    setIsLoading(true); setError('');
+    const lifetime = mounted.current;
+    if (!lifetime || !isModalCurrent() || modalState !== 'login' || modal.closing
+      || session || contextUserId.current !== null || authUserId.current !== null || loginAttempt.current) return;
+    const attempt = new AbortController();
+    loginAttempt.current = attempt;
+    const isCurrent = () => mounted.current === lifetime && liveModal.current === modal
+      && loginAttempt.current === attempt && !attempt.signal.aborted
+      && contextUserId.current === null && authUserId.current === null;
+    // Тем же преобразованием, что применил сервер при заведении: две копии
+    // разошлись бы, и человек получил бы «неверный логин или пароль».
+    const credentials = { email: loginOrEmailToAuthEmail(data.email), password: data.password };
+    loginForm.setValue('password', '');
+    setLoginLoading(true); setLoginError('');
     try {
-      // Тем же преобразованием, что применил сервер при заведении: две копии
-      // разошлись бы, и человек получил бы «неверный логин или пароль».
-      const { error } = await supabase.auth.signInWithPassword({
-        email: loginOrEmailToAuthEmail(data.email), password: data.password,
-      });
+      const { error } = await sessionAuth.signInWithPassword(credentials,
+        { isCurrent, signal: attempt.signal, expectedUserId: null });
+      if (!isCurrent()) return;
       if (error) throw error;
       // Security-1A: the post-login role lookup used to read `user_roles`,
       // which does not exist in production. Role and workspace are resolved by
@@ -114,8 +208,16 @@ export default function Landing() {
       closeModal();
       setLocation(roleRoute(null));
     } catch (e: any) {
-      setError(e.message || 'Ошибка входа');
-    } finally { setIsLoading(false); }
+      if (isCurrent()) setLoginError(e.message || 'Ошибка входа');
+    } finally {
+      if (isCurrent()) {
+        loginAttempt.current = null;
+        setLoginLoading(false);
+        const next = { state: modalState };
+        liveModal.current = next;
+        setModal(next);
+      }
+    }
   };
 
   /* Reset password — send temp password via API ── */
@@ -203,9 +305,9 @@ export default function Landing() {
   const PrimaryBtn: React.CSSProperties = {
     background: '#1E325C', color: 'white', border: '1px solid #1E325C',
     borderRadius: 12, fontWeight: 500, fontSize: 14, padding: '12px 20px',
-    cursor: isLoading ? 'not-allowed' : 'pointer', width: '100%',
+    cursor: (modalState === 'login' ? loginLoading : isLoading) ? 'not-allowed' : 'pointer', width: '100%',
     fontFamily: "'Inter', sans-serif", transition: 'background 0.15s ease',
-    opacity: isLoading ? 0.65 : 1, letterSpacing: '0.01em',
+    opacity: (modalState === 'login' ? loginLoading : isLoading) ? 0.65 : 1, letterSpacing: '0.01em',
   };
   const LinkBtn: React.CSSProperties = {
     background: 'none', border: 'none', color: '#2859C5', fontSize: 12,
@@ -577,9 +679,9 @@ export default function Landing() {
                     </button>
                   </div>
                 </div>
-                {error && <p style={{ color: '#DC2626', fontSize: 13, textAlign: 'center' }}>{error}</p>}
-                <button type="submit" style={{ ...PrimaryBtn, marginTop: 4 }} disabled={isLoading} data-testid="button-login">
-                  {isLoading ? 'Вход...' : 'Войти'}
+                {loginError && <p style={{ color: '#DC2626', fontSize: 13, textAlign: 'center' }}>{loginError}</p>}
+                <button type="submit" style={{ ...PrimaryBtn, marginTop: 4 }} disabled={loginLoading} data-testid="button-login">
+                  {loginLoading ? 'Вход...' : 'Войти'}
                 </button>
                 <BackLink label="Назад" onClick={() => setModalState('choice')} />
               </form>

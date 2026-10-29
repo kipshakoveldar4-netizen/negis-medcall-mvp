@@ -45,6 +45,7 @@ export const fixture={
 export function useAuth(){return{...useSyncExternalStore(fn=>{listeners.add(fn);return()=>listeners.delete(fn);},()=>current),
  applyConfirmedProfile(confirmed,guard){if(guard()&&confirmed.id===current.user?.id)fixture.patch({user:{...current.user,user_metadata:confirmed.user_metadata}});}};}
 export const supabase={auth:{onAuthStateChange(fn){sdk.add(fn);return{data:{subscription:{unsubscribe(){sdk.delete(fn);}}}};}}};
+export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange};
 export const hasSupabaseFrontendEnv=true;
 export function useLocation(){return['/leads',()=>{throw Error('Navigation is outside the profile handoff test');}];}
 export function verifyCurrentPassword(){fixture.stage='verification';return verification.promise;}

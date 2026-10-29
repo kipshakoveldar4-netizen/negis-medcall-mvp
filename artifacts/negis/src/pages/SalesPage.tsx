@@ -19,7 +19,7 @@ import { MetricCard } from "@/components/ui/metric-card";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { isRealWorkspace, readDemoStorage, readWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 import { useAuth } from "@/contexts/AuthContext";
-import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
 import { canReleaseSalesAttempt, clearPersistedSalesCreateAttempt, confirmedSalesCreate, isCurrentSalesAttempt, mergeCreatedSale, newSalesCreateAttempt, persistSalesCreateAttempt, restoreSalesCreateAttempt, sameSalesCreateIntent, SalesAttemptRestoreError, type SalesCreateAttempt } from "@/lib/salesCreateAttempt";
 
 type DealStatus = "pending" | "paid" | "cancelled" | "refunded";
@@ -463,7 +463,7 @@ export default function SalesPage() {
   useLayoutEffect(() => {
     if (!hasSupabaseFrontendEnv) return;
     let mounted = true;
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((event, session) => {
       if (!mounted) return;
       const nextActor = event === "SIGNED_OUT" ? "" : session?.user.id || "";
       authObserved.current = true;

@@ -223,6 +223,21 @@ function fixture(t: TestContext, config: { configured?: boolean; initialEvent?: 
     assert.ok(Object.hasOwn(target, key), `Only explicit Auth SDK doubles are allowed: ${String(key)}`);
     return Reflect.get(target, key);
   } });
+  // Signature/dispatch checks only. Held replies do not emulate SDK persistence.
+  function currentScope(scope: { isCurrent(): boolean; signal?: AbortSignal }) {
+    assert.equal(typeof scope?.isCurrent, "function", "sessionAuth requires a caller scope");
+    assert.equal(scope.isCurrent(), true, "A retired caller must not dispatch fake auth");
+    assert.notEqual(scope.signal?.aborted, true, "An aborted caller must not dispatch fake auth");
+  }
+  const sessionAuth = {
+    onAuthStateChange: sdk.onAuthStateChange,
+    signInWithPassword(body: Props, scope: Parameters<typeof currentScope>[0]) {
+      currentScope(scope); return sdk.signInWithPassword(body);
+    },
+    signUp(body: Props, scope: Parameters<typeof currentScope>[0]) {
+      currentScope(scope); return sdk.signUp(body);
+    },
+  };
   const childDouble = (kind: string) => function ClosedPrivateChild(props: Props) {
     const record = renderer.hooks.useRef<ChildMount | null>(null);
     if (!record.current) { record.current = { kind, props, active: false, unmounts: 0 }; mounts.push(record.current); }
@@ -238,7 +253,7 @@ function fixture(t: TestContext, config: { configured?: boolean; initialEvent?: 
       Image: icon, RefreshCw: icon, Send: icon, UserRound: icon, Users: icon, Video: icon },
     "@/components/portals/PortalShell": { PortalShell: (props: Props) => { shell = props; return jsx("main", { children: props.children }); } },
     "@/contexts/AuthContext": { useAuth: () => context },
-    "@/lib/supabase": { hasSupabaseFrontendEnv: config.configured !== false, supabase: { auth } },
+    "@/lib/supabase": { hasSupabaseFrontendEnv: config.configured !== false, supabase: { auth }, sessionAuth },
     "@/lib/operatorApi": { operatorApi(route: string, body: unknown, method: string, signal: AbortSignal,
       actorId: string, isCurrent: () => boolean) {
       assert.equal(route, "contributor-account", "Closed child stubs must not dispatch private child requests");
@@ -286,7 +301,7 @@ function fixture(t: TestContext, config: { configured?: boolean; initialEvent?: 
     assert.ok(button, `Expected existing ${value} mode button`); return button;
   }
   return {
-    ...renderer, bootstrap, trace, authCalls, profileCalls, providerCalls, mounts, authCallbacks, input, form, mode, emit,
+    ...renderer, bootstrap, trace, authCalls, profileCalls, providerCalls, mounts, authCallbacks, input, form, mode, emit, sessionAuth,
     shell: () => shell, rawSignOuts: () => rawSignOuts, prevented: () => prevented,
     authPatch(patch: Props) { context = { ...context, ...patch }; renderer.rerender(); },
     submit(handler = form().props.onSubmit) { return handler({ preventDefault() { prevented++; } }); },
@@ -314,6 +329,17 @@ function fixture(t: TestContext, config: { configured?: boolean; initialEvent?: 
     },
   };
 }
+
+test("synthetic sessionAuth signature rejects missing, retired and aborted scopes before fake dispatch", async t => {
+  const f = fixture(t); await f.flush();
+  const controller = new AbortController(); controller.abort();
+  for (const scope of [undefined, {}, { isCurrent: () => false }, { isCurrent: () => true, signal: controller.signal }]) {
+    for (const method of [f.sessionAuth.signInWithPassword, f.sessionAuth.signUp]) {
+      assert.throws(() => method({ email: "synthetic@example.invalid", password }, scope as Parameters<typeof method>[1]));
+      assert.equal(f.authCalls.length, 0, "Invalid facade calls never enter the held SDK double");
+    }
+  }
+});
 
 test("bootstrap subscribes before lookup and holds both login and private application closed", async t => {
   const f = fixture(t); await f.flush();

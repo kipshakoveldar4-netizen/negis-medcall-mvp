@@ -81,7 +81,9 @@ function fixture(initial: Record<string, unknown> = {}) {
       if (guard() && confirmed.id === auth.user?.id) auth = { ...auth, user: { ...auth.user,
         user_metadata: { ...auth.user.user_metadata, full_name: confirmed.user_metadata.full_name } } };
     } }) },
-    '@/lib/supabase': { hasSupabaseFrontendEnv: true, supabase: { auth: sdk }, verifyCurrentPassword: () => verification.promise },
+    // This profile harness needs only the observer facade, never guarded auth writes.
+    '@/lib/supabase': { hasSupabaseFrontendEnv: true, supabase: { auth: sdk },
+      sessionAuth: { onAuthStateChange: sdk.onAuthStateChange }, verifyCurrentPassword: () => verification.promise },
     '../../../../../lib/auth/password-rules': { PASSWORD_RULE_HINT: 'Synthetic rules', validatePasswordRules: () => [] },
     './PushSettings': { PushSettings: 'PushSettings' },
     '../../../../../lib/auth/staff-logins': { isSyntheticEmail: () => false, loginFromEmail: (email: string) => email },

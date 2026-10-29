@@ -98,7 +98,7 @@ test("owned React/HTTP/Auth: DoctorSchedule operation ownership", { timeout: 180
         `import * as R from ${reactPath};export * from ${reactPath};export function useState(initial){const [v,set]=R.useState(initial);
         return [v,(next)=>{window.__scheduleFixture.stateWrites++;set(next);}];}`, resolveDir: frontend }));
       build.onLoad({ filter: /[\\/]lib[\\/]supabase\.ts$/ }, () => ({ contents:
-        "export const hasSupabaseFrontendEnv=true;export const supabase={auth:new Proxy({},{get:(_,key)=>(...args)=>window.__scheduleFixture.sdk[key](...args)})};" }));
+        "export const hasSupabaseFrontendEnv=true;export const supabase={auth:new Proxy({},{get:(_,key)=>(...args)=>window.__scheduleFixture.sdk[key](...args)})};export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange};" }));
       build.onResolve({ filter: /^(sonner|wouter)$/ }, (args: any) => ({ path: args.path, namespace: "fixture" }));
       build.onLoad({ filter: /^(sonner|wouter)$/, namespace: "fixture" }, (args: any) => ({ contents: args.path === "sonner"
         ? "export const toast={success:m=>window.__scheduleFixture.notices.push('success:'+m),error:m=>window.__scheduleFixture.notices.push('error:'+m)};"

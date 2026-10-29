@@ -141,6 +141,11 @@ export const supabase={auth:{
  signOut(){f.signouts++;return sdk.signOut();},
  resetPasswordForEmail(){f.recoveries++;throw Error('Fixture forbids mail');},
 }};
+// Facade compatibility only. This stamp is synthetic UI lifetime data, not storage authority.
+export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange,capture:()=>({actor,revision}),signOut(scope,options){
+ if(typeof scope?.isCurrent!=='function'||!scope.isCurrent()||scope.signal?.aborted)throw Error('Synthetic sign-out requires a current caller scope');
+ if(scope.expected&&(scope.expected.actor!==actor||scope.expected.revision!==revision))throw Error('Synthetic sign-out stamp retired');
+ f.signouts++;return sdk.signOut(options);}};
 export const WORKSPACE_SELECTOR_KEY='negis_workspace_selector';
 export function useLocation(){return['/join',href=>f.navigations.push(href)];}
 export const toast={error:message=>f.notices.push({kind:'error',message}),success:message=>f.notices.push({kind:'success',message})};
@@ -197,7 +202,11 @@ export async function startJoinWorkspaceFixture(t: TestContext, baseline: boolea
   const child = spawn(browser, ["--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
     "--disable-extensions", "--disable-sync", "--disable-component-update", "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
     "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank"],
-  { windowsHide: true, stdio: "ignore" });
+  { windowsHide: true, stdio: ["ignore", "ignore", "pipe"],
+    env: Object.fromEntries(["PATH", "Path", "SystemRoot", "WINDIR", "TEMP", "TMP", "LOCALAPPDATA", "APPDATA", "HOME", "DISPLAY"]
+      .map(key => [key, process.env[key]])) });
+  let startupError = "";
+  child.stderr?.on("data", chunk => { startupError = (startupError + String(chunk)).slice(-8000); });
   const exited = new Promise(resolve => { child.once("exit", resolve); child.once("error", resolve); });
   let socket: WebSocket | undefined;
   let cdp: ((method: string, params?: Record<string, unknown>) => Promise<any>) | undefined;
@@ -215,7 +224,7 @@ export async function startJoinWorkspaceFixture(t: TestContext, baseline: boolea
   });
   let port = "";
   for (let pass = 0; pass < 250; pass++) {
-    assert.equal(child.exitCode, null, "Owned browser must stay running");
+    assert.equal(child.exitCode, null, `Owned browser must stay running: ${startupError}`);
     try { port = (await readFile(path.join(profile, "DevToolsActivePort"), "utf8")).split(/\r?\n/)[0]; } catch {}
     if (/^\d+$/.test(port)) break;
     await delay(40);

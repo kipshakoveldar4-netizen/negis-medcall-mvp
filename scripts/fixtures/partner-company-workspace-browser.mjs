@@ -31,6 +31,12 @@ export const supabase={auth:{
     if(q.signOutPlan.fail)return{error:Error('Synthetic SDK refusal')};q.emit(null);return{error:null};},
   async signInWithPassword(){throw Error('Fixture forbids credentials');}
 }};
+// Synthetic dispatch checks only; held replies do not model native auth storage.
+const current=scope=>{if(typeof scope?.isCurrent!=='function'||!scope.isCurrent()||scope.signal?.aborted)
+  throw Error('Synthetic sessionAuth requires a current caller scope');};
+export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange,
+  signOut(scope){current(scope);return supabase.auth.signOut();},
+  signInWithPassword(args,scope){current(scope);return supabase.auth.signInWithPassword(args);}};
 `;
 const entry = `
 import React,{useEffect} from 'react';

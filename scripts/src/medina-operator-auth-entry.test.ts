@@ -238,6 +238,21 @@ async function fixture(t: TestContext, options: Options = {}) {
     calls.push({ kind, input, hold, passwordAtDispatch: passwordSlot === undefined ? undefined : driver.state(passwordSlot) });
     return observed(hold.promise);
   }
+  // Signature/dispatch checks only; held replies have no SDK persistence effects.
+  function currentScope(scope: { isCurrent(): boolean; signal?: AbortSignal }) {
+    assert.equal(typeof scope?.isCurrent, "function", "sessionAuth requires a caller scope");
+    assert.equal(scope.isCurrent(), true, "A retired caller must not dispatch fake auth");
+    assert.notEqual(scope.signal?.aborted, true, "An aborted caller must not dispatch fake auth");
+  }
+  const sessionAuth = {
+    onAuthStateChange: sdk.onAuthStateChange,
+    signInWithPassword(input: Props, scope: Parameters<typeof currentScope>[0]) {
+      currentScope(scope); return sdk.signInWithPassword(input);
+    },
+    signUp(input: Props, scope: Parameters<typeof currentScope>[0]) {
+      currentScope(scope); return sdk.signUp(input);
+    },
+  };
   const signOut = (...args: unknown[]) => {
     const hold = deferred<void>();
     providerObservation?.();
@@ -258,7 +273,7 @@ async function fixture(t: TestContext, options: Options = {}) {
     "@/components/portals/PortalShell": { PortalShell },
     "@/components/operators/OperatorWorkday": { OperatorWorkday },
     "@/components/operators/OperatorRequests": { OperatorRequests },
-    "@/lib/supabase": { supabase: { auth: sdk }, hasSupabaseFrontendEnv: options.configured !== false },
+    "@/lib/supabase": { supabase: { auth: sdk }, sessionAuth, hasSupabaseFrontendEnv: options.configured !== false },
     "@/contexts/AuthContext": { useAuth() {
       useAuthCalls++;
       return { session: session(actor), user: session(actor)?.user ?? null, isSigningOut, signOutFailed, signOut };
@@ -359,7 +374,7 @@ async function fixture(t: TestContext, options: Options = {}) {
   await driver.flush();
   if (!options.holdBootstrap && !options.lookupThrows) { bootstrap.resolve(authResult(options.initial ?? null)); await driver.flush(); }
   return {
-    driver, calls, profiles, bootstrap, providerCalls, order, emit, take, approve, input, change, form, loginForm, submit, mode,
+    driver, calls, profiles, bootstrap, providerCalls, order, emit, take, approve, input, change, form, loginForm, submit, mode, sessionAuth,
     navigate, child, shell, snapshot, flush: driver.flush, unmount: driver.unmount,
     rawSignOuts: () => rawSignOuts, subscriptions: () => subscriptions.size, unsubscribed: () => unsubscribed,
     useAuthCalls: () => useAuthCalls,
@@ -371,6 +386,16 @@ async function fixture(t: TestContext, options: Options = {}) {
     async credentials(email = "local.operator", secret = password) { await change("email", email); await change("password", secret); },
   };
 }
+
+test("synthetic sessionAuth signature rejects missing, retired and aborted scopes before fake dispatch", async t => {
+  const f = await fixture(t), controller = new AbortController(); controller.abort();
+  for (const scope of [undefined, {}, { isCurrent: () => false }, { isCurrent: () => true, signal: controller.signal }]) {
+    for (const method of [f.sessionAuth.signInWithPassword, f.sessionAuth.signUp]) {
+      assert.throws(() => method({ email: "synthetic@example.invalid", password }, scope as Parameters<typeof method>[1]));
+      assert.equal(f.calls.length, 0, "Invalid facade calls never enter the held SDK double");
+    }
+  }
+});
 
 test("bootstrap subscribes before lookup, including an identity observed synchronously inside lookup", async t => {
   t.diagnostic(`OperatorPortal SHA256 ${sourceHash}; actual root methods/JSX, synthetic hooks/events/SDK/useAuth; no React/browser/server acceptance`);

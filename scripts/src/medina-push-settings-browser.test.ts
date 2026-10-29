@@ -66,6 +66,7 @@ globalThis.fetch=(url,init={})=>{if(!String(url).startsWith('/api/crm/push-subsc
 export const hasSupabaseFrontendEnv=true;
 export const supabase={auth:{onAuthStateChange(fn){sdkListeners.add(fn);return{data:{subscription:{unsubscribe(){sdkListeners.delete(fn);}}}};},
  async getSession(){fixture.authReads++;const captured=sdkSession;await wait('token');return{data:{session:captured},error:null};}}};
+export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange};
 export function useAuth(){fixture.renders++;return useSyncExternalStore(fn=>{authListeners.add(fn);return()=>authListeners.delete(fn);},()=>current);}
 export const toast={success:value=>fixture.messages.push('success:'+value),error:value=>fixture.messages.push('error:'+value)};
 // The actual sign-out fence can inspect only empty synthetic storage.

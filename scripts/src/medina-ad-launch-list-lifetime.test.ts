@@ -55,9 +55,9 @@ function compile(source: string, fileName: string, page?: Page) {
               ts.factory.createPropertyAssignment("ui", ui),
             ]));
           });
-          return ts.factory.updateFunctionDeclaration(node,
+          return ts.visitEachChild(ts.factory.updateFunctionDeclaration(node,
             node.modifiers, node.asteriskToken, node.name,
-            node.typeParameters, node.parameters, node.type, ts.factory.updateBlock(node.body, statements));
+            node.typeParameters, node.parameters, node.type, ts.factory.updateBlock(node.body, statements)), visit, context);
         }
         return ts.visitEachChild(node, visit, context);
       };
@@ -167,6 +167,7 @@ async function fixture(t: TestContext, page: Page, options: { actor?: string; de
   const driver = hooks();
   const auth = { user: { id: actor, email: "synthetic@example.invalid" }, userRole: "manager" };
   const serverAuth = { getSupabaseAccessToken: async () => `synthetic-${actor}` };
+  const sessionAuth = { onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }) };
   const storage = {
     getItem(key: string) { reads.push(key); return local.get(key) ?? null; },
     setItem(key: string, value: string) { writes.push(key); local.set(key, value); },
@@ -215,10 +216,11 @@ async function fixture(t: TestContext, page: Page, options: { actor?: string; de
     if (name === "@/contexts/AuthContext") return { useAuth: () => auth };
     if (name === "@/lib/api") return api;
     if (name === "@/lib/serverAuth") return serverAuth;
+    if (name === "@/lib/verified-creative-upload") return {
+      uploadVerifiedCreativeImage() { assert.fail("List lifetime fixture forbids uploads"); },
+    };
     if (name === "@/lib/authSignOut") return { getSignOutRevision: () => 0, isSignOutPending: () => false };
-    if (name === "@/lib/supabase") return { hasSupabaseFrontendEnv: true, supabase: {
-      auth: { onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }) },
-    } };
+    if (name === "@/lib/supabase") return { hasSupabaseFrontendEnv: true, supabase: { auth: sessionAuth }, sessionAuth };
     if (name === "wouter") return { useLocation: () => ["/ads-automation/history", () => {}] };
     if (name === "sonner") return { toast: { success() {}, info() {}, error() {} } };
     if (name === "@/lib/demoStorage") return {

@@ -152,7 +152,8 @@ function fixture(t: TestContext, patch: Partial<Auth> = {}, authModule?: AuthMod
       "LayoutDashboard", "MessageCircle", "Megaphone", "Menu", "PhoneCall", "Rocket", "Settings", "Store", "Tag", "User", "Users", "X", "LogOut"].map(name => [name, () => null])),
     "@/contexts/AuthContext": authModule ?? { useAuth: () => ({ ...auth, signOut: async () => { signOutActors.push(auth.user?.id ?? null); } }) },
     "@/lib/supabase": { hasSupabaseFrontendEnv: !!authModule?.onAuthStateChange,
-      supabase: { auth: { onAuthStateChange: authModule?.onAuthStateChange } } },
+      supabase: { auth: { onAuthStateChange: authModule?.onAuthStateChange } },
+      sessionAuth: { onAuthStateChange: authModule?.onAuthStateChange } },
     "@/lib/workspaceRoutes": routes,
     "../../../../../lib/vertical/terms": terms,
     "./ProfileDialog": { ProfileDialog: Profile },
@@ -404,20 +405,32 @@ function actualAuthProvider(t: TestContext) {
   };
   const fail = (operation: string): never => { forbidden.push(operation); throw new Error(`Forbidden boundary: ${operation}`); };
   const jsx = (type: unknown, props: Props) => ({ type, props });
+  const sdk = {
+    onAuthStateChange(listener: Parameters<typeof listeners.add>[0]) {
+      listeners.add(listener); return { data: { subscription: { unsubscribe: () => listeners.delete(listener) } } };
+    },
+    async getSession() { return { data: { session: session() }, error: null }; },
+    async signOut() { signOutActors.push(actor); emit(null); return { error: null }; },
+  };
+  // Synthetic observer/dispatch contract, not native SDK persistence coverage.
+  const sessionAuth = {
+    onAuthStateChange: sdk.onAuthStateChange,
+    signOut(scope: { isCurrent(): boolean; signal?: AbortSignal }) {
+      assert.equal(typeof scope?.isCurrent, "function", "sessionAuth requires a caller scope");
+      assert.equal(scope.isCurrent(), true, "A retired sign-out must not dispatch");
+      assert.notEqual(scope.signal?.aborted, true, "An aborted sign-out must not dispatch");
+      return sdk.signOut();
+    },
+  };
   const actual = evaluate(authCode, {
     react: { ...react, default: react }, "react/jsx-runtime": { jsx, jsxs: jsx },
-    "@/lib/supabase": { supabase: { auth: {
-      onAuthStateChange(listener: Parameters<typeof listeners.add>[0]) {
-        listeners.add(listener); return { data: { subscription: { unsubscribe: () => listeners.delete(listener) } } };
-      },
-      async getSession() { return { data: { session: session() }, error: null }; },
-      async signOut() { signOutActors.push(actor); emit(null); return { error: null }; },
-    } } },
+    "@/lib/supabase": { supabase: { auth: sdk }, sessionAuth },
     "@/lib/authSignOut": signOut,
     "../../../../lib/vertical/terms": terms, "../../../../lib/crm/workspace-purpose": purposes,
     "@/lib/permissions": permissions,
     wouter: { useLocation: () => ["/leads", () => {}] }, sonner: { toast: { error() {}, success() {} } },
-    "@/lib/demoStorage": { WORKSPACE_SELECTOR_KEY: "negis_workspace_selector", clearListReadCache() {} },
+    "@/lib/demoStorage": { WORKSPACE_SELECTOR_KEY: "negis_workspace_selector", clearListReadCache() {},
+      bindWorkspaceReadScope() {}, clearWorkspaceReadScope() {} },
     "@/lib/serverAuth": { async getSupabaseAccessToken(expected: string) { return actor === expected ? `synthetic:${expected}` : ""; } },
     "@/lib/api": { apiUrl: (url: string) => url, clearCrmCache() {},
       async crmFetch(url: string, init: { expectedUserId: string; dispatchGuard(): boolean }) {

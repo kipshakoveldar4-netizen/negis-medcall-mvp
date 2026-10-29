@@ -67,6 +67,7 @@ export function useAuth(){return useSyncExternalStore(fn=>{listeners.add(fn);ret
 export const hasSupabaseFrontendEnv=true;
 export const supabase={auth:{onAuthStateChange(fn){sdk.add(fn);return{data:{subscription:{unsubscribe(){sdk.delete(fn);}}}};},
  async getSession(){fixture.lookups++;if(gate)await gate.promise;return{data:{session},error:null};}}};
+export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange};
 export const readWorkspaceId=()=>selected,isRealWorkspace=()=>true,workspaceScopedKey=key=>key;
 export const readDemoStorage=(_key,fallback)=>fallback,writeDemoStorage=()=>{throw Error('Unrelated persistence forbidden');};
 export function useDemoCollection(){const [items,setItems]=useState(()=>[{id:context.user?.id===ids.ab?ids.lb:ids.la,

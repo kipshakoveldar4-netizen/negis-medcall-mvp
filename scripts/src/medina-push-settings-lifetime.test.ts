@@ -108,7 +108,7 @@ function fixture(sync = false, initial: Record<string, any> = {}) {
         if (name === "@/lib/supabase") return { hasSupabaseFrontendEnv: true, supabase: { auth: {
           onAuthStateChange(fn: any) { listeners.add(fn); return { data: { subscription: { unsubscribe() { listeners.delete(fn); } } } }; },
           async getSession() { authReads++; return authGate ? await authGate.promise : { data: { session: sdk }, error: null }; },
-        } } };
+        } }, get sessionAuth() { return { onAuthStateChange: this.supabase.auth.onAuthStateChange }; } };
         if (name.startsWith("@/lib/")) return load(name.slice(6));
         assert.fail(`Unexpected dependency ${name}`);
       },

@@ -26,7 +26,7 @@ import { crmFetch } from "@/lib/api";
 import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
 import { isRealWorkspace, readDemoStorage, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
-import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
 import { parseMetaInsightsHistorySummaries, type MetaInsightsHistorySummary } from "@/lib/metaInsightsHistory";
 import {
   ADVERTISING_CAMPAIGN_PREFILL_KEY,
@@ -449,7 +449,7 @@ export default function AdvertisingHub() {
   const [authEpoch, setAuthEpoch] = useState(0);
   useLayoutEffect(() => {
     if (!hasSupabaseFrontendEnv) return;
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((_event, session) => {
       const nextActor = session?.user.id || "";
       if (observedActorRef.current === nextActor) return;
       observedActorRef.current = nextActor;
@@ -478,7 +478,7 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
     const session = new AbortController();
     sessionRef.current = session;
     const subscription = hasSupabaseFrontendEnv
-      ? supabase.auth.onAuthStateChange((_event, next) => {
+      ? sessionAuth.onAuthStateChange((_event, next) => {
           // Demo follows the SDK lifetime without gaining a CRM actor or server access.
           if ((next?.user.id || "") !== (localDraftsOnly ? observedSdkActorId : actorId)) session.abort();
         }).data.subscription
@@ -533,11 +533,15 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
     return { ready, targetPatients, durationDays, maxBudget, dailyBudget };
   }, [campaignGoal]);
 
-  function canUseCampaignControls() {
+  function canUseReadControls() {
     const session = sessionRef.current;
     return Boolean(session && !session.signal.aborted
       && !isSignOutPending() && signOutRevisionRef.current === getSignOutRevision()
-      && (localDraftsOnly || (canReadPrivate && isSessionAlive(session))));
+      && (localDraftsOnly || isSessionAlive(session)));
+  }
+
+  function canUseCampaignControls() {
+    return canUseReadControls() && (localDraftsOnly || canReadPrivate);
   }
 
   function updateCampaignGoal(field: keyof CampaignGoalForm, value: string) {
@@ -590,7 +594,7 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
   }
 
   function refreshLaunches() {
-    if (!canUseCampaignControls()) return;
+    if (!canUseReadControls()) return;
     launchesRequestRef.current += 1;
     setLoadState("loading");
     setReloadKey((value) => value + 1);

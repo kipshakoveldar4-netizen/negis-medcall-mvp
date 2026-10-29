@@ -56,6 +56,7 @@ export const fixture={calls:[],held:[],captured:{},holdReads:false,
 export function useAuth(){return useSyncExternalStore(fn=>{listeners.add(fn);return()=>listeners.delete(fn);},()=>current);}
 export const hasSupabaseFrontendEnv=true;
 export const supabase={auth:{onAuthStateChange(fn){sdk.add(fn);return{data:{subscription:{unsubscribe(){sdk.delete(fn);}}}};}}};
+export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange};
 export const readWorkspaceId=()=>current.clinicId;
 export async function crmFetch(url,init={}){if(!/^\\/api\\/crm\\/mortgage-workspace\\?/.test(url))throw Error('Unexpected HTTP '+url);
  const method=init.method||'GET';let resolve,reject;const pending=new Promise((yes,no)=>{resolve=yes;reject=no;});

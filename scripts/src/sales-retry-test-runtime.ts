@@ -204,17 +204,16 @@ export async function createSalesRetryRuntime(workspaceId: string,
   const storage = evaluate(code.storage, { react: hooks, sonner: { toast }, "@/lib/api": api });
   const attempt = evaluate(code.attempt, {});
   const decorations = new Proxy({}, { get: (_object, key) => String(key) });
+  const sessionAuth = { onAuthStateChange(listener: AuthListener) {
+    authListeners.add(listener);
+    return { data: { subscription: { unsubscribe: () => { authListeners.delete(listener); } } } };
+  } };
   const page = evaluate(code.page, {
     react: hooks, sonner: { toast }, wouter: { Link: "Link" }, "lucide-react": decorations,
     "@/components/layout/PageLayout": decorations, "@/components/ui/metric-card": decorations,
     "@/lib/api": api, "@/lib/demoStorage": storage,
     "@/lib/salesCreateAttempt": attempt,
-    "@/lib/supabase": { hasSupabaseFrontendEnv: options.hasSupabaseFrontendEnv ?? true, supabase: { auth: {
-      onAuthStateChange(listener: AuthListener) {
-        authListeners.add(listener);
-        return { data: { subscription: { unsubscribe: () => { authListeners.delete(listener); } } } };
-      },
-    } } },
+    "@/lib/supabase": { hasSupabaseFrontendEnv: options.hasSupabaseFrontendEnv ?? true, supabase: { auth: sessionAuth }, sessionAuth },
     "@/contexts/AuthContext": { useAuth: () => ({ user: actorId ? { id: actorId } : null, clinicId: selectedWorkspaceId }) },
     "react/jsx-runtime": { jsx: () => assert.fail("final JSX must be observation-only"), jsxs: () => assert.fail("unexpected JSX") },
   }).default as () => View;

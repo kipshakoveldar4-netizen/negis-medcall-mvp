@@ -37,6 +37,7 @@ export function useAuth(){return {...useSyncExternalStore(fn=>{listeners.add(fn)
  signOut:async()=>{fixture.signouts++;fixture.patch({isSigningOut:true});}};}
 export const hasSupabaseFrontendEnv=true;
 export const supabase={auth:{onAuthStateChange(fn){sdk.add(fn);return{data:{subscription:{unsubscribe(){sdk.delete(fn);}}}};}}};
+export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange};
 export function useLocation(){return['/leads',href=>fixture.navigations.push(href)];}
 export function ProfileDialog({onClose}){return createPortal(<section id="profile-fixture" role="dialog"><button onClick={onClose}>Close profile</button></section>,document.body);}
 `;

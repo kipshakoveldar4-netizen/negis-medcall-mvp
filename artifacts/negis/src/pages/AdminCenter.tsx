@@ -48,7 +48,7 @@ import { formatJoinCode } from "../../../../lib/crm/join-codes";
 import { loginFromEmail, loginFromFullName, normalizeLogin } from "../../../../lib/auth/staff-logins";
 import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
-import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
 import {
   canAssignRole,
   permissionLabels,
@@ -822,7 +822,7 @@ export default function AdminCenter() {
   const [authEpoch, setAuthEpoch] = useState(0);
   useLayoutEffect(() => {
     if (!hasSupabaseFrontendEnv) return;
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((_event, nextSession) => {
       const nextActorId = nextSession?.user.id || "";
       if (observedActorRef.current === nextActorId) return;
       observedActorRef.current = nextActorId;
@@ -896,7 +896,7 @@ function AdminCenterSession({ actorId, workspaceId, userRole, isDemoMode, worksp
     // Content captures one controller, including across StrictMode setup replay.
     setLifetime((current) => ({ controller, epoch: (current?.epoch ?? 0) + 1 }));
     const subscription = hasSupabaseFrontendEnv && !isDemoMode
-      ? supabase.auth.onAuthStateChange((_event, nextSession) => {
+      ? sessionAuth.onAuthStateChange((_event, nextSession) => {
           if ((nextSession?.user.id || "") !== actorId) controller.abort();
         }).data.subscription
       : null;

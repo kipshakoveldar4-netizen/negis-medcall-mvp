@@ -138,7 +138,8 @@ function fixture() {
     },
   } };
   const auth = evaluate<{ getSupabaseAccessToken(expected?: string): Promise<string> }>(authCode, {
-    hasSupabaseFrontendEnv: true, supabase, isSignOutPending: () => false, getSignOutRevision: () => 0,
+    hasSupabaseFrontendEnv: true, supabase, sessionAuth: { onAuthStateChange: supabase.auth.onAuthStateChange },
+    isSignOutPending: () => false, getSignOutRevision: () => 0,
   });
   let captured: Captured;
   const api = evaluate<Api>(apiCode, {
@@ -179,7 +180,8 @@ function fixture() {
     cleanup?.(); loading = null;
     captured = evaluate<Captured>(pageCode, {
       ...auth, ...delivery, ...workspace, actorId, workspaceId, localDraftsOnly: false,
-      hasSupabaseFrontendEnv: true, supabase, readWorkspaceId: () => workspaceId,
+      hasSupabaseFrontendEnv: true, supabase, sessionAuth: { onAuthStateChange: supabase.auth.onAuthStateChange },
+      readWorkspaceId: () => workspaceId,
       isSignOutPending: () => false, getSignOutRevision: () => 0,
       form: {}, videos: [row], activeId: row.id,
       useRef: <T>(current: T) => ({ current }), useLayoutEffect(create: () => () => void) { cleanup = create(); },

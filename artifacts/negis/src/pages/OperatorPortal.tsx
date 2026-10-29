@@ -3,7 +3,7 @@ import { Link } from "wouter";
 import { ClipboardList, FileText, RefreshCw, Send, UserRound, Users } from "lucide-react";
 import { PortalShell } from "@/components/portals/PortalShell";
 import { useAuth } from "@/contexts/AuthContext";
-import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
+import { supabase, sessionAuth, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { operatorApi } from "@/lib/operatorApi";
 import { OperatorRequests } from "@/components/operators/OperatorRequests";
 import { OperatorWorkday } from "@/components/operators/OperatorWorkday";
@@ -103,7 +103,7 @@ export default function OperatorPortal() {
       setUserId(id);
       setReady(true);
     };
-    const { data } = supabase.auth.onAuthStateChange((event, session) => {
+    const { data } = sessionAuth.onAuthStateChange((event, session) => {
       if (!isMounted()) return;
       authEventSeen = true;
       updateSession(session?.user.id ?? null, event === "SIGNED_IN" || event === "SIGNED_OUT");
@@ -230,17 +230,17 @@ export default function OperatorPortal() {
     try {
       const result =
         mode === "signup"
-          ? await supabase.auth.signUp({
+          ? await sessionAuth.signUp({
               email: email.trim().toLowerCase(),
               password: submittedPassword,
               options: {
                 emailRedirectTo: `${window.location.origin}/operator`,
               },
-            })
-          : await supabase.auth.signInWithPassword({
+            }, { isCurrent, expectedUserId: null })
+          : await sessionAuth.signInWithPassword({
               email: loginOrEmailToAuthEmail(email),
               password: submittedPassword,
-            });
+            }, { isCurrent, expectedUserId: null });
       if (!isCurrent()) return;
       if (result.error) {
         setMessage(

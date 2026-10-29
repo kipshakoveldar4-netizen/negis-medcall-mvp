@@ -3,7 +3,7 @@ import { Link } from "wouter";
 import { ArrowRight, ClipboardList, ExternalLink, FileText, Home, Image, RefreshCw, Send, UserRound, Users, Video } from "lucide-react";
 import { PortalShell } from "@/components/portals/PortalShell";
 import { useAuth } from "@/contexts/AuthContext";
-import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
+import { supabase, sessionAuth, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { operatorApi } from "@/lib/operatorApi";
 import { validatePasswordRules } from "../../../../lib/auth/password-rules";
 import { isSyntheticEmail, loginOrEmailToAuthEmail } from "../../../../lib/auth/staff-logins";
@@ -26,7 +26,7 @@ export default function ContributorPortal() {
       if (id !== live.current.id) live.current = { id, epoch: live.current.epoch + 1 };
       setSession(live.current);
     };
-    const { data } = supabase.auth.onAuthStateChange((_event, next) => { observed = true; apply(next?.user.id ?? null); });
+    const { data } = sessionAuth.onAuthStateChange((_event, next) => { observed = true; apply(next?.user.id ?? null); });
     void Promise.resolve().then(() => supabase.auth.getSession()).then(({ data, error }) => { if (!observed) apply(error ? null : data.session?.user.id ?? null); }, () => { if (!observed) apply(null); });
     return () => { alive = false; live.current = { id: null, epoch: live.current.epoch + 1 }; data.subscription.unsubscribe(); };
   }, []);
@@ -86,8 +86,8 @@ function ContributorLogin({ isCurrent }: { isCurrent: () => boolean }) {
     setBusy(true); setPassword("");
     try {
       const result = mode === "signup"
-        ? await supabase.auth.signUp({ ...credentials, options: { emailRedirectTo: `${window.location.origin}/contributors` } })
-        : await supabase.auth.signInWithPassword(credentials);
+        ? await sessionAuth.signUp({ ...credentials, options: { emailRedirectTo: `${window.location.origin}/contributors` } }, { isCurrent: valid, expectedUserId: null })
+        : await sessionAuth.signInWithPassword(credentials, { isCurrent: valid, expectedUserId: null });
       if (!valid()) return;
       if (result.error) setMessage("Не удалось войти. Проверьте почту, пароль и подтверждение почты.");
       else if (!result.data.session) setMessage("Подтвердите почту по ссылке из письма.");

@@ -120,7 +120,8 @@ function fixture(demo = false, freshAfterSignOut = false) {
     onAuthStateChange(listener: unknown) { listeners.add(listener); return { data: { subscription: { unsubscribe: () => listeners.delete(listener) } } }; },
   } };
   const auth = evaluate<{ getSupabaseAccessToken(expected?: string): Promise<string> }>(authCode, {}, {
-    "@/lib/supabase": { supabase, hasSupabaseFrontendEnv: true }, "@/lib/authSignOut": signOut,
+    "@/lib/supabase": { supabase, hasSupabaseFrontendEnv: true,
+      sessionAuth: { onAuthStateChange: supabase.auth.onAuthStateChange } }, "@/lib/authSignOut": signOut,
   });
   const tokenLookup = (transport: boolean) => async (expected?: string) => {
     const value = await auth.getSupabaseAccessToken(expected);
@@ -154,7 +155,8 @@ function fixture(demo = false, freshAfterSignOut = false) {
   const { selected: captured } = evaluate<{ selected: Captured }>(pageCode, {
     ...signOut, ...delivery, ...workspace, ...api, window, actorId, workspaceId, localDraftsOnly: demo,
     form, videos, activeId: videos[0].id, readWorkspaceId: () => workspaceId,
-    hasSupabaseFrontendEnv: !demo, supabase, getSupabaseAccessToken: tokenLookup(false),
+    hasSupabaseFrontendEnv: !demo, supabase, sessionAuth: { onAuthStateChange: supabase.auth.onAuthStateChange },
+    getSupabaseAccessToken: tokenLookup(false),
     useRef: <T>(current: T) => ({ current }), useLayoutEffect(create: () => () => void) { cleanup = create(); },
     photoTextInputsRef, photoTextRevision, photoBlob, photoPreviewUrl: "blob:synthetic-jpeg",
     document: { createElement(tag: string) { assert.equal(tag, "a"); return { href: "", download: "", click() { anchors.push("download"); } }; } },

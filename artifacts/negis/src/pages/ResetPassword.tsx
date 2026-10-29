@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useLocation } from 'wouter';
-import { arrivedByRecoveryLink, supabase } from '@/lib/supabase';
+import { arrivedByRecoveryLink, supabase, sessionAuth } from '@/lib/supabase';
 import { validatePasswordRules } from '../../../../lib/auth/password-rules';
 import { z } from 'zod';
 import { useForm } from 'react-hook-form';
@@ -48,7 +48,7 @@ export default function ResetPassword() {
   useEffect(() => {
     /* Listen for the PASSWORD_RECOVERY auth event emitted by Supabase
        when the recovery hash in the URL is detected */
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((event) => {
       if (event === 'PASSWORD_RECOVERY') {
         setPageState('form');
       }

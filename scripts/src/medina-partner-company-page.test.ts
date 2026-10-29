@@ -233,6 +233,16 @@ function pageFixture(t: TestContext, config: { configured?: boolean; search?: st
     assert.ok(Object.hasOwn(target, key), `Actual page must not access signup or other SDK methods: ${String(key)}`);
     return Reflect.get(target, key);
   } });
+  // UI contract double only; no automatic storage or completion-time auth events.
+  const sessionAuth = {
+    onAuthStateChange: sdk.onAuthStateChange,
+    signInWithPassword(body: { email: string; password: string }, scope: { isCurrent(): boolean; signal?: AbortSignal }) {
+      assert.equal(typeof scope?.isCurrent, "function", "sessionAuth requires a caller scope");
+      assert.equal(scope.isCurrent(), true, "A retired caller must not dispatch fake auth");
+      assert.notEqual(scope.signal?.aborted, true, "An aborted caller must not dispatch fake auth");
+      return sdk.signInWithPassword(body);
+    },
+  };
   function childDouble(kind: "application" | "inbox") {
     return function BoundaryDouble(props: Props) {
       const ref = renderer.hooks.useRef<Mount<ChildProps | InboxChildProps> | null>(null);
@@ -251,7 +261,7 @@ function pageFixture(t: TestContext, config: { configured?: boolean; search?: st
     "@/components/portals/PortalShell": { PortalShell: (props: Props) => { shell = props; return jsx("main", { children: props.children }); } },
     "@/components/contributors/PartnerCompanyApplication": { PartnerCompanyApplication: childDouble("application") },
     "@/components/contributors/PartnerCompanyInbox": { PartnerCompanyInbox: childDouble("inbox") },
-    "@/lib/supabase": { supabase: { auth }, hasSupabaseFrontendEnv: config.configured !== false },
+    "@/lib/supabase": { supabase: { auth }, sessionAuth, hasSupabaseFrontendEnv: config.configured !== false },
     "@/lib/api": { CrmApiError },
     "@/contexts/AuthContext": { useAuth: () => context },
     "./partner-company-client": transport.client,

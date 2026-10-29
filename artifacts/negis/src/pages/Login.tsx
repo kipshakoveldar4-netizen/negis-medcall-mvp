@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { apiUrl, CrmApiError, crmErrorMessage, crmFetch } from "@/lib/api";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
-import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
 import { isSyntheticEmail, loginOrEmailToAuthEmail } from "../../../../lib/auth/staff-logins";
 import { isStaffRole, roleLabels } from "@/lib/permissions";
 import { WORKSPACE_SELECTOR_KEY } from "@/lib/demoStorage";
@@ -169,7 +169,7 @@ export default function Login() {
       }
 
       // Observe the whole attempt, including A -> B -> A between awaited reads.
-      subscription = supabase.auth.onAuthStateChange((event, session) => {
+      subscription = sessionAuth.onAuthStateChange((event, session) => {
         if (event === "INITIAL_SESSION") return;
         const nextActor = session?.user.id || "";
         if (event === "SIGNED_OUT") attempt.alive = false;
@@ -178,10 +178,12 @@ export default function Login() {
           else if (nextActor !== attempt.actorId) attempt.alive = false;
         }
       }).data.subscription;
-      const { data, error } = await supabase.auth.signInWithPassword({
+      const originalPassword = password;
+      setPassword("");
+      const { data, error } = await sessionAuth.signInWithPassword({
         email: normalizedEmail,
-        password,
-      });
+        password: originalPassword,
+      }, { isCurrent: current });
 
       if (error) {
         throw new Error(error.message);
@@ -256,7 +258,7 @@ export default function Login() {
         toast.error(
           "Аккаунт не привязан к клинике. Если вам присылали ссылку-приглашение — откройте её ещё раз. Если у вас есть код клиники — подайте заявку на странице «Есть код клиники?». Иначе попросите администратора клиники выслать приглашение.",
         );
-        await supabase.auth.signOut();
+        await sessionAuth.signOut({ isCurrent: current });
         return;
       }
 

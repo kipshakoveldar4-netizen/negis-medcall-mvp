@@ -39,6 +39,7 @@ function evaluate(source: string, bindings: Record<string, unknown> = {}, import
     require(name: string) {
       if (name in imports) return imports[name];
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "Fragment" };
+      if (name === "./OperatorRequests.css") return {}; // No DOM/style surface in this hook harness.
       if (name === "lucide-react" || name.startsWith("@/components/")) {
         return new Proxy({}, { get: (_target, property) => String(property) });
       }
@@ -263,6 +264,9 @@ function setup(search = "") {
     apiUrl: (url: string) => url, fetch: transport,
   }).selected;
   const importedFetch = (url: string, init: Init = {}) => { calls.push({ path: url, init }); return api.crmFetch(url, init); };
+  const sessionAuth = { onAuthStateChange(callback: Parameters<typeof callbacks.add>[0]) {
+    callbacks.add(callback); return { data: { subscription: { unsubscribe: () => callbacks.delete(callback) } } };
+  } };
   const module = evaluate(observeContent(adminSource), {
     __capture: (value: any) => { snapshot = value; snapshots.push(value); },
     crypto: { getRandomValues: (bytes: Uint32Array) => { bytes.fill(17); return bytes; } },
@@ -275,9 +279,7 @@ function setup(search = "") {
     react: renderer.hooks, wouter: { Link: "Link", useLocation: () => ["/admin", (url: string) => locations.push(url)] },
     sonner: { toast: new Proxy({}, { get: (_target, kind) => (message: string) => toasts.push({ kind: String(kind), message }) }) },
     "@/contexts/AuthContext": { useAuth: () => auth },
-    "@/lib/supabase": { hasSupabaseFrontendEnv: true, supabase: { auth: { onAuthStateChange(callback: any) {
-      callbacks.add(callback); return { data: { subscription: { unsubscribe: () => callbacks.delete(callback) } } };
-    } } } },
+    "@/lib/supabase": { hasSupabaseFrontendEnv: true, supabase: { auth: sessionAuth }, sessionAuth },
     "@/lib/api": { ...api, crmFetch: importedFetch, apiUrl: (url: string) => url },
     "@/lib/serverAuth": { getSupabaseAccessToken: getToken },
     "@/lib/demoStorage": { readWorkspaceId: () => auth.clinicId, workspaceScopedKey: (key: string) => `${auth.clinicId}:${key}` },

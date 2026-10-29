@@ -10,6 +10,8 @@ export class OperatorApiError extends Error { constructor(message: string, reado
 export const supabase = { auth: { getSession: async () => ({ data: { session: session() }, error: null }),
   onAuthStateChange: (fn: (...args: any[]) => void) => { listeners.add(fn); return { data: { subscription: { unsubscribe: () => listeners.delete(fn) } } }; },
   signOut: async () => { switchActor(null); return { error: null }; }, signInWithPassword: async () => ({ data: { session: session() }, error: null }) } };
+// Observer-only compatibility; this fixture does not test auth writes.
+export const sessionAuth = { onAuthStateChange: supabase.auth.onAuthStateChange };
 export function switchActor(value: string | null) { actor = value; for (const fn of listeners) fn("SIGNED_IN", session()); }
 type RecordJob = { job: CreatorJob; creator: string; history: NonNullable<CreatorJob["latestSubmission"]>[] };
 const jobs = new Map<string, RecordJob>();

@@ -57,6 +57,12 @@ const auth={async getSession(){return{data:{session:session()},error:null};},
   onAuthStateChange(listener){listeners.add(listener);return{data:{subscription:{unsubscribe(){listeners.delete(listener);}}}};},
   signInWithPassword:args=>hold('signInWithPassword',args),signUp:args=>hold('signUp',args),signOut:()=>hold('signOut'),
 };
+// Scope validation is a fake-dispatch assertion, not native persistence emulation.
+const scoped=(scope,operation,args)=>{if(typeof scope?.isCurrent!=='function'||!scope.isCurrent()||scope.signal?.aborted)
+  return forbidden('sessionAuth.'+operation+'.scope');return auth[operation](args);};
+export const sessionAuth={onAuthStateChange:auth.onAuthStateChange,
+  signInWithPassword:(args,scope)=>scoped(scope,'signInWithPassword',args),
+  signUp:(args,scope)=>scoped(scope,'signUp',args),signOut:(scope,options)=>scoped(scope,'signOut',options)};
 export const supabase=new Proxy({auth:new Proxy(auth,{get(target,key){return key in target?target[key]:(...args)=>forbidden('auth.'+String(key));}})},
   {get(target,key){return key in target?target[key]:(...args)=>forbidden(String(key));}});
 export const hasSupabaseFrontendEnv=true,arrivedByRecoveryLink=false;

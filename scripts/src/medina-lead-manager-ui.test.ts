@@ -164,6 +164,9 @@ function setup(role = "lead_manager") {
       : resource === "meta-launches" ? { launches: [] } : { sources: [] };
     return Response.json({ success: true, mode: "supabase", data });
   };
+  const sessionAuth = { onAuthStateChange(callback: Parameters<typeof callbacks.add>[0]) {
+    callbacks.add(callback); return { data: { subscription: { unsubscribe: () => callbacks.delete(callback) } } };
+  } };
   const module = evaluate(leads + "\nexports.fixture = { LeadsPageSession, LeadsPageContent, leadPatchToApi, loadTaxonomyList };", {
     window: { localStorage: { getItem: () => "admin", setItem: () => {} } },
   }, {
@@ -171,9 +174,7 @@ function setup(role = "lead_manager") {
     wouter: { Link: "Link", useLocation: () => ["/leads", () => {}] },
     sonner: { toast: new Proxy({}, { get: (_target, name) => () => toasts.push(String(name)) }) },
     "@/contexts/AuthContext": { useAuth: () => auth },
-    "@/lib/supabase": { hasSupabaseFrontendEnv: true, supabase: { auth: { onAuthStateChange(callback: any) {
-      callbacks.add(callback); return { data: { subscription: { unsubscribe: () => callbacks.delete(callback) } } };
-    } } } },
+    "@/lib/supabase": { hasSupabaseFrontendEnv: true, supabase: { auth: sessionAuth }, sessionAuth },
     "@/lib/api": { crmFetch, apiUrl: (url: string) => url, clearCrmCache: () => {} },
     "@/lib/leadPipeline": evaluate(pipeline),
     "@/lib/phone": { formatPhone: (phone: string) => phone, phoneDigits: (phone: string) => phone.replace(/\D/g, ""),
@@ -212,6 +213,7 @@ function button(driver: ReturnType<typeof hookDriver>, name: string) {
 
 function teamPayload(days = 30) {
   return { success: true, mode: "supabase", data: { analytics: {
+    timeZone: "Asia/Qyzylorda",
     generatedAt: "2026-10-15T10:00:00Z",
     period: { days, from: new Date(Date.parse("2026-10-15T10:00:00Z") - days * 86400000).toISOString(), to: "2026-10-15T10:00:00Z" },
     totalLeads: 20, unassignedLeads: 5, otherAssigneeLeads: 4, activityStatus: "available",
@@ -320,7 +322,7 @@ function teamSetup(props: { initiallyExpanded?: boolean; heading?: string } = {}
 }
 
 function browserTeamSetup(role = "owner", purpose = "mortgage_leads") {
-  const snapshot = { members: [
+  const snapshot = { timeZone: "Asia/Qyzylorda", members: [
     { id: "manager", name: "Manager fixture", role: "lead_manager", status: "active" },
     { id: "empty", name: "Empty fixture", role: "admin", status: "inactive" },
   ], contacts: [] as Array<{ responsibleUserId: string | null; status: string }>,
@@ -379,6 +381,7 @@ test("lead manager routes, home and both menus are leads-only; other route permi
     const driver = hookDriver();
     const nav = evaluate(await read(`components/layout/${file}.tsx`), {}, {
       react: driver.hooks, wouter: { Link: "Link", useLocation: () => ["/leads", () => {}] },
+      "react-dom": { flushSync: (callback: () => void) => callback() },
       "@/contexts/AuthContext": { useAuth: () => ({ userRole: "lead_manager", rolePermissions: current.ALL_PERMISSIONS,
         user: null, vertical: "clinic", workspacePurpose: "clinic_services", availableWorkspaces: [] }) },
       "@/lib/workspaceRoutes": workspaceRoutes,

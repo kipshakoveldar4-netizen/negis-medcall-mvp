@@ -137,6 +137,7 @@ export const hasSupabaseFrontendEnv=true;
 export const supabase={auth:{onAuthStateChange(fn){sdkListeners.add(fn);return{data:{subscription:{unsubscribe(){sdkListeners.delete(fn);}}}};},
  async getSession(){const captured=actor;let release;const wait=new Promise(resolve=>{release=resolve;});fixture.tokens.push({actor:captured,release});
   if(fixture.holdToken)await wait;return{data:{session:{user:{id:captured},access_token:'synthetic-'+captured}},error:null};}}};
+export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange};
 export const readCurrentWorkspaceId=()=>selectedWorkspace;
 export const isRealWorkspace=()=>true;
 export const isSignOutPending=()=>false;export const getSignOutRevision=()=>0;

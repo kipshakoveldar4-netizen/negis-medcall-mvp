@@ -78,6 +78,7 @@ function fixture(source: Source, scenario: Scenario) {
       listeners.add(listener);
       return { data: { subscription: { unsubscribe: () => listeners.delete(listener) } } };
     } } },
+    get sessionAuth() { return { onAuthStateChange: this.supabase.auth.onAuthStateChange }; },
     async getSupabaseAccessToken(expected: string) {
       assert.equal(expected, "A");
       if (++tokenReads === 1 && scenario !== "current") {

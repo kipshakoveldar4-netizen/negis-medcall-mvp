@@ -84,6 +84,21 @@ export const supabase = { auth: {
       ? appointmentCreateFixture.onAuthStateChange(listener) : { data: { subscription: { unsubscribe() {} } } },
   signOut: async () => ({ error: null }),
 } };
+// Compatibility for actual Login/OperatorPortal; no native persistence is modeled.
+function currentScope(scope: { isCurrent(): boolean; signal?: AbortSignal }) {
+  if (typeof scope?.isCurrent !== "function" || !scope.isCurrent() || scope.signal?.aborted) {
+    throw Error("Synthetic sessionAuth requires a current caller scope");
+  }
+}
+export const sessionAuth = {
+  onAuthStateChange: supabase.auth.onAuthStateChange,
+  signInWithPassword(_credentials: unknown, scope: Parameters<typeof currentScope>[0]) {
+    currentScope(scope); return supabase.auth.signInWithPassword();
+  },
+  signOut(scope: Parameters<typeof currentScope>[0]) {
+    currentScope(scope); return supabase.auth.signOut();
+  },
+};
 export const verifyCurrentPassword = async () => false;
 const auth = {
   session: { user: { id: "fixture-user" } }, isLoading: false, isDemoMode: false, isStaffMode: false, isImpersonation: false,

@@ -218,7 +218,9 @@ async function runtime(t: TestContext, delayInitialSession = false) {
       if (dependency === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: helpers.Fragment };
       if (dependency === "lucide-react") return Object.fromEntries(source.iconNames.map(icon => [icon, Symbol(icon)]));
       if (dependency === "wouter") return { Link: (props: Props) => jsx("a", props) };
-      if (dependency === "@/lib/supabase") return { supabase: { auth }, hasSupabaseFrontendEnv: true };
+      // Observer-only synthetic facade; this harness does not exercise auth writes.
+      if (dependency === "@/lib/supabase") return { supabase: { auth },
+        sessionAuth: { onAuthStateChange: auth.onAuthStateChange }, hasSupabaseFrontendEnv: true };
       if (dependency === "@/contexts/AuthContext") return { useAuth: () => ({ signOut: async () => { await auth.signOut(); } }) };
       if (dependency === "@/lib/operatorApi") return { operatorApi };
       if (dependency === "@/components/portals/PortalShell") return { PortalShell };

@@ -146,7 +146,8 @@ function fixture(options: { hold?: Phase; demo?: boolean } = {}) {
     } }; } },
   };
   const auth = evaluate<{ getSupabaseAccessToken(expected?: string): Promise<string> }>(authCode, {}, {
-    "@/lib/supabase": { supabase, hasSupabaseFrontendEnv: true },
+    "@/lib/supabase": { supabase, hasSupabaseFrontendEnv: true,
+      sessionAuth: { onAuthStateChange: supabase.auth.onAuthStateChange } },
     "@/lib/authSignOut": { getSignOutRevision, isSignOutPending },
   });
   const { selected: api } = evaluate<{ selected: Record<string, unknown> }>(apiCode, {
@@ -182,7 +183,8 @@ function fixture(options: { hold?: Phase; demo?: boolean } = {}) {
     },
   }, { "@/lib/serverAuth": auth });
   const bindings: Record<string, unknown> = {
-    ...auth, ...api, getSignOutRevision, isSignOutPending, supabase, hasSupabaseFrontendEnv: true,
+    ...auth, ...api, getSignOutRevision, isSignOutPending, supabase,
+    sessionAuth: { onAuthStateChange: supabase.auth.onAuthStateChange }, hasSupabaseFrontendEnv: true,
     actorId: actor, workspaceId: selectedWorkspace, localDraftsOnly: Boolean(options.demo),
     readWorkspaceId: () => selectedWorkspace, isRealWorkspace: (id: string) => id === workspaceId || id === otherWorkspace,
     useRef: <T>(current: T) => ({ current }), useLayoutEffect(create: () => () => void) { cleanup = create(); },

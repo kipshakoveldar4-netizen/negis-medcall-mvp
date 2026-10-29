@@ -44,6 +44,10 @@ export const fixture={requests:[],messages:[],closes:0,stage:'idle',pause:null,r
 export const supabase={auth:{onAuthStateChange(fn){sdk.add(fn);return{data:{subscription:{unsubscribe(){sdk.delete(fn);}}}};},
  async getSession(){return{data:{session:sdkSession},error:null};},async signOut(){fixture.emit(null);return{error:null};},
  async updateUser(){fixture.globalUpdates++;throw Error('Global updateUser forbidden');}}};
+// Synthetic observer/dispatch surface only; no native auth-storage guarantee.
+export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange,signOut(scope){
+ if(typeof scope?.isCurrent!=='function'||!scope.isCurrent()||scope.signal?.aborted)throw Error('Synthetic sign-out requires a current scope');
+ return supabase.auth.signOut();}};
 export function useAuth(){const value=useSyncExternalStore(fn=>{listeners.add(fn);return()=>listeners.delete(fn);},()=>current);return{...value,
  applyConfirmedProfile(confirmed,guard){if(!guard()||confirmed.id!==current.user?.id)return;current={...current,user:{...current.user,user_metadata:{...current.user.user_metadata,full_name:confirmed.user_metadata.full_name}}};for(const fn of listeners)fn();}};}
 export function verifyCurrentPassword(email,password){if(email!=='a@example.test'||password!=='SyntheticCurrent42')throw Error('Synthetic verification target mismatch');fixture.stage='verification';return verification.promise;}
@@ -65,6 +69,8 @@ globalThis.fetch=async(url,init)=>{if(String(url)!=='https://profile.example.tes
  const user=session().user;if(__ACTUAL_AUTH_FIXTURE__&&init.method==='PUT')user.user_metadata={...user.user_metadata,role:'injected-owner',workspaceId:'injected-workspace'};
  return Response.json(user);};
 export const WORKSPACE_SELECTOR_KEY='negis_workspace_selector';export const clearListReadCache=()=>{};export const isRealWorkspace=()=>true;
+export const bindWorkspaceReadScope=()=>{},clearWorkspaceReadScope=()=>{};
+export class CrmApiError extends Error{constructor(status,code,message){super(message);this.status=status;this.code=code;}}
 export const apiUrl=url=>url;export const clearCrmCache=()=>{};
 export async function getSupabaseAccessToken(expected){return sdkSession?.user.id===expected?sdkSession.access_token:'';}
 export async function crmFetch(url){if(url!=='/api/crm/auth-context')throw Error('Unexpected auth route');

@@ -54,6 +54,8 @@ export const supabase = { auth: {
     return { data: { subscription: { unsubscribe() { authListeners.delete(listener); } } } };
   },
 } };
+// Preserve synthetic observer behavior; no native auth persistence is modeled.
+export const sessionAuth = { onAuthStateChange: supabase.auth.onAuthStateChange };
 export function useAuth() {
   return { user: { id: reportIds[actor], email: `qa-reports-${actor.toLowerCase()}@example.invalid`, user_metadata: { full_name: `QA отчёты ${actor}` } },
     session: { user: { id: reportIds[actor] } }, userRole: role, clinicId: reportIds[workspace],

@@ -8,7 +8,8 @@ import { createPortalAuthEntryBrowser, portalAuthRequestAllowed, root, stopPorta
 import { ownedRecoveryBrowser } from '../src/appointment-recovery-committed-fixture.ts';
 
 test('installed Supabase SDK 2.105.4 characterization: late auth responses mutate persistence before UI result guards', async t => {
-  const require = createRequire(path.join(root, 'artifacts/negis/package.json'));
+  // Keep this negative control on the root baseline when the frontend upgrades.
+  const require = createRequire(path.join(root, 'package.json'));
   const { AuthClient } = require('@supabase/supabase-js');
   const sdkPackage = require.resolve('@supabase/supabase-js/package.json');
   assert.equal(JSON.parse(await readFile(sdkPackage, 'utf8')).version, '2.105.4');

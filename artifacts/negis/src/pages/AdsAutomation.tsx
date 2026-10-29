@@ -28,7 +28,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, CrmApiError, crmErrorMessage, crmFetch } from "@/lib/api";
 import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
-import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
 import { uploadVerifiedCreativeImage, type VerifiedCreativeAsset } from "@/lib/verified-creative-upload";
 import { parseMetaInsightsHistorySummaries, type MetaInsightsHistorySummary } from "@/lib/metaInsightsHistory";
 import { readWorkspaceId } from "@/lib/demoStorage";
@@ -1424,7 +1424,7 @@ export default function AdsAutomation() {
   const [authEpoch, setAuthEpoch] = useState(0);
   useLayoutEffect(() => {
     if (!hasSupabaseFrontendEnv) return;
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((_event, session) => {
       const nextActorId = session?.user.id || "";
       if (observedActorRef.current === nextActorId) return;
       observedActorRef.current = nextActorId;
@@ -1450,7 +1450,7 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
     const session = new AbortController();
     sessionRef.current = session;
     const subscription = hasSupabaseFrontendEnv
-      ? supabase.auth.onAuthStateChange((_event, nextSession) => {
+      ? sessionAuth.onAuthStateChange((_event, nextSession) => {
           if ((nextSession?.user.id || "") !== actorId) session.abort();
         }).data.subscription
       : null;

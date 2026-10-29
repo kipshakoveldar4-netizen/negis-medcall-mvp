@@ -297,22 +297,29 @@ async function fixture(t: TestContext, delayInitialSession = false) {
     if (name === "@/lib/operatorApi") return api;
     if (name === "@/components/operators/OperatorRequests") return { OperatorRequests };
     if (name === "@/components/operators/OperatorWorkday") return { OperatorWorkday: OperatorRequests };
+    if (name === "@/contexts/AuthContext") return { useAuth: () => ({
+      user: currentSession?.user ?? null, session: currentSession, isSigningOut: false,
+      // Provider boundary only. The dedicated auth-entry suite checks delegation.
+      async signOut() { currentSession = null; authListener?.("SIGNED_OUT", null); },
+    }) };
     if (name === "../../../../lib/crm/operator-contracts") return contracts;
     if (name === "../../../../lib/auth/password-rules") return { validatePasswordRules: () => unexpected("password validation") };
     if (name === "../../../../lib/auth/staff-logins") return {
       isSyntheticEmail: () => unexpected("email validation"),
       loginOrEmailToAuthEmail: () => unexpected("login conversion"),
     };
-    if (name === "@/lib/supabase") return {
-      hasSupabaseFrontendEnv: true,
-      supabase: { auth: {
+    if (name === "@/lib/supabase") {
+      const auth = {
         getSession: () => initial.promise,
         onAuthStateChange(callback: typeof authListener) {
           authListener = callback;
           return { data: { subscription: { unsubscribe() { authListener = undefined; } } } };
         },
-      } },
-    };
+      };
+      // Observer-only compatibility; authentication writes are outside this fixture.
+      return { hasSupabaseFrontendEnv: true, supabase: { auth },
+        sessionAuth: { onAuthStateChange: auth.onAuthStateChange } };
+    }
     return unexpected(name);
   });
   driver.mount(portal.default);

@@ -51,6 +51,7 @@ export const fixture={calls:[],held:[],lookups:[],captured:{},toasts:[],warnings
 export function useAuth(){return useSyncExternalStore(fn=>{listeners.add(fn);return()=>listeners.delete(fn);},()=>current);}
 export const hasSupabaseFrontendEnv=true;
 export const supabase={auth:{onAuthStateChange(fn){sdk.add(fn);return{data:{subscription:{unsubscribe(){sdk.delete(fn);}}}};},getSession(){const lookup={};fixture.lookups.push(lookup);if(fixture.holdToken)return new Promise(resolve=>lookup.resolve=resolve);return Promise.resolve({data:{session:{user:{id:actor},access_token:token}},error:null});}}};
+export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange};
 export function PageLayout({children}){return <main>{children}</main>;}
 export function PlatformRecommendations(){fixture.platformMounts++;if(current.isDemoMode)throw Error('Remote recommendations forbidden in demo');return null;}
 export function DemoPlaceholder(){throw Error('Demo placeholder forbidden');}

@@ -40,7 +40,7 @@ function effect(hook: string, contains: string, localDraftsOnly = false) {
 }
 
 const restore = effect("useEffect", "readVideos", true);
-const lifetime = effect("useLayoutEffect", "supabase.auth.onAuthStateChange");
+const lifetime = effect("useLayoutEffect", "sessionAuth.onAuthStateChange");
 const local = (name: string) => select(scope, ast, name);
 const top = (name: string) => select(ast.statements, ast, name);
 
@@ -128,6 +128,10 @@ function fixture({ actor = "", freshAfterSignOut = false } = {}) {
   const cleanups: Array<() => void> = [];
   const state: { videos: Draft[]; activeId: string } = { videos: [], activeId: "" };
   const writes: string[] = [], copies: string[] = [], toasts: string[] = [], notices: string[] = [];
+  const sessionAuth = { onAuthStateChange(listener: Parameters<typeof listeners.add>[0]) {
+    listeners.add(listener);
+    return { data: { subscription: { unsubscribe: () => listeners.delete(listener) } } };
+  } };
   const { selected } = evaluate<{ selected: {
     ContentStudio(): { props: { actorId: string; workspaceId: string; localDraftsOnly: boolean } };
     ContentStudioSession(props: object): Captured;
@@ -143,10 +147,8 @@ function fixture({ actor = "", freshAfterSignOut = false } = {}) {
       return [current, (next: T | ((old: T) => T)) => { current = typeof next === "function" ? (next as (old: T) => T)(current) : next; }];
     },
     useLayoutEffect(create: () => (() => void) | undefined) { const cleanup = create(); if (cleanup) cleanups.push(cleanup); },
-    supabase: { auth: { onAuthStateChange(listener: Parameters<typeof listeners.add>[0]) {
-      listeners.add(listener);
-      return { data: { subscription: { unsubscribe: () => listeners.delete(listener) } } };
-    } } },
+    supabase: { auth: sessionAuth },
+    sessionAuth,
     getSupabaseAccessToken() { assert.fail("Local draft restore/copy must not read a token"); },
     // These optional metadata paths are deliberately absent from the plain-text fixture.
     normalizeAdvertisingContentApproval(value: unknown) { assert.equal(value, undefined); return null; },

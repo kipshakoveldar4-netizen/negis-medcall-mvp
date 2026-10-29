@@ -20,7 +20,7 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, CrmApiError, crmFetch } from "@/lib/api";
-import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
+import { supabase, sessionAuth, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
 import { uploadVerifiedCreativeImage, type VerifiedCreativeAsset } from "@/lib/verified-creative-upload";
@@ -867,7 +867,7 @@ export default function ContentStudio() {
   const [authEpoch, setAuthEpoch] = useState(0);
   useLayoutEffect(() => {
     if (!hasSupabaseFrontendEnv) return;
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((_event, session) => {
       const nextActor = session?.user.id || "";
       if (observedActorRef.current === nextActor) return;
       observedActorRef.current = nextActor;
@@ -886,7 +886,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     const session = new AbortController();
     sessionRef.current = session;
     const subscription = hasSupabaseFrontendEnv
-      ? supabase.auth.onAuthStateChange((_event, next) => {
+      ? sessionAuth.onAuthStateChange((_event, next) => {
           if ((next?.user.id || "") !== actorId) session.abort();
         }).data.subscription
       : null;

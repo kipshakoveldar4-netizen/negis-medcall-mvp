@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import { KeyRound, User, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
-import { supabase, verifyCurrentPassword } from '@/lib/supabase';
+import { supabase, sessionAuth, verifyCurrentPassword } from '@/lib/supabase';
 import { profileSessionIdentity, updateProfileForSession } from '@/lib/profileSession';
 import { PASSWORD_RULE_HINT, validatePasswordRules } from '../../../../../lib/auth/password-rules';
 import { PushSettings } from './PushSettings';
@@ -116,7 +116,7 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
   }, []);
   useLayoutEffect(() => {
     let active = true;
-    const subscription = supabase.auth.onAuthStateChange((event, next) => {
+    const subscription = sessionAuth.onAuthStateChange((event, next) => {
       if (!active || !lifetime.current.mounted) return;
       const identity = profileSessionIdentity(next);
       const replacedWithoutIdentity = event === 'SIGNED_IN' && identity === next?.user.id
@@ -306,7 +306,7 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
       // The main subscription has unmounted, but an SDK A/B/A can still run
       // before the queued focus return. Observe only that short focus handoff.
       const identity = lifetime.current.sdkIdentity, token = lifetime.current.sdkToken;
-      const subscription = supabase.auth.onAuthStateChange((event, next) => {
+      const subscription = sessionAuth.onAuthStateChange((event, next) => {
         const nextIdentity = profileSessionIdentity(next);
         if (nextIdentity !== identity || (event === 'SIGNED_IN' && nextIdentity === next?.user.id
           && next?.access_token !== token)) focusScope.current.valid = false;

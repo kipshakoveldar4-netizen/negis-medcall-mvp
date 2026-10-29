@@ -391,7 +391,7 @@ async function fixture(t: TestContext, options: {
       isSignOutPending: () => auth.isSigningOut || signOut.isSignOutPending(), getSignOutRevision: signOut.getSignOutRevision,
     };
     assert.equal(name, "@/lib/supabase");
-    return { hasSupabaseFrontendEnv: true, supabase };
+    return { hasSupabaseFrontendEnv: true, supabase, sessionAuth: { onAuthStateChange: supabase.auth.onAuthStateChange } };
   });
   const api = evaluate(code.api, "api.simulation.cjs", (name) => {
     assert.equal(name, "@/lib/serverAuth");
@@ -411,7 +411,8 @@ async function fixture(t: TestContext, options: {
     if (name === "@/lib/serverAuth") return serverAuth;
     if (name === "@/lib/authSignOut") return signOut;
     if (name === "@/lib/metaInsightsHistory") return insightsPayload;
-    if (name === "@/lib/supabase") return { hasSupabaseFrontendEnv: true, supabase };
+    if (name === "@/lib/supabase") return { hasSupabaseFrontendEnv: true, supabase,
+      sessionAuth: { onAuthStateChange: supabase.auth.onAuthStateChange } };
     if (name === "wouter") return { Link: Symbol("Link"), useLocation: () => ["/advertising", (next: string) => navigations.push(next)] };
     if (name === "sonner") return { toast: Object.fromEntries(["success", "error", "warning", "info"].map((key) => [key, (...args: unknown[]) => notifications.push(args)])) };
     if (name === "@/lib/demoStorage") return {

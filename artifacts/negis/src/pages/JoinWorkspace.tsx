@@ -2,7 +2,7 @@ import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { Loader2, ShieldCheck } from "lucide-react";
 import { crmFetch, crmJson, crmErrorMessage, CrmApiError } from "@/lib/api";
-import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
+import { supabase, hasSupabaseFrontendEnv, sessionAuth } from "@/lib/supabase";
 import { toast } from "sonner";
 import { isSyntheticEmail } from "../../../../lib/auth/staff-logins";
 import { WORKSPACE_SELECTOR_KEY } from "@/lib/demoStorage";
@@ -183,7 +183,7 @@ function JoinWorkspaceSession({ token, blocked, contextActor }: { token: string;
       }
     };
     const listener = token && hasSupabaseFrontendEnv && !blocked
-      ? supabase.auth.onAuthStateChange((event, session) => {
+      ? sessionAuth.onAuthStateChange((event, session) => {
         if (isSignOutPending() || live.signOutRevision !== getSignOutRevision()) {
           retire(live); if (active) reset(); return;
         }
@@ -206,9 +206,10 @@ function JoinWorkspaceSession({ token, blocked, contextActor }: { token: string;
 
   function switchAccount() {
     if (!stashToken()) return;
+    const original = sessionAuth.capture();
     retire(scope);
     setPhase("checking");
-    void supabase.auth.signOut().then(({ error }) => {
+    void sessionAuth.signOut({ expected: original, isCurrent: () => mounted.current && lifetime.current === scope }).then(({ error }) => {
       if (!mounted.current || lifetime.current !== scope) return;
       if (error && scope.active === false) setLookupRevision(value => value + 1);
     }).catch(() => {

@@ -24,7 +24,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
 import { workspaceAllowsRoute } from "@/lib/workspaceRoutes";
 import { capitalize, termsFor } from "../../../../../lib/vertical/terms";
 import { ProfileDialog } from "./ProfileDialog";
@@ -108,7 +108,7 @@ export function MobileNav() {
   useLayoutEffect(() => {
     if (!hasSupabaseFrontendEnv) return;
     let active = true;
-    const subscription = supabase.auth.onAuthStateChange((_event, session) => {
+    const subscription = sessionAuth.onAuthStateChange((_event, session) => {
       if (!active) return;
       const next = session?.user.id || "";
       if (lifetime.current.sdkActor === next) return;

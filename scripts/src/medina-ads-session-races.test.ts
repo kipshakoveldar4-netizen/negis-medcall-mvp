@@ -320,7 +320,8 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
   }>(code.signOut, "authSignOut.simulation.cjs", unexpected);
   const serverAuth = evaluate<{ getSupabaseAccessToken(expected?: string): Promise<string> }>(code.auth, "auth.simulation.cjs", (name) => {
     if (name === "@/lib/authSignOut") return signOut;
-    assert.equal(name, "@/lib/supabase"); return { hasSupabaseFrontendEnv: true, supabase };
+    assert.equal(name, "@/lib/supabase"); return { hasSupabaseFrontendEnv: true, supabase,
+      sessionAuth: { onAuthStateChange: supabase.auth.onAuthStateChange } };
   });
   const api = evaluate<{ crmFetch(path: string, init?: RequestInit): Promise<Response> }>(code.api, "api.simulation.cjs", (name) => {
     assert.equal(name, "@/lib/serverAuth");
@@ -354,7 +355,8 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
     if (name === "@/lib/authSignOut") return signOut;
     if (name === "@/lib/metaInsightsHistory") return insightsPayload;
     if (name === "@/lib/verified-creative-upload") return verifiedUpload;
-    if (name === "@/lib/supabase") return { hasSupabaseFrontendEnv: true, supabase };
+    if (name === "@/lib/supabase") return { hasSupabaseFrontendEnv: true, supabase,
+      sessionAuth: { onAuthStateChange: supabase.auth.onAuthStateChange } };
     if (name === "wouter") return { Link: Symbol("Link"), useLocation: () => [location, (next: string) => { location = next; inner?.force(); }] };
     if (name === "sonner") return { toast: Object.fromEntries(["success", "error", "warning", "info", "message"].map((key) => [key, (...args: unknown[]) => notifications.push(args)])) };
     if (name === "@/lib/demoStorage") return { readWorkspaceId: () => auth.clinicId, workspaceScopedKey: (key: string) => `${key}::${auth.clinicId}` };

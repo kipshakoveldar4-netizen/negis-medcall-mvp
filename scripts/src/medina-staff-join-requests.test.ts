@@ -259,8 +259,10 @@ test("J11 вход не разлогинивает заявителя, и адм
   const login = stripComments(await readFile(
     path.join(repoRoot, "artifacts", "negis", "src", "pages", "Login.tsx"), "utf8",
   ));
-  const checkAt = login.indexOf('crmFetch("/api/crm/join-request")');
-  const signOutAt = login.indexOf("await supabase.auth.signOut()");
+  assert.match(login, /const\s+requestOptions\s*=\s*\{[^}]*expectedUserId:\s*actorId[^}]*dispatchGuard:\s*current[^}]*cache:\s*"no-store"/,
+    "join-request uses the original actor and current-attempt guard without caching");
+  const checkAt = login.indexOf('crmFetch("/api/crm/join-request", requestOptions)');
+  const signOutAt = login.search(/await\s+sessionAuth\.signOut\(\{\s*isCurrent:\s*current\s*\}\)/);
   assert.ok(checkAt > 0, "вход спрашивает про заявку");
   assert.ok(signOutAt > checkAt, "и делает это ДО разлогина — иначе статус заявки не посмотреть");
 

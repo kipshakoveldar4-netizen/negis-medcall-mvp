@@ -114,12 +114,14 @@ const response = (data: unknown = snapshot()) => new Response(JSON.stringify({ s
 function moduleFixture(d = driver(), fetcher: (path: string, init: any) => Promise<Response> = async () => response()) {
   const listeners = new Set<(event: string, session: any) => void>();
   const auth = { user: { id: scope.actorId }, userRole: scope.role, clinicId: scope.workspaceId, workspacePurpose: scope.purpose, isLoading: false, isSigningOut: false, isDemoMode: false, isImpersonation: false };
+  const sessionAuth = { onAuthStateChange(callback: Parameters<typeof listeners.add>[0]) {
+    listeners.add(callback); return { data: { subscription: { unsubscribe: () => listeners.delete(callback) } } };
+  } };
   const module = evaluate(source + "\nexports.fixture = { MortgageSession, snapshotFrom };", {
     react: d.hooks, "@/contexts/AuthContext": { useAuth: () => auth }, "@/lib/api": { crmFetch: fetcher },
     "@/lib/demoStorage": { readWorkspaceId: () => "selected-workspace" },
-    "@/lib/supabase": { hasSupabaseFrontendEnv: true, supabase: { auth: { onAuthStateChange(callback: any) {
-      listeners.add(callback); return { data: { subscription: { unsubscribe: () => listeners.delete(callback) } } };
-    } } } }, "@/lib/clinicDay": clinicDay, "@/lib/dayGrid": dayGrid, "@/lib/clinicDateTime": clinicDateTime,
+    "@/lib/supabase": { hasSupabaseFrontendEnv: true, supabase: { auth: sessionAuth }, sessionAuth },
+    "@/lib/clinicDay": clinicDay, "@/lib/dayGrid": dayGrid, "@/lib/clinicDateTime": clinicDateTime,
   });
   return { module, d, auth, listeners };
 }

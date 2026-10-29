@@ -38,7 +38,7 @@ import {
   buildUpcomingAppointmentsQueue,
   type DashboardRecord,
 } from "@/lib/dashboardData";
-import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
 import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
 import { workspaceAllowsRoute } from "@/lib/workspaceRoutes";
 import { isRealWorkspace } from "@/lib/demoStorage";
@@ -350,7 +350,7 @@ export default function AiControlCenter() {
   const [authEpoch, setAuthEpoch] = useState(0);
   useLayoutEffect(() => {
     if (!hasSupabaseFrontendEnv || localDemo) return;
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((_event, session) => {
       authObserved.current = true;
       const next = session?.user.id || "";
       if (observedActor.current === next) return;
@@ -380,7 +380,7 @@ function AiControlLifetime({ actorId, workspaceId, localDemo, scopeKey, live }: 
       controller.abort();
       setAccess(null);
     };
-    const subscription = hasSupabaseFrontendEnv && !localDemo ? supabase.auth.onAuthStateChange((_event, session) => {
+    const subscription = hasSupabaseFrontendEnv && !localDemo ? sessionAuth.onAuthStateChange((_event, session) => {
       if ((session?.user.id || "") !== actorId) retire();
     }).data.subscription : null;
     setAccess({ workspaceId, localDemo, isCurrent, request: async (path, init) => {

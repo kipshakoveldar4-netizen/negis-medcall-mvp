@@ -254,9 +254,19 @@ function setup(options: Options = {}) {
     getSession: async () => ({ data: { session: localSession(sdkActor) } }),
     async signOut() { if (signOutGate) await signOutGate.promise; emit(null); return { error: null }; },
   };
+  // Synthetic dispatch contract only, not a model of native SDK storage fencing.
+  const sessionAuth = {
+    onAuthStateChange: sdk.onAuthStateChange,
+    signOut(scope: { isCurrent(): boolean; signal?: AbortSignal }) {
+      assert.equal(typeof scope?.isCurrent, "function", "sessionAuth requires a caller scope");
+      assert.equal(scope.isCurrent(), true, "Retired sign-out must not dispatch");
+      assert.notEqual(scope.signal?.aborted, true, "Aborted sign-out must not dispatch");
+      return sdk.signOut();
+    },
+  };
   const auth = evaluate(source, {
     react: { ...renderer.hooks, default: renderer.hooks },
-    "@/lib/supabase": { supabase: { auth: sdk } },
+    "@/lib/supabase": { supabase: { auth: sdk }, sessionAuth },
     "@/lib/authSignOut": signOutBoundary,
     "../../../../lib/vertical/terms": terms,
     "../../../../lib/crm/workspace-purpose": purposes,

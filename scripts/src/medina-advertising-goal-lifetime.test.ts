@@ -35,14 +35,14 @@ const initial={user:{id:'A'},clinicId:'${W1}',userRole:'owner',workspacePurpose:
 let context={...initial},actor='A',selector='${W1}',token='synthetic-A';
 const listeners=new Set(),sdkListeners=new Set(),local=new Map(),session=new Map();
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return{promise,resolve};};
-export const f={calls:[],tokens:[],writes:[],navigations:[],history:[],retained:[],holdTokens:false,prevented:0,
+export const f={calls:[],httpAttempts:[],tokens:[],writes:[],navigations:[],history:[],retained:[],holdTokens:false,prevented:0,
  patch(value){flushSync(()=>{context={...context,...value};if('clinicId' in value)selector=value.clinicId||'demo-workspace';for(const fn of listeners)fn();});},
  raw(value,event='SIGNED_IN'){actor=value;token='synthetic-'+value;for(const fn of [...sdkListeners])fn(event,value?{user:{id:value},access_token:token}:null);},
  changeActor(value){flushSync(()=>{this.raw(value);context={...context,user:{id:value}};for(const fn of listeners)fn();});},
  rotate(){flushSync(()=>{token+='-rotated';for(const fn of [...sdkListeners])fn('TOKEN_REFRESHED',{user:{id:actor},access_token:token});});},
  reset(mode='owner'){clearSignOutPending();context={...initial,userRole:mode==='demo'?'owner':mode,isDemoMode:mode==='demo',clinicId:mode==='demo'?null:'${W1}'};
   actor='A';token='synthetic-A';selector=mode==='demo'?'demo-workspace':'${W1}';local.clear();session.clear();
-  this.calls=[];this.tokens=[];this.writes=[];this.navigations=[];this.history=[];this.retained=[];this.holdTokens=false;this.prevented=0;},
+  this.calls=[];this.httpAttempts=[];this.tokens=[];this.writes=[];this.navigations=[];this.history=[];this.retained=[];this.holdTokens=false;this.prevented=0;},
  tombstone(){markSignOutPending();if(!clearSignOutPending())throw Error('Synthetic signout cleanup failed');},
  transition(kind){
   if(kind==='unmount'){this.unmount();this.mount();}
@@ -65,6 +65,7 @@ export const f={calls:[],tokens:[],writes:[],navigations:[],history:[],retained:
  capture(){const c=this.controls();this.retained=[()=>c.prepare(),()=>c.submit({preventDefault:()=>this.prevented++}),
   ()=>c.update({target:{value:'${OLD}'}}),()=>c.refresh()];if(c.retry)this.retained.push(()=>c.retry());},
  invoke(){flushSync(()=>{for(const fn of this.retained)fn();});},
+ invokePrivate(){flushSync(()=>{for(const fn of this.retained.slice(0,3))fn();});},
  beforeCommit(){this.raw('B');this.raw('A');for(const fn of this.retained)fn();flushSync(()=>{});},
  fill(service='${OLD}'){const fields=[...document.querySelectorAll('form input')],values=[service,'23','14','280'];
   flushSync(()=>fields.forEach((node,i)=>this.props(node).onChange({target:{value:values[i]}})));},
@@ -89,7 +90,7 @@ export const f={calls:[],tokens:[],writes:[],navigations:[],history:[],retained:
  allowAuth(){for(const c of this.calls.filter(c=>!c.answered&&c.kind==='auth-context'))this.reply(c);},
  releaseTokens(){this.holdTokens=false;for(const c of this.tokens)c.gate.resolve();},
  snapshot(){return{html:document.getElementById('root').innerHTML,text:document.getElementById('root').textContent,
-  goals:[...document.querySelectorAll('form input')].map(n=>n.value),writes:this.writes,navigations:this.navigations,
+  goals:[...document.querySelectorAll('form input')].map(n=>n.value),writes:this.writes,navigations:this.navigations,httpAttempts:this.httpAttempts,
   calls:this.calls.map(({id,kind,actor,workspace,role,authorization,answered,decoding,decoded,init})=>
    ({id,kind,actor,workspace,role,authorization,answered,decoding:!!decoding,decoded:!!decoded,aborted:init.signal.aborted})),
   tokens:this.tokens.length,listeners:sdkListeners.size,history:this.history,prevented:this.prevented};},
@@ -100,6 +101,7 @@ function storage(map){return{getItem:key=>map.get(key)??null,setItem(key,value){
 Object.defineProperty(window,'localStorage',{value:storage(local)});
 Object.defineProperty(window,'sessionStorage',{value:storage(session)});
 globalThis.fetch=(input,init={})=>new Promise(resolve=>{const url=new URL(input,location.origin);
+ f.httpAttempts.push({path:url.pathname,method:init.method||'GET',hasBody:init.body!==undefined});
  if(url.origin!==location.origin||!/^\\/api\\/crm\\/(meta-launches|auth-context|meta-insights-history|advertising-outcomes)$/.test(url.pathname)
   ||(init.method||'GET')!=='GET'||init.body!==undefined||init.cache!=='no-store'||!init.signal||init.signal.aborted)throw Error('Forbidden synthetic HTTP');
  f.calls.push({id:f.calls.length,kind:url.pathname.split('/').pop(),actor,workspace:url.searchParams.get('workspaceId'),role:context.userRole,
@@ -112,6 +114,7 @@ export const supabase={auth:{async getSession(){const gate=deferred(),captured=a
  const call={gate,captured};f.tokens.push(call);if(f.holdTokens)await gate.promise;
  return{error:null,data:{session:captured}};},
  onAuthStateChange(fn){sdkListeners.add(fn);return{data:{subscription:{unsubscribe(){sdkListeners.delete(fn);}}}};}}};
+export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange};
 export const isRealWorkspace=id=>/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 export const readWorkspaceId=()=>selector;
 export const workspaceScopedKey=key=>key+'::'+selector;
@@ -141,6 +144,7 @@ type Snapshot = {
   navigations: Array<{ destination: string; actor: string; workspace: string | null }>;
   calls: Array<{ id: number; kind: string; actor: string; workspace: string; role: string; authorization: string;
     answered: boolean; decoding: boolean; decoded: boolean; aborted: boolean }>;
+  httpAttempts: Array<{ path: string; method: string; hasBody: boolean }>;
   history: Array<{ text: string; goals: string[] }>;
 };
 
@@ -306,11 +310,28 @@ test("owned React campaign-goal and refresh lifetime controls", { timeout: 180_0
     assert.equal(after.writes.length, 0); assert.equal(after.navigations.length, 0);
   });
 
-  await t.test("denied manager cannot prepare, submit or refresh with current rendered callbacks", async () => {
+  await t.test("manager refresh reads only meta-launches GET without private reports, campaign actions or mutations", async () => {
     await reset("manager"); await evaluate("f.fill();f.capture();"); const before = await state();
-    await evaluate("f.invoke();"); await drain(); const after = await state();
-    assertNoEffects(before, after); assert.equal(after.prevented, before.prevented + 1);
-    assert.ok(after.calls.every(c => c.kind === "meta-launches"), "Existing manager history read is not expanded to private reports");
+    await evaluate("f.invokePrivate();"); await drain();
+    const denied = await state();
+    assertNoEffects(before, denied); assert.equal(denied.prevented, before.prevented + 1);
+    assert.deepEqual(denied.httpAttempts, before.httpAttempts, "Private actions cannot even attempt HTTP");
+
+    await evaluate("f.click('refresh');"); await settle(); const after = await state();
+    assert.equal(after.calls.length, denied.calls.length + 1, "One current Refresh issues one history GET");
+    assert.deepEqual(after.httpAttempts.slice(denied.httpAttempts.length), [{ path: "/api/crm/meta-launches", method: "GET", hasBody: false }]);
+    assert.ok(after.calls.every(c => c.kind === "meta-launches" && c.actor === "A" && c.workspace === W1
+      && c.role === "manager" && c.authorization === "Bearer synthetic-A"), "No private CRM, Insights or auth-context reads");
+    assert.ok(after.httpAttempts.every(c => c.path === "/api/crm/meta-launches" && c.method === "GET" && !c.hasBody), "No mutation attempts, including caught refusals");
+    assert.deepEqual(after.writes, before.writes); assert.deepEqual(after.navigations, before.navigations);
+    assert.deepEqual(after.goals, before.goals);
+
+    await evaluate("f.invokePrivate();"); await drain();
+    const stillDenied = await state(); assertNoEffects(after, stillDenied);
+    assert.deepEqual(stillDenied.httpAttempts, after.httpAttempts, "Read refresh never grants campaign capabilities");
+    await evaluate("f.capture();f.tombstone();"); const retired = await state();
+    await evaluate("f.invoke();"); await drain(); const blocked = await state();
+    assertNoEffects(retired, blocked); assert.deepEqual(blocked.httpAttempts, retired.httpAttempts);
   });
 
   for (const control of ["refresh", "retry"]) {

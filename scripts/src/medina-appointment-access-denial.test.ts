@@ -287,6 +287,10 @@ function fixture(options: { queueToken?: boolean; storedAttempt?: Record<string,
     assert.equal(value.kind, kind, "extracted hook order must remain stable");
     return { index, value };
   };
+  const sessionAuth = { onAuthStateChange(listener: Parameters<typeof listeners.add>[0]) {
+    listeners.add(listener);
+    return { data: { subscription: { unsubscribe: () => listeners.delete(listener) } } };
+  } };
   new Script(options.actualLeadHandoff ? compiledLead : compiled, { filename: "AppointmentsPage.extracted-actions.cjs" }).runInNewContext({
     exports, Error, DOMException, Response, fetch: forbidden, require: forbidden,
     ...services, ...dates, ...capacity, ...vertical, ...clients, ...attempts,
@@ -294,10 +298,8 @@ function fixture(options: { queueToken?: boolean; storedAttempt?: Record<string,
     todayKeyAtLoad: "2026-10-19", clinicTimeZone: "UTC", clinicTimeZoneReady: true,
     seedItems: clone([own, unrelated]), useAuth: () => context, hasSupabaseFrontendEnv: true,
     isRealWorkspace: () => true,
-    supabase: { auth: { onAuthStateChange(listener: (event: string, session: any) => void) {
-      listeners.add(listener);
-      return { data: { subscription: { unsubscribe: () => listeners.delete(listener) } } };
-    } } },
+    supabase: { auth: sessionAuth },
+    sessionAuth,
     activeCatalog: [], activeDoctors: [], directory: { items: [] },
     readCurrentWorkspaceId: () => selectedWorkspace,
     addItem: forbidden, markLeadBooked: (leadId: string) => { handoffs.push(leadId); },

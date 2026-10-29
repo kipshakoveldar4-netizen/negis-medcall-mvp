@@ -14,6 +14,8 @@ export const hasSupabaseFrontendEnv=true;
 export const supabase={auth:{getSession:async()=>({data:{session:session()},error:null}),
   onAuthStateChange:(fn:(...args:any[])=>void)=>{listeners.add(fn);return{data:{subscription:{unsubscribe:()=>listeners.delete(fn)}}};},
   signOut:async()=>{switchActor(null);return{error:null};},signInWithPassword:async()=>({data:{session:session()},error:null})}};
+// Observer-only compatibility; this fixture does not test auth writes.
+export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange};
 export function switchActor(next:string|null){if(next!==actor){actor=next;epoch++;}for(const l of listeners)l("SIGNED_IN",session());}
 export function captureControlAccess(){const origin=actor,version=epoch;return{actorId:origin??"",isCurrent:()=>origin===ids.owner&&actor===origin&&version===epoch};}
 export function subscribeControlActor(fn:(s:any)=>void){const listener=(_e:any,s:any)=>fn(s);listeners.add(listener);return()=>listeners.delete(listener);}

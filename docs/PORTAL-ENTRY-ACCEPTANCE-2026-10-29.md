@@ -2,6 +2,11 @@
 
 Date: 2026-10-29. Parent candidate: `79ad38e`.
 
+Historical UI-lifetime cycle, committed as `0f7b410`. The subsequent native SDK
+commit-boundary candidate and its separate acceptance limits are recorded in
+[AUTH-SESSION-AUTHORITY-ACCEPTANCE-2026-10-29.md](AUTH-SESSION-AUTHORITY-ACCEPTANCE-2026-10-29.md).
+Counts below describe this earlier frozen source, not the subsequent candidate.
+
 This is a local candidate, not a Preview or Production release. No cloud,
 database, account, password, policy, provider, advertising, payment, Baspana,
 salon or WhatsApp setting was changed. Protected 059/065 and the CRM/Meta

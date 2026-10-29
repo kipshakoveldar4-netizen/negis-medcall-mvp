@@ -5,7 +5,7 @@ import { crmErrorMessage, crmFetch } from "@/lib/api";
 import { readWorkspaceId } from "@/lib/demoStorage";
 import { useAuth } from "@/contexts/AuthContext";
 import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
-import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
 
 // Задачи по одной записи.
 //
@@ -244,7 +244,7 @@ export function TaskPanel({
     setFailureText("");
     setState("loading");
     // Retire this lifetime permanently on SDK A/B/A, even if context updates batch.
-    const subscription = hasSupabaseFrontendEnv ? supabase.auth.onAuthStateChange((_event, session) => {
+    const subscription = hasSupabaseFrontendEnv ? sessionAuth.onAuthStateChange((_event, session) => {
       if ((session?.user.id || "") !== actorId) retire(401);
     }).data.subscription : null;
     return () => {

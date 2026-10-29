@@ -67,6 +67,7 @@ export function useAuth(){return useSyncExternalStore(fn=>{listeners.add(fn);ret
 export const readWorkspaceId=()=>context.clinicId;
 export const hasSupabaseFrontendEnv=true;
 export const supabase={auth:{onAuthStateChange(fn){sdkListeners.add(fn);return{data:{subscription:{unsubscribe(){sdkListeners.delete(fn);}}}};}}};
+export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange};
 export function PageLayout({children}){return <main>{children}</main>;}
 export async function crmFetch(input,init={}){
   const url=new URL(input,location.origin);

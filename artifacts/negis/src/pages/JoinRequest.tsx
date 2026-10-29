@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { toast } from "sonner";
-import { supabase } from "@/lib/supabase";
+import { sessionAuth, supabase } from "@/lib/supabase";
 import { crmFetch } from "@/lib/api";
 import { formatJoinCode, isJoinCodeShape, normalizeJoinCode } from "../../../../lib/crm/join-codes";
 import { validatePasswordRules } from "../../../../lib/auth/password-rules";
@@ -29,6 +29,8 @@ type JoinRequestRow = {
   clinicName: string;
   role?: string;
 };
+
+type JoinLifetime = { actor: string | null; ready: boolean; controller: AbortController };
 
 /** Английский код сервера в русский интерфейс не выводится ни в одной ветке. */
 const REQUEST_ERROR_TEXTS: Record<string, string> = {
@@ -85,36 +87,89 @@ export default function JoinRequest() {
   const [positionNote, setPositionNote] = useState("");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
+  const [sessionError, setSessionError] = useState(false);
+  const mounted = useRef(false);
+  const lifetime = useRef<JoinLifetime | null>(null);
+  const authAttempt = useRef<object | null>(null);
+  const mutation = useRef<object | null>(null);
+  const readRevision = useRef(0);
+  const formRevision = useRef(0);
   // null — «прочитать не удалось», и это не то же самое, что «заявок нет».
   const [requests, setRequests] = useState<JoinRequestRow[] | null>(null);
 
-  async function loadRequests() {
+  const view = lifetime.current;
+  const form = formRevision.current;
+  const owns = (scope: JoinLifetime | null): scope is JoinLifetime => Boolean(
+    mounted.current && scope?.ready && lifetime.current === scope && !scope.controller.signal.aborted,
+  );
+  const editable = () => owns(view) && formRevision.current === form && !authAttempt.current && !mutation.current;
+
+  async function loadRequests(scope: JoinLifetime | null) {
+    if (!owns(scope) || !scope.actor) return;
+    const ticket = ++readRevision.current;
+    const current = () => owns(scope) && ticket === readRevision.current;
     try {
-      const response = await crmFetch("/api/crm/join-request");
+      const response = await crmFetch("/api/crm/join-request", {
+        expectedUserId: scope.actor, dispatchGuard: current, signal: scope.controller.signal,
+      });
       // crmFetch не бросает на 4xx/5xx: без этой проверки протухший токен
       // рисовал бы пустую форму вместо честного «прочитать не удалось», и
       // человек с висящей заявкой набирал бы код заново.
+      if (!current()) return;
       if (!response.ok) { setRequests(null); return; }
       const body = (await response.json()) as { data?: { requests?: JoinRequestRow[] } };
+      if (!current()) return;
       setRequests(Array.isArray(body.data?.requests) ? body.data!.requests! : []);
     } catch {
-      setRequests(null);
+      if (current()) setRequests(null);
     }
   }
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    mounted.current = true;
+    let active = true;
+    const initial: JoinLifetime = { actor: null, ready: false, controller: new AbortController() };
+    lifetime.current?.controller.abort();
+    lifetime.current = initial;
+    authAttempt.current = null; mutation.current = null;
+    readRevision.current++; formRevision.current++;
+    setHasSession(null); setRequests(null); setBusy(false); setSessionError(false);
+    setEmail(""); setPassword(""); setFullName(""); setPhone(""); setPositionNote(""); setCode("");
+    const apply = (actor: string | null, event: string) => {
+      if (!active) return;
+      const previous = lifetime.current;
+      if (previous?.ready && previous.actor === actor && event !== "SIGNED_IN" && event !== "SIGNED_OUT") return;
+      previous?.controller.abort();
+      const scope: JoinLifetime = { actor, ready: true, controller: new AbortController() };
+      lifetime.current = scope;
+      authAttempt.current = null; mutation.current = null;
+      readRevision.current++; formRevision.current++;
+      setRequests(null); setPassword(""); setEmail(""); setFullName("");
+      setPhone(""); setPositionNote(""); setCode(""); setBusy(false); setSessionError(false);
+      setHasSession(actor ? null : false);
+      if (actor) void loadRequests(scope).then(() => { if (owns(scope)) setHasSession(true); });
+    };
+    // Subscribe before bootstrap: an observed account change wins over a late lookup.
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((event, session) => apply(session?.user?.id ?? null, event));
     void (async () => {
-      const { data } = await supabase.auth.getSession();
-      const live = Boolean(data.session?.user?.id);
-      // Сначала читаем заявки, и только потом показываем экран: иначе каждый
-      // вход на секунду обвинял сеть, пока запрос ещё был в полёте.
-      if (live) await loadRequests();
-      setHasSession(live);
+      try {
+        const { data, error } = await supabase.auth.getSession();
+        if (!active || lifetime.current !== initial) return;
+        if (error) throw error;
+        apply(data.session?.user?.id ?? null, "INITIAL_SESSION");
+      } catch { if (active && lifetime.current === initial) setSessionError(true); }
     })();
+    return () => {
+      active = false; mounted.current = false; subscription.unsubscribe();
+      lifetime.current?.controller.abort(); lifetime.current = null;
+      authAttempt.current = null; mutation.current = null;
+      readRevision.current++; formRevision.current++;
+    };
   }, []);
 
   /** Аккаунт заводится прямо в Supabase Auth: своего /api/auth/register нет. */
   async function authenticate() {
+    if (!editable() || view?.actor) return;
     const normalizedEmail = email.trim().toLowerCase();
     if (!normalizedEmail) { toast.error("Укажите почту"); return; }
     // Служебный домен выдаёт система. Без этой отсечки посторонний
@@ -139,13 +194,18 @@ export default function JoinRequest() {
       toast.error("Введите пароль");
       return;
     }
-    setBusy(true);
+    const attempt = {};
+    authAttempt.current = attempt;
+    const current = () => owns(view) && !view.actor && authAttempt.current === attempt && formRevision.current === form;
+    const originalPassword = password;
+    setPassword(""); setBusy(true);
     try {
-      const { error } = mode === "signup"
-        ? await supabase.auth.signUp({ email: normalizedEmail, password })
-        : await supabase.auth.signInWithPassword({ email: normalizedEmail, password });
+      const scope = { isCurrent: current, expectedUserId: null, signal: view!.controller.signal };
+      const { data, error } = mode === "signup"
+        ? await sessionAuth.signUp({ email: normalizedEmail, password: originalPassword }, scope)
+        : await sessionAuth.signInWithPassword({ email: normalizedEmail, password: originalPassword }, scope);
+      if (!current()) return;
       if (error) { toast.error(authErrorText(error.message)); return; }
-      const { data } = await supabase.auth.getSession();
       if (!data.session?.user?.id) {
         // Подтверждение почты письмом — единственный случай, когда сессии нет.
         // Письма Supabase до клиник Казахстана доходят плохо, поэтому говорим
@@ -153,17 +213,16 @@ export default function JoinRequest() {
         toast.error("Аккаунт создан, но вход не выполнен. Если пришло письмо-подтверждение — откройте его и вернитесь сюда.");
         return;
       }
-      setHasSession(true);
-      setPassword("");
-      await loadRequests();
+      // The verified auth observer owns the new account and its request list.
     } catch (error) {
-      toast.error(authErrorText(error instanceof Error ? error.message : ""));
+      if (current()) toast.error(authErrorText(error instanceof Error ? error.message : ""));
     } finally {
-      setBusy(false);
+      if (current()) { authAttempt.current = null; formRevision.current++; setBusy(false); }
     }
   }
 
   async function submit() {
+    if (!editable() || !view?.actor) return;
     const normalizedCode = normalizeJoinCode(code);
     if (!fullName.trim() || !normalizedCode) {
       toast.error("Укажите имя и код клиники — без них заявку не отправить.");
@@ -178,9 +237,13 @@ export default function JoinRequest() {
         : "Код выглядит иначе: четыре буквы и восемь знаков, например MEDI-7K3N-Q82R.");
       return;
     }
+    const attempt = {};
+    mutation.current = attempt;
+    const current = () => owns(view) && mutation.current === attempt;
     setBusy(true);
     try {
       const response = await crmFetch("/api/crm/join-request", {
+        expectedUserId: view.actor, dispatchGuard: current, signal: view.controller.signal,
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -191,6 +254,7 @@ export default function JoinRequest() {
         }),
       });
       const body = (await response.json().catch(() => ({}))) as { success?: boolean; code?: string; data?: { request?: JoinRequestRow } };
+      if (!current()) return;
       if (!response.ok || body.success !== true) {
         toast.error(errorTextFor(String(body.code ?? ""), "Не удалось отправить заявку"));
         return;
@@ -198,12 +262,13 @@ export default function JoinRequest() {
       const clinic = body.data?.request?.clinicName;
       toast.success(clinic ? `Заявка отправлена в «${clinic}»` : "Заявка отправлена");
       setCode("");
-      await loadRequests();
+      await loadRequests(view);
     } catch (error) {
+      if (!current()) return;
       const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "";
       toast.error(errorTextFor(code, "Не удалось отправить заявку"));
     } finally {
-      setBusy(false);
+      if (current()) { mutation.current = null; formRevision.current++; setBusy(false); }
     }
   }
 
@@ -222,7 +287,7 @@ export default function JoinRequest() {
         </p>
 
         {hasSession === null && (
-          <p className="mt-8 text-xs tracking-[0.14em]" style={{ color: "var(--negis-muted)" }}>ЗАГРУЗКА…</p>
+          <p className="mt-8 text-xs" style={{ color: "var(--negis-muted)" }}>{sessionError ? "Не удалось проверить вход. Обновите страницу." : "ЗАГРУЗКА…"}</p>
         )}
 
         {hasSession === false && (
@@ -232,7 +297,8 @@ export default function JoinRequest() {
                 type="button"
                 className={mode === "signup" ? "neu-btn-primary flex-1 justify-center" : "neu-btn flex-1 justify-center"}
                 aria-pressed={mode === "signup"}
-                onClick={() => setMode("signup")}
+                disabled={busy}
+                onClick={() => { if (editable() && mode !== "signup") { formRevision.current++; setPassword(""); setMode("signup"); } }}
               >
                 Я здесь впервые
               </button>
@@ -240,20 +306,22 @@ export default function JoinRequest() {
                 type="button"
                 className={mode === "signin" ? "neu-btn-primary flex-1 justify-center" : "neu-btn flex-1 justify-center"}
                 aria-pressed={mode === "signin"}
-                onClick={() => setMode("signin")}
+                disabled={busy}
+                onClick={() => { if (editable() && mode !== "signin") { formRevision.current++; setPassword(""); setMode("signin"); } }}
               >
                 У меня есть вход
               </button>
             </div>
             <div className="space-y-3">
-              <input className="neu-input" type="email" autoComplete="email" placeholder="Почта" value={email} onChange={(event) => setEmail(event.target.value)} />
+              <input className="neu-input" type="email" autoComplete="email" placeholder="Почта" disabled={busy} value={email} onChange={(event) => { if (editable()) setEmail(event.target.value); }} />
               <input
                 className="neu-input"
                 type="password"
                 autoComplete={mode === "signup" ? "new-password" : "current-password"}
                 placeholder="Пароль — не короче 8 символов"
                 value={password}
-                onChange={(event) => setPassword(event.target.value)}
+                disabled={busy}
+                onChange={(event) => { if (editable()) setPassword(event.target.value); }}
               />
               <button type="button" className="neu-btn-primary w-full justify-center" disabled={busy} onClick={() => void authenticate()}>
                 {busy ? "Подождите…" : mode === "signup" ? "Создать аккаунт" : "Войти"}
@@ -279,7 +347,7 @@ export default function JoinRequest() {
                   Доступ в «{approved.clinicName}» открыт.
                 </p>
                 <p className="mt-1 text-[13px]" style={{ color: "#047857" }}>Войдите этой же почтой и паролем.</p>
-                <button type="button" className="neu-btn-primary mt-4 w-full justify-center" onClick={() => setLocation("/login")}>
+                <button type="button" className="neu-btn-primary mt-4 w-full justify-center" onClick={() => { if (owns(view)) setLocation("/login"); }}>
                   Войти
                 </button>
               </section>
@@ -293,7 +361,7 @@ export default function JoinRequest() {
                 <p className="mt-2 text-[13px]" style={{ color: "var(--negis-muted)" }}>
                   Администратор подтвердит доступ — обычно в тот же день. Когда подтвердит, просто войдите этой же почтой и паролем: ничего делать не нужно.
                 </p>
-                <button type="button" className="neu-btn mt-4 w-full justify-center" onClick={() => void loadRequests()}>
+                <button type="button" className="neu-btn mt-4 w-full justify-center" onClick={() => void loadRequests(view)}>
                   Проверить статус
                 </button>
               </section>
@@ -309,20 +377,21 @@ export default function JoinRequest() {
                       className="neu-input font-mono"
                       placeholder="MEDI-7K3N-Q82R"
                       value={code}
-                      onChange={(event) => setCode(formatJoinCode(event.target.value))}
+                      disabled={busy}
+                      onChange={(event) => { if (editable()) setCode(formatJoinCode(event.target.value)); }}
                     />
                   </div>
                   <div>
                     <label htmlFor="join-name" className="mb-1.5 block text-[11px] font-medium" style={{ color: "var(--negis-muted)" }}>ФАМИЛИЯ И ИМЯ</label>
-                    <input id="join-name" className="neu-input" placeholder="Айгуль Ботанова" value={fullName} onChange={(event) => setFullName(event.target.value)} />
+                    <input id="join-name" className="neu-input" placeholder="Айгуль Ботанова" disabled={busy} value={fullName} onChange={(event) => { if (editable()) setFullName(event.target.value); }} />
                   </div>
                   <div>
                     <label htmlFor="join-phone" className="mb-1.5 block text-[11px] font-medium" style={{ color: "var(--negis-muted)" }}>ТЕЛЕФОН (НЕОБЯЗАТЕЛЬНО)</label>
-                    <input id="join-phone" className="neu-input" placeholder="+7 700 000 00 00" value={phone} onChange={(event) => setPhone(event.target.value)} />
+                    <input id="join-phone" className="neu-input" placeholder="+7 700 000 00 00" disabled={busy} value={phone} onChange={(event) => { if (editable()) setPhone(event.target.value); }} />
                   </div>
                   <div>
                     <label htmlFor="join-position" className="mb-1.5 block text-[11px] font-medium" style={{ color: "var(--negis-muted)" }}>КЕМ ВЫ РАБОТАЕТЕ (НЕОБЯЗАТЕЛЬНО)</label>
-                    <input id="join-position" className="neu-input" placeholder="мастер маникюра" value={positionNote} onChange={(event) => setPositionNote(event.target.value)} />
+                    <input id="join-position" className="neu-input" placeholder="мастер маникюра" disabled={busy} value={positionNote} onChange={(event) => { if (editable()) setPositionNote(event.target.value); }} />
                   </div>
                 </div>
                 {/* Роль здесь не выбирают: её назначает клиника при одобрении. */}

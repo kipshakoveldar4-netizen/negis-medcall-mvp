@@ -35,7 +35,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useDemoCollection, readDemoStorage, writeDemoStorage, isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { apiUrl, crmFetch, clearCrmCache } from "@/lib/api";
-import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
 import {
   FALLBACK_LEAD_SOURCES,
   FALLBACK_LEAD_STAGES,
@@ -588,7 +588,7 @@ export default function LeadsPage() {
   const [authEpoch, setAuthEpoch] = useState(0);
   useLayoutEffect(() => {
     if (!hasSupabaseFrontendEnv) return;
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((_event, nextSession) => {
       const nextActorId = nextSession?.user.id || "";
       if (observedActorRef.current === nextActorId) return;
       observedActorRef.current = nextActorId;
@@ -629,7 +629,7 @@ function LeadsPageSession({ actorId, workspaceId }: { actorId: string; workspace
     // one controller even when StrictMode replays this lifetime's setup.
     setLifetime((current) => ({ controller, epoch: (current?.epoch ?? 0) + 1 }));
     const subscription = hasSupabaseFrontendEnv
-      ? supabase.auth.onAuthStateChange((_event, nextSession) => {
+      ? sessionAuth.onAuthStateChange((_event, nextSession) => {
           if ((nextSession?.user.id || "") !== actorId) controller.abort();
         }).data.subscription
       : null;
