@@ -1,5 +1,5 @@
 import { createClient, navigatorLock, processLock, type LockFunc } from '@supabase/supabase-js'
-import { createAuthSessionAuthority } from './authSessionAuthority'
+import { createAuthSessionAuthority, type AuthStamp } from './authSessionAuthority'
 
 const env = import.meta.env as Record<string, string | undefined>
 const configuredSupabaseUrl = env.VITE_SUPABASE_URL
@@ -7,19 +7,7 @@ const configuredSupabaseAnonKey = env.VITE_SUPABASE_ANON_KEY || env.SUPABASE_ANO
 const supabaseUrl = configuredSupabaseUrl || 'https://placeholder.supabase.co'
 const supabaseAnonKey = configuredSupabaseAnonKey || 'placeholder'
 
-/**
- * Пришли ли мы по ссылке восстановления пароля.
- *
- * Снимается ДО createClient и на уровне модуля намеренно: клиент разбирает хеш
- * адреса и стирает его через history.replaceState, поэтому к моменту, когда
- * страница смены пароля смонтируется, отличить настоящее восстановление от
- * просто живой сессии по адресу уже нельзя.
- *
- * Это не косметика. Страница /reset-password открывала форму нового пароля по
- * ЛЮБОЙ живой сессии, а под имперсонацией живая сессия принадлежит владельцу
- * клиники — сотруднику платформы достаточно было набрать адрес, чтобы сменить
- * владельцу пароль от его глобального аккаунта.
- */
+/** Legacy URL hint captured before the SDK erases the fragment. Not recovery authority. */
 export const arrivedByRecoveryLink = (() => {
   if (typeof window === 'undefined') return false
   const raw = `${window.location.hash || ''}${window.location.search || ''}`
@@ -43,12 +31,49 @@ const authority = createAuthSessionAuthority({ url: supabaseUrl, key: supabaseAn
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: { storageKey: authority.storageKey, storage: authority.storage, lock: sharedLock },
 })
+
+export type RecoverySessionProof = Readonly<{ id: string; actorId: string; stamp: AuthStamp; expiresAt: number }>
+let recovery: { id: string; actorId: string; revision: string | null; access: string; refresh: string; expiresAt: number } | null = null
+const recoveryObserver = authority.observe(supabase.auth, (event, session) => {
+  let stamp: AuthStamp
+  try { stamp = authority.capture() } catch { recovery = null; return }
+  if (event === 'PASSWORD_RECOVERY' && session) {
+    const expiresAt = Math.min((session.expires_at ?? 0) * 1000, Date.now() + 15 * 60_000)
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) { recovery = null; return }
+    recovery = { id: crypto.randomUUID(), actorId: session.user.id, revision: stamp.revision,
+      access: session.access_token, refresh: session.refresh_token, expiresAt }
+    return
+  }
+  if (!recovery) return
+  if (!session || session.user.id !== recovery.actorId
+    || (event !== 'TOKEN_REFRESHED' && (session.access_token !== recovery.access || session.refresh_token !== recovery.refresh))) {
+    recovery = null
+    return
+  }
+  recovery = { ...recovery, revision: stamp.revision, access: session.access_token, refresh: session.refresh_token }
+})
+
+// A URL marker is not recovery authority. Only the observed native event issues this receipt.
+export function getRecoverySessionProof(): RecoverySessionProof | null {
+  if (!recovery) return null
+  try {
+    if (Date.now() >= recovery.expiresAt) { recovery = null; return null }
+    const stamp = authority.capture()
+    return stamp.revision === recovery.revision ? { id: recovery.id, actorId: recovery.actorId, stamp, expiresAt: recovery.expiresAt } : null
+  } catch { return null }
+}
+export function consumeRecoverySessionProof(id: string): void {
+  if (recovery?.id === id) recovery = null
+}
 export const sessionAuth = {
   signInWithPassword: authority.signInWithPassword, signUp: authority.signUp,
   signOut: authority.signOut, setSession: authority.setSession, verifyOtp: authority.verifyOtp,
+  updateUserPassword: authority.updateUserPassword,
   capture: authority.capture, isCurrent: authority.isCurrent,
   onAuthStateChange: (callback: Parameters<typeof authority.observe>[1]) => authority.observe(supabase.auth, callback),
+  dispose() { recoveryObserver.data.subscription.unsubscribe(); recovery = null },
 }
+if (import.meta.hot) import.meta.hot.dispose(() => { sessionAuth.dispose(); void supabase.auth.dispose() })
 export const hasSupabaseFrontendEnv = Boolean(configuredSupabaseUrl && configuredSupabaseAnonKey)
 
 /** Три исхода проверки пароля. «Не знаю» — отдельный исход, а не «неверный». */

@@ -24,6 +24,8 @@ const member = (workspaceId, name) => ({ staffUserId: workspaceId, workspaceId, 
 const sdkDouble = `
 export const hasSupabaseFrontendEnv=true;
 export const arrivedByRecoveryLink=false;
+export const getRecoverySessionProof=()=>null,consumeRecoverySessionProof=()=>{};
+export class StaleAuthIntentError extends Error{name='StaleAuthIntentError';}
 export const supabase={auth:{
   onAuthStateChange(callback){const q=window.__appointmentRecovery;q.listeners.add(callback);return{data:{subscription:{unsubscribe(){q.listeners.delete(callback);}}}};},
   async getSession(){return{data:{session:window.__appointmentRecovery.session},error:null};},
@@ -33,8 +35,15 @@ export const supabase={auth:{
 }};
 // Synthetic dispatch checks only; held replies do not model native auth storage.
 const current=scope=>{if(typeof scope?.isCurrent!=='function'||!scope.isCurrent()||scope.signal?.aborted)
-  throw Error('Synthetic sessionAuth requires a current caller scope');};
+  throw Error('Synthetic sessionAuth requires a current caller scope');
+  if((scope.expected&&!isCurrent(scope.expected))||(scope.expectedUserId!==undefined&&scope.expectedUserId!==(window.__appointmentRecovery.session?.user.id??null)))throw new StaleAuthIntentError();};
+const stamps=new WeakMap();
+const capture=()=>{const fixture=window.__appointmentRecovery,stamp=Object.freeze({revision:String(fixture.epoch),intent:String(fixture.intent)});
+  stamps.set(stamp,{fixture,actor:fixture.session?.user.id??null,epoch:fixture.epoch});return stamp;};
+const isCurrent=stamp=>{const fixture=window.__appointmentRecovery,saved=stamp&&typeof stamp==='object'?stamps.get(stamp):null;
+  return !!saved&&saved.fixture===fixture&&saved.actor===(fixture.session?.user.id??null)&&saved.epoch===fixture.epoch;};
 export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange,
+  capture,isCurrent,updateUserPassword(){throw Error('Fixture forbids password recovery');},
   signOut(scope){current(scope);return supabase.auth.signOut();},
   signInWithPassword(args,scope){current(scope);return supabase.auth.signInWithPassword(args);}};
 `;
@@ -54,17 +63,17 @@ const session=id=>id?{user:{id,email:'qa@example.invalid',user_metadata:{},app_m
   access_token:(id===ids.a?'synthetic.a.signature':'synthetic.b.signature'),refresh_token:'synthetic-only',expires_in:3600,token_type:'bearer'}:null;
 const originalStorage={getItem:Storage.prototype.getItem,setItem:Storage.prototype.setItem,removeItem:Storage.prototype.removeItem};
 const selector=()=>{try{return localStorage.getItem('negis_workspace_selector')}catch{return '<storage unavailable>'}};
-const q={ids,session:session(ids.a),listeners:new Set(),auth:null,denials:[],refusals:[],dashboardReads:[],signOutCalls:0,signOutPlan:{},view:{isCurrentMutationScope:()=>true},
+const q={ids,epoch:0,intent:0,session:session(ids.a),listeners:new Set(),auth:null,denials:[],refusals:[],dashboardReads:[],signOutCalls:0,signOutPlan:{},view:{isCurrentMutationScope:()=>true},
   restoreStorage(){for(const name of Object.keys(originalStorage))Storage.prototype[name]=originalStorage[name];},
   clearCache:clearCrmCache,
   failStorage(all=false){this.restoreStorage();for(const name of Object.keys(originalStorage))Storage.prototype[name]=function(key,...args){
     if(all||(key==='negis_workspace_selector'&&name!=='getItem'))throw Error('Synthetic storage refusal');
     return originalStorage[name].call(this,key,...args);
   };},
-  emit(id){this.session=session(id);for(const cb of [...this.listeners])cb(id?'SIGNED_IN':'SIGNED_OUT',this.session);},
+  emit(id){this.epoch++;this.intent++;this.session=session(id);for(const cb of [...this.listeners])cb(id?'SIGNED_IN':'SIGNED_OUT',this.session);},
   switch(actor){flushSync(()=>this.emit(ids[actor]??null));},
   aba(){this.emit(ids.b);this.emit(ids.a);},
-  refresh(event){for(const cb of [...this.listeners])cb(event,this.session);},
+  refresh(event){this.epoch++;if(!['TOKEN_REFRESHED','USER_UPDATED'].includes(event))this.intent++;for(const cb of [...this.listeners])cb(event,this.session);},
   snapshot(){return{auth:this.auth,selector:selector(),pathname:location.pathname,signOutCalls:this.signOutCalls,
     readWorkspaceId:readWorkspaceId(),dashboardReads:this.dashboardReads,refusals:this.refusals,body:document.body.innerText};}
 };
@@ -103,6 +112,7 @@ export async function createWorkspaceBrowser() {
     bundle: true, write: false, metafile: true, platform: 'browser', target: 'es2022', tsconfig: path.join(frontend, 'tsconfig.json'),
     format: 'iife', jsx: 'automatic', outfile: 'bundle.js', loader: { '.png': 'dataurl', '.jpg': 'dataurl', '.svg': 'dataurl', '.webp': 'dataurl' }, define: { 'process.env.NODE_ENV': '"production"',
       'import.meta.env': JSON.stringify({ DEV: false, BASE_URL: '/' }) }, plugins: [{ name: 'owned-sdk-double', setup(build) {
+      build.onResolve({ filter: /^@\/lib\/authSessionAuthority$/ }, () => ({ path: path.join(frontend, 'src/lib/supabase.ts') }));
       build.onLoad({ filter: /[\\/]src[\\/]lib[\\/]supabase\.ts$/ }, () => ({ contents: sdkDouble, loader: 'ts' }));
       build.onLoad({ filter: /[\\/]components[\\/]layout[\\/]PageLayout\.tsx$/ }, () => ({ contents: `
         import {PortalShell} from '@/components/portals/PortalShell';

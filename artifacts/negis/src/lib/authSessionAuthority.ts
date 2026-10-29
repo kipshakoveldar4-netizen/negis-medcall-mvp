@@ -10,6 +10,7 @@ export interface AuthMutationScope {
   signal?: AbortSignal;
   expected?: AuthStamp;
   expectedUserId?: string | null;
+  onReceipt?(stamp: AuthStamp): void;
 }
 export interface SessionStorage {
   getItem(key: string): string | null;
@@ -42,19 +43,22 @@ export function createAuthSessionAuthority(options: AuthorityOptions) {
   const lockName = `lock:${storageKey}`;
   const nonce = options.nonce ?? (() => crypto.randomUUID());
   const transport = options.fetch ?? globalThis.fetch.bind(globalThis);
-  const listeners = new Set<() => void>();
+  const listeners = new Set<(event?: AuthChangeEvent) => void>();
   let sequence = 0;
   const snapshot = (): Snapshot => ({ raw: options.storage.getItem(storageKey), revision: options.storage.getItem(revisionKey) });
   const equal = (a: Snapshot, b: Snapshot) => a.raw === b.raw && a.revision === b.revision;
   const capture = (): AuthStamp => ({ revision: options.storage.getItem(revisionKey), intent: options.storage.getItem(intentKey) });
   const isCurrent = (stamp: AuthStamp) => { const now = capture(); return now.revision === stamp.revision && now.intent === stamp.intent; };
-  const notify = () => { for (const listener of [...listeners]) listener(); };
+  const notify = (event?: AuthChangeEvent) => { for (const listener of [...listeners]) listener(event); };
+  const saveStorage = (key: string, value: string, event?: AuthChangeEvent) => {
+    if (key === storageKey) options.storage.setItem(revisionKey, nonce());
+    options.storage.setItem(key, value);
+    if (key === storageKey) notify(event);
+  };
   const storage: SessionStorage = {
     getItem: key => options.storage.getItem(key),
     setItem(key, value) {
-      if (key === storageKey) options.storage.setItem(revisionKey, nonce());
-      options.storage.setItem(key, value);
-      if (key === storageKey) notify();
+      saveStorage(key, value);
     },
     removeItem(key) {
       if (key === storageKey) options.storage.setItem(revisionKey, nonce());
@@ -66,7 +70,7 @@ export function createAuthSessionAuthority(options: AuthorityOptions) {
     try { return !scope.signal?.aborted && scope.isCurrent(); } catch { return false; }
   };
 
-  async function run<T>(scope: AuthMutationScope, perform: (client: NativeAuthClient) => Promise<T>): Promise<T> {
+  async function run<T>(scope: AuthMutationScope, perform: (client: NativeAuthClient) => Promise<T>, event?: AuthChangeEvent): Promise<T> {
     if (!callerCurrent(scope)) throw new StaleAuthIntentError();
     const original = snapshot();
     if (scope.expected && !isCurrent(scope.expected)) throw new StaleAuthIntentError();
@@ -81,7 +85,7 @@ export function createAuthSessionAuthority(options: AuthorityOptions) {
     const timer = setTimeout(cancel, options.timeoutMs ?? 30_000);
     let client: NativeAuthClient | null = null;
     const privateKeys = new Map<string, string>();
-    let expected: Snapshot | null = null, intent: string | null = null, changed = false;
+    let expected: Snapshot | null = null, intent: string | null = null, changed = false, completed = false;
     const assertCurrent = (allowCommittedReceipt = false) => {
       // Publishing our own committed session can unmount the originating form.
       // Its receipt remains usable only while the exact committed revision lives.
@@ -107,7 +111,7 @@ export function createAuthSessionAuthority(options: AuthorityOptions) {
           if (key !== operationKey) { assertCurrent(true); privateKeys.set(key, value); return; }
           await options.lock(lockName, 5_000, async () => {
             assertCurrent();
-            storage.setItem(storageKey, value);
+            saveStorage(storageKey, value, event);
             expected = snapshot(); changed = true;
           });
         },
@@ -129,6 +133,7 @@ export function createAuthSessionAuthority(options: AuthorityOptions) {
           const method = (init?.method ?? 'GET').toUpperCase();
           const allowed = target.origin === new URL(url).origin
             && ((method === 'POST' && ['/token', '/signup', '/verify', '/logout'].some(path => target.pathname === `/auth/v1${path}`))
+              || (method === 'PUT' && target.pathname === '/auth/v1/user')
               || (method === 'GET' && target.pathname === '/auth/v1/user'));
           if (!allowed) throw new Error('Auth transport refused');
           try { assertCurrent(); } catch {
@@ -143,12 +148,19 @@ export function createAuthSessionAuthority(options: AuthorityOptions) {
       });
       const result = await perform(client);
       assertCurrent(true);
+      completed = true;
       return result;
     } finally {
       clearTimeout(timer);
       scope.signal?.removeEventListener('abort', cancel);
-      abort.abort();
-      try { await client?.dispose(); } finally { privateKeys.clear(); expected = null; }
+      try {
+        await client?.dispose();
+        if (completed) {
+          assertCurrent(true);
+          scope.onReceipt?.(capture());
+          assertCurrent(true);
+        }
+      } finally { abort.abort(); privateKeys.clear(); expected = null; }
     }
   }
 
@@ -169,7 +181,7 @@ export function createAuthSessionAuthority(options: AuthorityOptions) {
       return session.user?.id === current.user.id && session.access_token === current.access_token
         && session.refresh_token === current.refresh_token;
     };
-    const recheck = () => {
+    const recheck = (event?: AuthChangeEvent) => {
       if (!alive) return;
       const ticket = ++revision;
       void (async () => {
@@ -199,7 +211,7 @@ export function createAuthSessionAuthority(options: AuthorityOptions) {
         }
         if (published && equal(published, after)) return;
         published = after;
-        callback(current ? 'SIGNED_IN' : 'SIGNED_OUT', current);
+        callback(current ? event ?? 'SIGNED_IN' : 'SIGNED_OUT', current);
       })();
     };
     const native = auth.onAuthStateChange((event, session) => {
@@ -243,6 +255,7 @@ export function createAuthSessionAuthority(options: AuthorityOptions) {
     signUp: (credentials: SignUpWithPasswordCredentials, scope: AuthMutationScope) => run(scope, client => client.signUp(credentials)),
     setSession: (session: { access_token: string; refresh_token: string }, scope: AuthMutationScope) => run(scope, client => client.setSession(session)),
     verifyOtp: (params: VerifyOtpParams, scope: AuthMutationScope) => run(scope, client => client.verifyOtp(params)),
+    updateUserPassword: (password: string, scope: AuthMutationScope) => run(scope, client => client.updateUser({ password }), 'USER_UPDATED'),
     signOut: (scope: AuthMutationScope, settings?: SignOut) => run(scope, client => client.signOut(settings)),
   };
 }

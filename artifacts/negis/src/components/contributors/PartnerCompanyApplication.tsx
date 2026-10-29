@@ -30,6 +30,7 @@ type Ticket = Readonly<{ controller: AbortController }>;
 type Lifetime = PartnerCompanyApplicationProps & {
   expired: boolean;
   denied: boolean;
+  focused: boolean;
   frame: object;
   storage: Storage | null;
   storageError: string;
@@ -132,6 +133,7 @@ const zones = timeZones();
 const displayDate = (v: string) => new Intl.DateTimeFormat("ru-RU", {
   dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Almaty",
 }).format(new Date(v));
+const visible = (owner: Lifetime) => owner.focused && document.visibilityState !== "hidden";
 
 export function PartnerCompanyApplication({ actorId, isSessionCurrent, request, onAccessDenied }: PartnerCompanyApplicationProps) {
   const [lifetime, setLifetime] = useState<Lifetime | null>(null);
@@ -170,11 +172,11 @@ export function PartnerCompanyApplication({ actorId, isSessionCurrent, request, 
   }
 
   function sameFrame(owner: Lifetime, frame: object): boolean {
-    return active(owner) && owner.frame === frame && document.visibilityState !== "hidden";
+    return active(owner) && owner.frame === frame && visible(owner);
   }
 
   async function operate(owner: Lifetime, operation: "context" | "submit" | "read" | "close", attempt: Attempt | null = null) {
-    if (!active(owner) || owner.ticket || document.visibilityState === "hidden") return;
+    if (!active(owner) || owner.ticket || !visible(owner)) return;
     if (operation !== "context" && (!attempt || owner.attempt !== attempt)) return;
     if (operation === "submit" && (!attempt?.body || attempt.closing || attempt.resolved)) return;
     if (operation === "close" && attempt) {
@@ -189,7 +191,7 @@ export function PartnerCompanyApplication({ actorId, isSessionCurrent, request, 
     owner.error = "";
     publish(owner);
     const valid = () => {
-      const valid = current(owner) && owner.ticket === ticket && !ticket.controller.signal.aborted;
+      const valid = current(owner) && owner.ticket === ticket && !ticket.controller.signal.aborted && visible(owner);
       if (!valid && owner.expired) publish(owner);
       return valid;
     };
@@ -262,30 +264,38 @@ export function PartnerCompanyApplication({ actorId, isSessionCurrent, request, 
       owner.storageError = saved.error;
     }
     if (owner.storageError && !owner.attempt) { owner.phase = "error"; publish(owner); return; }
-    if (document.visibilityState === "hidden") { publish(owner); return; }
+    if (!visible(owner)) { publish(owner); return; }
     void operate(owner, owner.attempt ? "read" : "context", owner.attempt);
   }
 
   useLayoutEffect(() => {
     // Snapshot all callbacks per lifetime, not per render. Auth ABA never revives an old operation.
-    const owner: Lifetime = { actorId, isSessionCurrent, request, onAccessDenied, expired: false, denied: false,
+    const owner: Lifetime = { actorId, isSessionCurrent, request, onAccessDenied, expired: false, denied: false, focused: true,
       frame: {}, storage: sessionStorageOrNull(), storageError: "", context: null, draft: emptyDraft(), attempt: null,
       receipt: null, ticket: null, timer: null, closeAccepted: false, phase: "loading", error: "" };
     live.current = owner;
     setLifetime(owner);
     load(owner);
-    const focus = () => load(owner);
+    const focus = () => {
+      if (!active(owner)) return;
+      owner.focused = true;
+      load(owner);
+    };
     const conceal = () => { if (active(owner)) { hide(owner); publish(owner); } };
-    const visible = () => { if (document.visibilityState === "visible") load(owner); else conceal(); };
+    const blur = () => { owner.focused = false; conceal(); };
+    const visibility = () => {
+      if (document.visibilityState !== "visible") conceal();
+      else if (owner.focused) load(owner);
+    };
     window.addEventListener("focus", focus);
-    window.addEventListener("blur", conceal);
-    document.addEventListener("visibilitychange", visible);
+    window.addEventListener("blur", blur);
+    document.addEventListener("visibilitychange", visibility);
     return () => {
       retire(owner);
       if (live.current === owner) live.current = null;
       window.removeEventListener("focus", focus);
-      window.removeEventListener("blur", conceal);
-      document.removeEventListener("visibilitychange", visible);
+      window.removeEventListener("blur", blur);
+      document.removeEventListener("visibilitychange", visibility);
     };
   }, [actorId]);
 

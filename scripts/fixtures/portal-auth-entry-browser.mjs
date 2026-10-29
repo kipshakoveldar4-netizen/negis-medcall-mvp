@@ -29,6 +29,7 @@ const session=()=>actor?{access_token:'portal-owned:'+actor+':'+epoch,refresh_to
   user:{id:ids[actor],email:'owned-'+actor.toLowerCase()+'@example.test',aud:'authenticated',
   app_metadata:{provider:'owned-fixture'},user_metadata:{full_name:'Synthetic '+actor},created_at:'2026-01-01T00:00:00Z'}}:null;
 const forbidden=name=>{f.forbidden.push(name);throw Error('Forbidden SDK operation: '+name);};
+export class StaleAuthIntentError extends Error{name='StaleAuthIntentError';}
 export const f={ids,calls:[],forbidden:[],detached:[],view:{isCurrentMutationScope:()=>true},
   select(next){if(next!==null&&!Object.hasOwn(ids,next))throw Error('Unknown synthetic actor');actor=next;epoch++;
     for(const listener of [...listeners])listener(next?'SIGNED_IN':'SIGNED_OUT',session());},
@@ -59,13 +60,21 @@ const auth={async getSession(){return{data:{session:session()},error:null};},
 };
 // Scope validation is a fake-dispatch assertion, not native persistence emulation.
 const scoped=(scope,operation,args)=>{if(typeof scope?.isCurrent!=='function'||!scope.isCurrent()||scope.signal?.aborted)
-  return forbidden('sessionAuth.'+operation+'.scope');return auth[operation](args);};
+  return forbidden('sessionAuth.'+operation+'.scope');
+  if((scope.expected&&!isCurrent(scope.expected))||(scope.expectedUserId!==undefined&&scope.expectedUserId!==(actor?ids[actor]:null)))throw new StaleAuthIntentError();
+  return auth[operation](args);};
+const stamps=new WeakMap();
+const capture=()=>{const stamp=Object.freeze({revision:String(epoch),intent:String(epoch)});stamps.set(stamp,{actor,epoch});return stamp;};
+const isCurrent=stamp=>{const saved=stamp&&typeof stamp==='object'?stamps.get(stamp):null;
+  return !!saved&&saved.actor===actor&&saved.epoch===epoch;};
 export const sessionAuth={onAuthStateChange:auth.onAuthStateChange,
+  capture,isCurrent,updateUserPassword:()=>forbidden('sessionAuth.updateUserPassword'),
   signInWithPassword:(args,scope)=>scoped(scope,'signInWithPassword',args),
   signUp:(args,scope)=>scoped(scope,'signUp',args),signOut:(scope,options)=>scoped(scope,'signOut',options)};
 export const supabase=new Proxy({auth:new Proxy(auth,{get(target,key){return key in target?target[key]:(...args)=>forbidden('auth.'+String(key));}})},
   {get(target,key){return key in target?target[key]:(...args)=>forbidden(String(key));}});
 export const hasSupabaseFrontendEnv=true,arrivedByRecoveryLink=false;
+export const getRecoverySessionProof=()=>null,consumeRecoverySessionProof=()=>{};
 export const verifyCurrentPassword=()=>forbidden('verifyCurrentPassword');
 export class AuthClient{constructor(){forbidden('AuthClient');}}
 export const createClient=()=>forbidden('createClient');
@@ -119,7 +128,7 @@ async function makeBundle() {
     outdir: path.join(root, 'node_modules/.cache/portal-auth-entry-memory'), entryNames: 'entry', chunkNames: '[name]-[hash]',
     define: { 'process.env.NODE_ENV': '"production"', 'import.meta.env': JSON.stringify({ BASE_URL: '/', PROD: false, DEV: false }) },
     plugins: [{ name: 'closed-owned-auth-sdk', setup(build) {
-      build.onResolve({ filter: /^(portal-owned-sdk|@\/lib\/supabase|@supabase\/supabase-js)$/ }, () => ({ path: 'sdk', namespace: 'owned' }));
+      build.onResolve({ filter: /^(portal-owned-sdk|@\/lib\/(supabase|authSessionAuthority)|@supabase\/supabase-js)$/ }, () => ({ path: 'sdk', namespace: 'owned' }));
       build.onResolve({ filter: /^\.\.?\/supabase$/ }, args => path.resolve(args.resolveDir, args.path + '.ts') === path.join(frontend, 'src/lib/supabase.ts')
         ? { path: 'sdk', namespace: 'owned' } : undefined);
       build.onLoad({ filter: /.*/, namespace: 'owned' }, () => ({ contents: sdk, loader: 'tsx', resolveDir: frontend }));

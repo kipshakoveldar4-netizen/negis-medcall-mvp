@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useLayoutEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
-import { arrivedByRecoveryLink, supabase, sessionAuth } from '@/lib/supabase';
+import { consumeRecoverySessionProof, getRecoverySessionProof, supabase, sessionAuth } from '@/lib/supabase';
 import { validatePasswordRules } from '../../../../lib/auth/password-rules';
 import { z } from 'zod';
 import { useForm } from 'react-hook-form';
@@ -25,6 +25,16 @@ const schema = z.object({
 
 type Values = z.infer<typeof schema>;
 type PageState = 'loading' | 'form' | 'success' | 'expired';
+type RecoveryProof = NonNullable<ReturnType<typeof getRecoverySessionProof>>;
+type RecoveryLifetime = {
+  proofId: string;
+  actorId: string;
+  expiresAt: number;
+  controller: AbortController;
+  verified: boolean;
+  receipt: RecoveryProof['stamp'] | null;
+};
+type RecoveryView = { state: PageState; scope: RecoveryLifetime | null };
 
 /** Пришли сюда с /join за паролем? Тогда и возвращаться надо к приглашению. */
 function hasPendingInvite(): boolean {
@@ -37,64 +47,190 @@ function hasPendingInvite(): boolean {
 
 export default function ResetPassword() {
   const [, setLocation] = useLocation();
-  const [pageState, setPageState] = useState<PageState>('loading');
+  const [view, setView] = useState<RecoveryView>({ state: 'loading', scope: null });
+  const pageState = view.state;
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [showPass, setShowPass] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const mounted = useRef<object | null>(null);
+  const lifetime = useRef<RecoveryLifetime | null>(null);
+  const liveView = useRef<RecoveryView | null>(view);
+  const pending = useRef<object | null>(null);
+  const deadline = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const redirect = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const expiry = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const form = useForm<Values>({ resolver: zodResolver(schema) });
 
-  useEffect(() => {
-    /* Listen for the PASSWORD_RECOVERY auth event emitted by Supabase
-       when the recovery hash in the URL is detected */
-    const { data: { subscription } } = sessionAuth.onAuthStateChange((event) => {
-      if (event === 'PASSWORD_RECOVERY') {
-        setPageState('form');
+  const owns = (scope: RecoveryLifetime | null): scope is RecoveryLifetime => Boolean(
+    mounted.current && scope && lifetime.current === scope && !scope.controller.signal.aborted,
+  );
+  const currentView = () => mounted.current !== null && liveView.current === view;
+  const futureExpiry = (value: number) => Number.isFinite(value) && value > Date.now();
+  const currentStamp = (stamp: RecoveryProof['stamp']) => {
+    try { return sessionAuth.isCurrent(stamp); } catch { return false; }
+  };
+  const publish = (state: PageState, scope: RecoveryLifetime | null) => {
+    const next = { state, scope };
+    liveView.current = next;
+    setView(next);
+    return next;
+  };
+  const clearTimers = () => {
+    if (deadline.current !== null) clearTimeout(deadline.current);
+    if (redirect.current !== null) clearTimeout(redirect.current);
+    if (expiry.current !== null) clearTimeout(expiry.current);
+    deadline.current = null; redirect.current = null; expiry.current = null;
+  };
+  const retire = () => {
+    lifetime.current?.controller.abort();
+    lifetime.current = null; pending.current = null;
+    clearTimers();
+    form.reset({ password: '', confirm: '' });
+    setIsSubmitting(false); setError(''); setShowPass(false); setShowConfirm(false);
+  };
+  const expire = () => { retire(); publish('expired', null); };
+  const navigateSuccess = (scope: RecoveryLifetime, expectedView: RecoveryView) => {
+    if (!owns(scope) || liveView.current !== expectedView || expectedView.state !== 'success') return;
+    if (!scope.receipt || !currentStamp(scope.receipt)) { expire(); return; }
+    const destination = hasPendingInvite() ? '/join' : '/login';
+    clearTimers();
+    scope.controller.abort(); lifetime.current = null; liveView.current = null;
+    setLocation(destination);
+  };
+
+  useLayoutEffect(() => {
+    const mount = {};
+    mounted.current = mount;
+    retire(); publish('loading', null);
+    let observed = false;
+    const active = () => mounted.current === mount;
+    const armDeadline = () => {
+      if (deadline.current !== null) clearTimeout(deadline.current);
+      const timer = setTimeout(() => {
+        if (!active() || deadline.current !== timer) return;
+        deadline.current = null;
+        if (!lifetime.current?.verified) expire();
+      }, 4000);
+      deadline.current = timer;
+    };
+    const verify = (proof: RecoveryProof) => {
+      if (!active()) return;
+      if (!futureExpiry(proof.expiresAt)) { expire(); return; }
+      const previous = lifetime.current;
+      if (owns(previous) && previous.proofId === proof.id && previous.actorId === proof.actorId) {
+        if (!futureExpiry(previous.expiresAt)) expire();
+        return;
       }
+      retire();
+      const scope: RecoveryLifetime = { proofId: proof.id, actorId: proof.actorId, expiresAt: proof.expiresAt,
+        controller: new AbortController(), verified: false, receipt: null };
+      lifetime.current = scope;
+      publish('loading', scope); armDeadline();
+      // Return from the native auth callback before re-entering the SDK.
+      void Promise.resolve().then(async () => {
+        if (!active() || !owns(scope)) return;
+        try {
+          const { data, error } = await supabase.auth.getSession();
+          if (!active() || !owns(scope)) return;
+          const current = getRecoverySessionProof();
+          if (error || data.session?.user.id !== scope.actorId || current?.id !== scope.proofId
+            || current.actorId !== scope.actorId || !currentStamp(current.stamp)
+            || !futureExpiry(current.expiresAt) || !futureExpiry(scope.expiresAt)) { expire(); return; }
+          scope.expiresAt = Math.min(scope.expiresAt, current.expiresAt);
+          scope.verified = true;
+          if (deadline.current !== null) clearTimeout(deadline.current);
+          deadline.current = null;
+          const timer = setTimeout(() => {
+            if (!active() || lifetime.current !== scope || expiry.current !== timer) return;
+            expiry.current = null;
+            expire();
+          }, scope.expiresAt - Date.now());
+          expiry.current = timer;
+          publish('form', scope);
+        } catch { if (active() && owns(scope)) expire(); }
+      });
+    };
+    armDeadline();
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((event, session) => {
+      if (!active()) return;
+      observed = true;
+      const scope = lifetime.current;
+      if (event === 'SIGNED_OUT' || !session?.user.id) { expire(); return; }
+      if (owns(scope) && scope.receipt) {
+        if (session.user.id !== scope.actorId || !currentStamp(scope.receipt)) expire();
+        return;
+      }
+      const proof = getRecoverySessionProof();
+      if (!proof || proof.actorId !== session.user.id) { expire(); return; }
+      verify(proof);
     });
-
-    /* Событие могло подняться до подписки — тогда решает признак, снятый при
-       загрузке модуля. Живой сессии САМОЙ ПО СЕБЕ мало и быть не должно: под
-       имперсонацией это сессия владельца клиники, и форма отдавала бы смену
-       его пароля любому, кто наберёт адрес. */
-    if (arrivedByRecoveryLink) {
-      setPageState(prev => prev === 'loading' ? 'form' : prev);
+    if (!observed) {
+      const proof = getRecoverySessionProof();
+      if (proof) verify(proof);
+      else void Promise.resolve().then(async () => {
+        if (!active() || observed || lifetime.current) return;
+        try {
+          const { data, error } = await supabase.auth.getSession();
+          if (!active() || observed || lifetime.current) return;
+          const current = getRecoverySessionProof();
+          if (!error && current && current.actorId === data.session?.user.id) verify(current);
+          else expire();
+        } catch { if (active() && !observed && !lifetime.current) expire(); }
+      });
     }
-
-    /* If no recovery event arrives within 4 seconds, assume link is expired */
-    const timer = setTimeout(() => {
-      setPageState(prev => prev === 'loading' ? 'expired' : prev);
-    }, 4000);
-
     return () => {
-      subscription.unsubscribe();
-      clearTimeout(timer);
+      mounted.current = null;
+      lifetime.current?.controller.abort(); lifetime.current = null;
+      pending.current = null; liveView.current = null;
+      clearTimers(); subscription.unsubscribe();
     };
   }, []);
 
   const handleSubmit = async (data: Values) => {
-    setIsSubmitting(true);
-    setError('');
-    const { error: updateError } = await supabase.auth.updateUser({ password: data.password });
-    setIsSubmitting(false);
-
-    if (updateError) {
-      const msg = updateError.message.toLowerCase();
-      if (msg.includes('expired') || msg.includes('invalid') || msg.includes('token')) {
-        setPageState('expired');
-      } else {
-        setError('Не удалось сменить пароль. Попробуйте запросить письмо ещё раз.');
+    const scope = view.scope;
+    if (!currentView() || pageState !== 'form' || !owns(scope) || !scope.verified || pending.current) return;
+    const proof = getRecoverySessionProof();
+    if (proof?.id !== scope.proofId || proof.actorId !== scope.actorId
+      || !futureExpiry(proof.expiresAt) || !futureExpiry(scope.expiresAt)) { expire(); return; }
+    const attempt = {};
+    pending.current = attempt;
+    const current = () => currentView() && owns(scope) && pending.current === attempt
+      && scope.proofId === proof.id && scope.actorId === proof.actorId && futureExpiry(scope.expiresAt);
+    let receipt: RecoveryProof['stamp'] | null = null;
+    const originalPassword = data.password;
+    form.reset({ password: '', confirm: '' });
+    setIsSubmitting(true); setError(''); setShowPass(false); setShowConfirm(false);
+    try {
+      const { data: result, error: updateError } = await sessionAuth.updateUserPassword(originalPassword, {
+        expectedUserId: scope.actorId, expected: proof.stamp, signal: scope.controller.signal,
+        isCurrent: current, onReceipt: stamp => { if (current()) receipt = stamp; },
+      });
+      if (!current()) return;
+      if (!receipt || !currentStamp(receipt)) { expire(); return; }
+      if (updateError) {
+        const msg = updateError.message.toLowerCase();
+        if (msg.includes('expired') || msg.includes('invalid') || msg.includes('token')) expire();
+        else setError('Не удалось сменить пароль. Попробуйте запросить письмо ещё раз.');
+        return;
       }
-      return;
+      if (result.user?.id !== scope.actorId) { expire(); return; }
+      consumeRecoverySessionProof(scope.proofId);
+      clearTimers();
+      form.reset({ password: '', confirm: '' });
+      pending.current = null; scope.receipt = receipt;
+      setIsSubmitting(false);
+      const success = publish('success', scope);
+      redirect.current = setTimeout(() => navigateSuccess(scope, success), 3000);
+    } catch {
+      if (!current()) return;
+      const currentProof = getRecoverySessionProof();
+      if (currentProof?.id !== scope.proofId || currentProof.actorId !== scope.actorId) expire();
+      else setError('Не удалось сменить пароль. Попробуйте запросить письмо ещё раз.');
+    } finally {
+      if (current()) { pending.current = null; setIsSubmitting(false); publish('form', scope); }
     }
-
-    setPageState('success');
-    // Раньше уводило на '/' — маркетинговый лендинг, где кнопка «Войти» при
-    // живой сессии без клиники зациклена. Приглашённый (у него отложен токен)
-    // возвращается прямо к приглашению, остальные — на страницу входа, как и
-    // обещает текст.
-    setTimeout(() => setLocation(hasPendingInvite() ? '/join' : '/login'), 3000);
   };
 
   /* ── Styles ── */
@@ -169,7 +305,7 @@ export default function ResetPassword() {
                 />
                 <button
                   type="button"
-                  onClick={() => setShowPass(p => !p)}
+                  onClick={() => { if (currentView() && owns(view.scope) && !pending.current) setShowPass(p => !p); }}
                   style={{
                     position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
                     background: 'none', border: 'none', cursor: 'pointer', padding: 0,
@@ -198,7 +334,7 @@ export default function ResetPassword() {
                 />
                 <button
                   type="button"
-                  onClick={() => setShowConfirm(p => !p)}
+                  onClick={() => { if (currentView() && owns(view.scope) && !pending.current) setShowConfirm(p => !p); }}
                   style={{
                     position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
                     background: 'none', border: 'none', cursor: 'pointer', padding: 0,
@@ -257,7 +393,7 @@ export default function ResetPassword() {
               </p>
             </div>
             <button
-              onClick={() => setLocation(hasPendingInvite() ? '/join' : '/login')}
+              onClick={() => { if (view.scope) navigateSuccess(view.scope, view); }}
               style={{
                 background: '#1E325C', color: 'white', border: 'none',
                 borderRadius: 12, fontWeight: 500, fontSize: 14,
@@ -291,7 +427,7 @@ export default function ResetPassword() {
               </p>
             </div>
             <button
-              onClick={() => setLocation('/login')}
+              onClick={() => { if (currentView() && pageState === 'expired') { liveView.current = null; setLocation('/login'); } }}
               style={{
                 background: '#1E325C', color: 'white', border: 'none',
                 borderRadius: 12, fontWeight: 500, fontSize: 14,

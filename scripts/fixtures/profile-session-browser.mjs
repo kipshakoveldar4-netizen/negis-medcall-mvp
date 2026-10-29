@@ -17,6 +17,7 @@ const esbuild = createRequire(require.resolve('vite/package.json'))('esbuild');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const mocks = `
 import {useSyncExternalStore} from 'react';import {flushSync} from 'react-dom';
+export class StaleAuthIntentError extends Error{name='StaleAuthIntentError';}
 const expiry=Math.floor(Date.now()/1000)+3600;
 let nameA='Synthetic A';
 const encoded=value=>btoa(JSON.stringify(value)).replaceAll('=','').replaceAll('+','-').replaceAll('/','_');
@@ -24,16 +25,18 @@ function session(id='A',revision='one',refresh=0){return{access_token:encoded({a
  user:{id,email:id.toLowerCase()+'@example.test',aud:'authenticated',app_metadata:{provider:'synthetic'},user_metadata:{full_name:id==='A'?nameA:'Synthetic '+id,retained:'original'},created_at:'2026-01-01T00:00:00Z'}};}
 const initial=()=>({session:session(),user:session().user,isImpersonation:false,isDemoMode:false,isSigningOut:false});
 let current=initial(),sdkSession=current.session,verification,network;
+let sdkRevision=0,sdkIntent=0;const stamps=new WeakMap();
 const listeners=new Set(),sdk=new Set();
 const deferred=()=>{let resolve;return{promise:new Promise(done=>{resolve=done}),resolve:value=>resolve(value)}};
 export const fixture={requests:[],messages:[],closes:0,stage:'idle',pause:null,responseError:false,globalUpdates:0,detached:[],
- reset(){nameA='Synthetic A';current=initial();sdkSession=current.session;verification=deferred();network=deferred();this.requests=[];this.messages=[];this.closes=0;this.stage='idle';this.pause=null;this.responseError=false;this.globalUpdates=0;this.detached=[];
+ reset(){nameA='Synthetic A';current=initial();sdkSession=current.session;sdkRevision++;sdkIntent++;verification=deferred();network=deferred();this.requests=[];this.messages=[];this.closes=0;this.stage='idle';this.pause=null;this.responseError=false;this.globalUpdates=0;this.detached=[];
  this.storageTouches=[];this.broadcasts=0;this.visibilityListeners=0;},
  patch(value){flushSync(()=>{current={...current,...value};for(const fn of listeners)fn();});},
- emit(id,event=id?'SIGNED_IN':'SIGNED_OUT',revision='one',refresh=0){sdkSession=id?session(id,revision,refresh):null;flushSync(()=>{for(const fn of sdk)fn(event,sdkSession);});},
+ emit(id,event=id?'SIGNED_IN':'SIGNED_OUT',revision='one',refresh=0){if(id!==(sdkSession?.user.id??null)||!['TOKEN_REFRESHED','USER_UPDATED'].includes(event))sdkIntent++;
+ sdkSession=id?session(id,revision,refresh):null;sdkRevision++;flushSync(()=>{for(const fn of sdk)fn(event,sdkSession);});},
  refresh(){this.emit('A','TOKEN_REFRESHED','one',1);this.patch({session:sdkSession,user:sdkSession.user});},
  renameRemote(value){nameA=value;this.emit('A','USER_UPDATED');},
- aba(){flushSync(()=>{for(const fn of sdk)fn('SIGNED_IN',session('B'));for(const fn of sdk)fn('SIGNED_IN',session('A'));});sdkSession=session('A');},
+ aba(){flushSync(()=>{for(const id of ['B','A']){sdkSession=session(id);sdkRevision++;sdkIntent++;for(const fn of sdk)fn('SIGNED_IN',sdkSession);}});},
  resolveVerify(result='ok'){verification.resolve(result);},resolveNetwork(){network.resolve();},
  fill(id,value){const input=document.getElementById(id);if(!input)throw Error('Missing '+id);
  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));},
@@ -45,8 +48,15 @@ export const supabase={auth:{onAuthStateChange(fn){sdk.add(fn);return{data:{subs
  async getSession(){return{data:{session:sdkSession},error:null};},async signOut(){fixture.emit(null);return{error:null};},
  async updateUser(){fixture.globalUpdates++;throw Error('Global updateUser forbidden');}}};
 // Synthetic observer/dispatch surface only; no native auth-storage guarantee.
-export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange,signOut(scope){
+// Explicit offline flag preserves the old unconfigured fixture branch.
+export const hasSupabaseFrontendEnv=false;
+const capture=()=>{const stamp=Object.freeze({revision:String(sdkRevision),intent:String(sdkIntent)});stamps.set(stamp,{actor:sdkSession?.user.id??null,revision:sdkRevision});return stamp;};
+const isCurrent=stamp=>{const saved=stamp&&typeof stamp==='object'?stamps.get(stamp):null;
+ return !!saved&&saved.actor===(sdkSession?.user.id??null)&&saved.revision===sdkRevision;};
+export const sessionAuth={onAuthStateChange:supabase.auth.onAuthStateChange,capture,isCurrent,
+ updateUserPassword(){throw Error('Password recovery is forbidden in the profile fixture');},signOut(scope){
  if(typeof scope?.isCurrent!=='function'||!scope.isCurrent()||scope.signal?.aborted)throw Error('Synthetic sign-out requires a current scope');
+ if((scope.expected&&!isCurrent(scope.expected))||(scope.expectedUserId!==undefined&&scope.expectedUserId!==(sdkSession?.user.id??null)))throw new StaleAuthIntentError();
  return supabase.auth.signOut();}};
 export function useAuth(){const value=useSyncExternalStore(fn=>{listeners.add(fn);return()=>listeners.delete(fn);},()=>current);return{...value,
  applyConfirmedProfile(confirmed,guard){if(!guard()||confirmed.id!==current.user?.id)return;current={...current,user:{...current.user,user_metadata:{...current.user.user_metadata,full_name:confirmed.user_metadata.full_name}}};for(const fn of listeners)fn();}};}
@@ -98,7 +108,7 @@ fixture.unmount=()=>{fixture.remember();flushSync(()=>app.unmount());};fixture.m
     bundle: true, write: false, platform: 'browser', format: 'iife', jsx: 'automatic',
     define: { '__ACTUAL_AUTH_FIXTURE__': String(actualAuth), 'process.env.NODE_ENV': '"production"', 'import.meta.env': JSON.stringify({ VITE_SUPABASE_URL: 'https://profile.example.test', VITE_SUPABASE_ANON_KEY: 'synthetic-public-key' }) },
     plugins: [{ name: 'isolated-profile', setup(build) {
-      build.onResolve({ filter: /^(profile-fake|@\/contexts\/AuthContext|@\/lib\/(supabase|api|demoStorage|serverAuth)|wouter|sonner|\.\/PushSettings)$/ }, args => {
+      build.onResolve({ filter: /^(profile-fake|@\/contexts\/AuthContext|@\/lib\/(supabase|authSessionAuthority|api|demoStorage|serverAuth)|wouter|sonner|\.\/PushSettings)$/ }, args => {
         if(actualAuth&&args.path==='@/contexts/AuthContext')return {path:path.join(frontend,'src/contexts/AuthContext.tsx')};
         return { path: 'mocks', namespace: 'fixture' };
       });

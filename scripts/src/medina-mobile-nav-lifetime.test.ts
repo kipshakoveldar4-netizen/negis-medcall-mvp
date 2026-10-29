@@ -14,6 +14,7 @@ import { Script } from "node:vm";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const ts = createRequire(path.join(root, "package.json"))("typescript") as typeof import("typescript");
 const componentFile = "artifacts/negis/src/components/layout/MobileNav.tsx";
+class StaleAuthIntentError extends Error { name = "StaleAuthIntentError"; }
 function compile(source: string, fileName: string) {
   const result = ts.transpileModule(source, { fileName, reportDiagnostics: true, compilerOptions: {
     target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX,
@@ -33,7 +34,7 @@ function compile(source: string, fileName: string) {
 }
 function evaluate(code: string, imports: Record<string, unknown> = {}, globals: Record<string, unknown> = {}) {
   const exports: Record<string, any> = {};
-  new Script(code).runInNewContext({ exports, Error, ...globals, require(name: string) {
+  new Script(code).runInNewContext({ exports, Error, AbortController, setTimeout, clearTimeout, ...globals, require(name: string) {
     assert.ok(Object.hasOwn(imports, name), `Unexpected dependency: ${name}`);
     return imports[name];
   } }, { timeout: 1000 });
@@ -365,6 +366,8 @@ function actualAuthProvider(t: TestContext) {
   const listeners = new Set<(event: string, nextSession: ReturnType<typeof session>) => void>();
   const signOutActors: Array<string | null> = [];
   let actor: string | null = "synthetic-A", cursor = 0, dirty = true, mounted = true;
+  let sdkRevision = 0;
+  const stamps = new WeakMap<object, { actorId: string | null; revision: number }>();
   let snapshot!: Auth & { signOut(): Promise<void> };
   const storage = () => {
     const values = new Map<string, string>();
@@ -377,6 +380,7 @@ function actualAuthProvider(t: TestContext) {
   function session() { return actor ? { user: { id: actor, email: "qa@example.invalid", user_metadata: {} } } : null; }
   function emit(next: string | null) {
     actor = next;
+    sdkRevision++;
     for (const listener of listeners) listener(next ? "SIGNED_IN" : "SIGNED_OUT", session());
   }
   function effect(create: Effect["create"], deps?: unknown[]) {
@@ -392,6 +396,7 @@ function actualAuthProvider(t: TestContext) {
     createContext(initial: unknown) { const context: any = { current: initial }; context.Provider = { context }; return context; },
     useContext: (context: { current: unknown }) => context.current,
     useEffect: effect,
+    useLayoutEffect: effect,
     useRef(initial: unknown) { const index = cursor++; return slots[index] ??= { current: initial }; },
     useState(initial: any) {
       const index = cursor++;
@@ -415,16 +420,29 @@ function actualAuthProvider(t: TestContext) {
   // Synthetic observer/dispatch contract, not native SDK persistence coverage.
   const sessionAuth = {
     onAuthStateChange: sdk.onAuthStateChange,
-    signOut(scope: { isCurrent(): boolean; signal?: AbortSignal }) {
+    capture() {
+      const stamp = Object.freeze({ revision: String(sdkRevision), intent: String(sdkRevision) });
+      stamps.set(stamp, { actorId: actor, revision: sdkRevision });
+      return stamp;
+    },
+    isCurrent(stamp: unknown) {
+      const saved = stamp && typeof stamp === "object" ? stamps.get(stamp) : undefined;
+      return Boolean(saved && saved.actorId === actor && saved.revision === sdkRevision);
+    },
+    signOut(scope: { isCurrent(): boolean; signal?: AbortSignal; expected?: unknown; expectedUserId?: string | null }) {
       assert.equal(typeof scope?.isCurrent, "function", "sessionAuth requires a caller scope");
       assert.equal(scope.isCurrent(), true, "A retired sign-out must not dispatch");
       assert.notEqual(scope.signal?.aborted, true, "An aborted sign-out must not dispatch");
+      if ((scope.expected && !sessionAuth.isCurrent(scope.expected))
+        || (scope.expectedUserId !== undefined && scope.expectedUserId !== actor)) throw new StaleAuthIntentError();
       return sdk.signOut();
     },
   };
   const actual = evaluate(authCode, {
     react: { ...react, default: react }, "react/jsx-runtime": { jsx, jsxs: jsx },
-    "@/lib/supabase": { supabase: { auth: sdk }, sessionAuth },
+    // This legacy scheduler is an explicit offline double, not real paint coverage.
+    "@/lib/supabase": { supabase: { auth: sdk }, sessionAuth, hasSupabaseFrontendEnv: false },
+    "@/lib/authSessionAuthority": { StaleAuthIntentError },
     "@/lib/authSignOut": signOut,
     "../../../../lib/vertical/terms": terms, "../../../../lib/crm/workspace-purpose": purposes,
     "@/lib/permissions": permissions,

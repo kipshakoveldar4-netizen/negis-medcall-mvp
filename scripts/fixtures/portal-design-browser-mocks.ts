@@ -2,6 +2,9 @@ import { createPortalDesignStore } from "./portal-design-store";
 
 export const portalDesignStore = createPortalDesignStore(window.location.href);
 export const hasSupabaseFrontendEnv = true;
+// Visual fixture only: a URL/hash never grants password-recovery authority.
+export const getRecoverySessionProof = (): null => null;
+export const consumeRecoverySessionProof = (_id: string): void => {};
 // Visual fixture only; composed provider/sign-out behavior is covered separately.
 export const useAuth = () => ({ signOut: async () => { portalDesignStore.switchActor(null); } });
 export const supabase = { auth: {
@@ -24,6 +27,7 @@ function currentScope(scope: { isCurrent(): boolean; signal?: AbortSignal }) {
 }
 export const sessionAuth = {
   onAuthStateChange: supabase.auth.onAuthStateChange,
+  updateUserPassword() { throw Error("Password recovery is forbidden in the visual fixture"); },
   signInWithPassword(_credentials: unknown, scope: Parameters<typeof currentScope>[0]) {
     currentScope(scope); return supabase.auth.signInWithPassword();
   },

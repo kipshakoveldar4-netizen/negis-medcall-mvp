@@ -14,6 +14,7 @@ const read = (file: string) => readFile(path.join(root, file), "utf8");
 const source = await read("artifacts/negis/src/contexts/AuthContext.tsx");
 const signOutSource = await read("artifacts/negis/src/lib/authSignOut.ts");
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
+class StaleAuthIntentError extends Error { name = "StaleAuthIntentError"; }
 
 type Node = { type: any; props: Record<string, any> };
 const jsx = (type: any, props: Node["props"]): Node => ({ type, props });
@@ -37,7 +38,7 @@ function evaluate(code: string, imports: Record<string, unknown> = {}, bindings:
     }] },
   }).outputText;
   new Script(compiled).runInNewContext({
-    exports, URLSearchParams, Response, AbortController, ...bindings,
+    exports, URLSearchParams, Response, AbortController, setTimeout, clearTimeout, ...bindings,
     require(name: string) {
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "Fragment" };
       assert.ok(name in imports, `Unmocked import: ${name}`);
@@ -224,6 +225,9 @@ function setup(options: Options = {}) {
   const locations: string[] = [];
   let snapshot!: Snapshot;
   let sdkActor = options.initialActor === undefined ? actorA : options.initialActor;
+  let sdkRevision = 0;
+  let sdkIntent = 0;
+  const stamps = new WeakMap<object, { actorId: string | null; revision: number }>();
   let tokenReply: ((expected?: string) => Promise<string>) | undefined;
   let logoutGate: ReturnType<typeof deferred<void>> | undefined;
   if (options.deferSignOut) logoutGate = deferred<void>();
@@ -234,7 +238,9 @@ function setup(options: Options = {}) {
   if (!options.deferSession) sessionGate.resolve({ data: { session: localSession(sdkActor) } });
 
   function emit(id: string | null, event = id ? "SIGNED_IN" : "SIGNED_OUT") {
+    if (id !== sdkActor || !["TOKEN_REFRESHED", "USER_UPDATED"].includes(event)) sdkIntent++;
     sdkActor = id;
+    sdkRevision++;
     for (const callback of [...callbacks]) callback(event, localSession(id));
   }
   const sdk = {
@@ -260,16 +266,29 @@ function setup(options: Options = {}) {
   // Synthetic dispatch contract only, not a model of native SDK storage fencing.
   const sessionAuth = {
     onAuthStateChange: sdk.onAuthStateChange,
-    signOut(scope: { isCurrent(): boolean; signal?: AbortSignal }) {
+    capture() {
+      const stamp = Object.freeze({ revision: String(sdkRevision), intent: String(sdkIntent) });
+      stamps.set(stamp, { actorId: sdkActor, revision: sdkRevision });
+      return stamp;
+    },
+    isCurrent(stamp: unknown) {
+      const saved = stamp && typeof stamp === "object" ? stamps.get(stamp) : undefined;
+      return Boolean(saved && saved.actorId === sdkActor && saved.revision === sdkRevision);
+    },
+    signOut(scope: { isCurrent(): boolean; signal?: AbortSignal; expected?: unknown; expectedUserId?: string | null }) {
       assert.equal(typeof scope?.isCurrent, "function", "sessionAuth requires a caller scope");
       assert.equal(scope.isCurrent(), true, "Retired sign-out must not dispatch");
       assert.notEqual(scope.signal?.aborted, true, "Aborted sign-out must not dispatch");
+      if ((scope.expected && !sessionAuth.isCurrent(scope.expected))
+        || (scope.expectedUserId !== undefined && scope.expectedUserId !== sdkActor)) throw new StaleAuthIntentError();
       return sdk.signOut();
     },
   };
   const auth = evaluate(source, {
     react: { ...renderer.hooks, default: renderer.hooks },
-    "@/lib/supabase": { supabase: { auth: sdk }, sessionAuth },
+    // Preserve this legacy fixture's former undefined/offline branch explicitly.
+    "@/lib/supabase": { supabase: { auth: sdk }, sessionAuth, hasSupabaseFrontendEnv: false },
+    "@/lib/authSessionAuthority": { StaleAuthIntentError },
     "@/lib/authSignOut": signOutBoundary,
     "../../../../lib/vertical/terms": terms,
     "../../../../lib/crm/workspace-purpose": purposes,
@@ -1132,7 +1151,7 @@ test("failed reload cleanup cannot restore legacy authentication or show an unli
       negis_demo_session: JSON.stringify({ mode: "demo", authenticated: true, createdAt: "2026-01-01T00:00:00Z" }) } });
 });
 
-test("a completed SDK logout cannot update an unmounted provider or publish old profile data", async () => {
+test("a retired provider's completed SDK logout cannot publish or clear the recovery fence", async () => {
   await withFixture(async (fixture) => {
     await confirm(fixture, [mortgage()]);
     const gate = fixture.holdSignOut();
@@ -1141,11 +1160,16 @@ test("a completed SDK logout cannot update an unmounted provider or publish old 
     fixture.renderer.dispose();
     const writes = fixture.renderer.writes.length;
     const locations = fixture.locations.length;
+    const exitRevision = fixture.signOutBoundary.getSignOutRevision();
+    assert.equal(fixture.signOutBoundary.isSignOutPending(), true);
     gate.resolve(); await signingOut; await fixture.renderer.flush();
     assert.equal(fixture.renderer.writes.length, writes);
     assert.equal(fixture.locations.length, locations);
     assert.equal(fixture.toasts.length, 0);
-    assert.equal(fixture.signOutBoundary.isSignOutPending(), false);
+    assert.equal(fixture.signOutBoundary.isSignOutPending(), true,
+      "an unmounted provider cannot declare recovery complete for the next provider");
+    assert.equal(fixture.signOutBoundary.getSignOutRevision(), exitRevision,
+      "retired completion cannot mutate the shared exit ownership revision");
     assert.equal(fixture.subscriptions(), 0);
   });
 });

@@ -21,6 +21,8 @@
     "test:portal-auth-entry-browser": "node --import tsx --test ./fixtures/portal-auth-entry-browser.test.mjs",
     "test:auth-authority": "node --import tsx --test --test-concurrency=1 ./src/medina-auth-mutation-entry.test.ts ./src/medina-auth-mutation-session.test.ts ./src/medina-landing-auth-authority.test.ts ./src/medina-join-request-auth-lifetime.test.ts",
     "test:auth-authority-browser": "node --import tsx ./fixtures/auth-session-authority-browser.test.mjs --runtime-sdk-freeze-confirmed",
+    "test:auth-startup": "node --import tsx --test --test-concurrency=1 ./src/medina-auth-startup-lifetime.test.ts ./src/medina-auth-password-authority.test.ts ./src/medina-recovery-form-lifetime.test.ts ./fixtures/partner-company-focus-privacy.test.mjs",
+    "test:auth-startup-browser": "node --import tsx ./fixtures/auth-startup-recovery-browser.test.mjs --startup-recovery-freeze-confirmed",
     "test:video-worker-process": "tsx --test ./src/medina-video-worker-process-sandbox.test.ts",
     "test:telegram-delivery-postgres": "node --test ./fixtures/telegram-delivery-postgres.test.mjs",
     "test:telegram-recipient-native-http": "node --test ./fixtures/telegram-recipient-native-http.test.mjs",

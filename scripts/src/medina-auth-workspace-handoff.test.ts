@@ -13,6 +13,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const ts = createRequire(path.join(root, "package.json"))("typescript") as typeof import("typescript");
 const read = (file: string) => readFile(path.join(root, file), "utf8");
 const source = await read("artifacts/negis/src/contexts/AuthContext.tsx");
+class StaleAuthIntentError extends Error { name = "StaleAuthIntentError"; }
 const signOutSource = await read("artifacts/negis/src/lib/authSignOut.ts");
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 type Element = { type: any; props: Record<string, any> };
@@ -37,7 +38,7 @@ function evaluate(code: string, imports: Record<string, unknown> = {}, bindings:
     }] },
   }).outputText;
   new Script(compiled).runInNewContext({
-    exports, URLSearchParams, Response, AbortController, AbortSignal, DOMException, ...bindings,
+    exports, URLSearchParams, Response, AbortController, AbortSignal, DOMException, setTimeout, clearTimeout, ...bindings,
     require(name: string) {
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "Fragment" };
       assert.ok(name in imports, `Unmocked import: ${name}`);
@@ -238,12 +239,17 @@ function setup(options: Options = {}) {
   };
   let snapshot!: Snapshot;
   let sdkActor = options.initialActor === undefined ? actorA : options.initialActor;
+  let sdkRevision = 0;
+  let sdkIntent = 0;
+  const stamps = new WeakMap<object, { actorId: string | null; revision: number }>();
   let tokenReply: ((expected?: string) => Promise<string>) | undefined;
   let tokenVersion = "initial";
   let dispatchGate: ReturnType<typeof deferred<void>> | undefined;
   const signOutGate = options.deferSignOut ? deferred<void>() : undefined;
   function emit(id: string | null, event = id ? "SIGNED_IN" : "SIGNED_OUT") {
+    if (id !== sdkActor || !["TOKEN_REFRESHED", "USER_UPDATED"].includes(event)) sdkIntent++;
     sdkActor = id;
+    sdkRevision++;
     for (const callback of [...callbacks]) callback(event, localSession(id));
   }
   const sdk = {
@@ -257,16 +263,29 @@ function setup(options: Options = {}) {
   // Synthetic dispatch contract only, not a model of native SDK storage fencing.
   const sessionAuth = {
     onAuthStateChange: sdk.onAuthStateChange,
-    signOut(scope: { isCurrent(): boolean; signal?: AbortSignal }) {
+    capture() {
+      const stamp = Object.freeze({ revision: String(sdkRevision), intent: String(sdkIntent) });
+      stamps.set(stamp, { actorId: sdkActor, revision: sdkRevision });
+      return stamp;
+    },
+    isCurrent(stamp: unknown) {
+      const saved = stamp && typeof stamp === "object" ? stamps.get(stamp) : undefined;
+      return Boolean(saved && saved.actorId === sdkActor && saved.revision === sdkRevision);
+    },
+    signOut(scope: { isCurrent(): boolean; signal?: AbortSignal; expected?: unknown; expectedUserId?: string | null }) {
       assert.equal(typeof scope?.isCurrent, "function", "sessionAuth requires a caller scope");
       assert.equal(scope.isCurrent(), true, "Retired sign-out must not dispatch");
       assert.notEqual(scope.signal?.aborted, true, "Aborted sign-out must not dispatch");
+      if ((scope.expected && !sessionAuth.isCurrent(scope.expected))
+        || (scope.expectedUserId !== undefined && scope.expectedUserId !== sdkActor)) throw new StaleAuthIntentError();
       return sdk.signOut();
     },
   };
   const auth = evaluate(source, {
     react: { ...renderer.hooks, default: renderer.hooks },
-    "@/lib/supabase": { supabase: { auth: sdk }, sessionAuth },
+    // Preserve this legacy fixture's former undefined/offline branch explicitly.
+    "@/lib/supabase": { supabase: { auth: sdk }, sessionAuth, hasSupabaseFrontendEnv: false },
+    "@/lib/authSessionAuthority": { StaleAuthIntentError },
     "@/lib/authSignOut": signOutBoundary,
     "../../../../lib/vertical/terms": terms,
     "../../../../lib/crm/workspace-purpose": purposes,
@@ -563,7 +582,7 @@ const legacyStorage: Record<string, Record<string, string>> = {
   impersonation: { negis_impersonation: JSON.stringify({ active: true, clinic_id: workspaceA,
     clinic_name: "Local impersonation", owner_email: "local@example.test", issued_by: "local-admin" }) },
 };
-for (const [mode, storage] of Object.entries(legacyStorage)) {
+for (const [mode, storage] of Object.entries(legacyStorage).filter(([mode]) => mode !== "impersonation")) {
   for (const restored of [true, false]) test(`handoff refuses ${restored ? "restored" : "newly stored"} ${mode} even with owner hints`, async () => {
     await withFixture(async fixture => {
       if (!restored) {
@@ -578,6 +597,53 @@ for (const [mode, storage] of Object.entries(legacyStorage)) {
     }, restored ? { storage } : {});
   });
 }
+
+for (const restored of [true, false]) for (const role of ["owner", "lead_manager"])
+test(`${restored ? "restored" : "new"} unbound impersonation hint cannot grant or deny a fresh ${role} handoff`, async () => {
+  await withFixture(async fixture => {
+    if (restored) {
+      assert.equal(fixture.snapshot().userRole, null, "stored owner metadata grants nothing before fresh membership");
+      assert.equal(fixture.snapshot().isImpersonation, false);
+    }
+    await confirm(fixture);
+    if (!restored) {
+      for (const [key, value] of Object.entries(legacyStorage.impersonation)) fixture.storage.setItem(key, value);
+    }
+    assert.equal(fixture.snapshot().isImpersonation, false, "unbound cache is not an active delegated session");
+    const before = fixture.requests.length;
+    const outcome = observe(fixture.snapshot().enterWorkspace(workspaceB, entryOptions()));
+    await fixture.renderer.flush();
+    assert.equal(fixture.requests.length, before + 1, "only fresh server authority decides the target role");
+    assert.equal(outcome.settled, false);
+    assertUnselected(fixture);
+    await fixture.respond(fixture.request(), success([target({ role })]));
+    const accepted = await settleObserved(fixture, outcome, role === "owner" ? undefined : 403);
+    if (role === "owner") {
+      assert.equal(accepted, true);
+      assert.equal(fixture.snapshot().clinicId, workspaceB);
+      assert.equal(fixture.snapshot().userRole, "owner");
+      assert.equal(fixture.snapshot().isImpersonation, false);
+      assert.deepEqual(fixture.locations, ["/dashboard"]);
+    } else {
+      assertUnselected(fixture);
+      assert.deepEqual(fixture.locations, []);
+    }
+  }, restored ? { storage: legacyStorage.impersonation } : {});
+});
+
+test("freshly confirmed actor-bound impersonation still refuses another workspace handoff", async () => {
+  const hint = JSON.parse(legacyStorage.impersonation.negis_impersonation);
+  await withFixture(async fixture => {
+    assert.equal(fixture.snapshot().isImpersonation, false);
+    await confirm(fixture);
+    assert.equal(fixture.snapshot().isImpersonation, true);
+    const before = effects(fixture), requests = fixture.requests.length, tokens = fixture.tokenCalls.length;
+    assert.equal(await settle(fixture, fixture.snapshot().enterWorkspace(workspaceB, entryOptions())), false);
+    assert.deepEqual(effects(fixture), before);
+    assert.equal(fixture.requests.length, requests);
+    assert.equal(fixture.tokenCalls.length, tokens);
+  }, { storage: { negis_impersonation: JSON.stringify({ ...hint, auth_user_id: actorA }) } });
+});
 
 test("a signed-out provider cannot enter a workspace using SDK metadata or a selector", async () => {
   await withFixture(async fixture => {

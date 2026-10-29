@@ -1,6 +1,7 @@
-import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Session, User } from '@supabase/supabase-js';
-import { supabase, sessionAuth } from '@/lib/supabase';
+import { supabase, sessionAuth, hasSupabaseFrontendEnv } from '@/lib/supabase';
+import { StaleAuthIntentError, type AuthStamp } from '@/lib/authSessionAuthority';
 import { DEFAULT_VERTICAL, readVertical, type Vertical } from '../../../../lib/vertical/terms';
 import { isWorkspacePurpose, type WorkspacePurpose } from '../../../../lib/crm/workspace-purpose';
 import { useLocation } from 'wouter';
@@ -18,7 +19,15 @@ interface ImpersonationData {
   clinic_name: string;
   owner_email: string;
   issued_by: string;
+  auth_user_id?: string;
 }
+
+type StartupLifetime = {
+  active: boolean; provider: object; controller: AbortController; stamp: AuthStamp;
+  signOutRevision: number; transitioning: boolean; phase: 'bootstrap' | 'verify' | 'exchange' | 'finished';
+  path: string;
+  exchangeEmail?: string;
+};
 
 interface DemoWorkspaceData {
   id: string;
@@ -191,8 +200,11 @@ function loadStoredImpersonation(): ImpersonationData | null {
   try {
     const raw = localStorage.getItem(IMP_KEY);
     if (!raw) return null;
-    const d: ImpersonationData = JSON.parse(raw);
-    return d.active && d.clinic_id ? d : null;
+    const d: unknown = JSON.parse(raw);
+    if (!d || typeof d !== 'object' || Array.isArray(d)) return null;
+    const value = d as Record<string, unknown>;
+    return value.active === true && ['clinic_id', 'owner_email', 'auth_user_id'].every(key => typeof value[key] === 'string' && value[key].trim())
+      && typeof value.clinic_name === 'string' && typeof value.issued_by === 'string' ? value as unknown as ImpersonationData : null;
   } catch {
     return null;
   }
@@ -221,6 +233,7 @@ function loadStoredDemoAuth(): DemoAuthData | null {
 }
 
 function loadStoredStaffAuth(): StaffAuthData | null {
+  if (hasSupabaseFrontendEnv) return null;
   const session = readJson<StaffSessionData>(STAFF_SESSION_KEY);
   const user = readJson<StaffUserData>(STAFF_USER_KEY);
 
@@ -330,6 +343,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const workspaceReadOwner = useRef({}).current;
   const workspaceIntentRef = useRef<{ actorId: string; workspaceId: string | null; blocked: boolean } | null>(null);
   const mountedRef = useRef(true);
+  const providerLifetimeRef = useRef<object | null>(null);
+  const startupRef = useRef<StartupLifetime | null>(null);
+  const sdkSetupRevisionRef = useRef(0);
   const signOutRequestRef = useRef<Promise<void> | null>(null);
   const profileContextRef = useRef({ userId: user?.id, sessionUserId: session?.user.id,
     isImpersonation, isDemoMode, isSigningOut });
@@ -342,12 +358,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const subscriptionRef = useRef<{ unsubscribe: () => void } | null>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const provider = {};
+    providerLifetimeRef.current = provider;
+    signOutRequestRef.current = null;
     mountedRef.current = true;
+    beginAuthResolution(null);
+    setSession(null); setUser(null); setIsLoading(true);
     bindWorkspaceReadScope(workspaceReadOwner, null);
-    void initAuth();
+    let startup: StartupLifetime | null = null;
+    try {
+      startup = { active: true, provider, controller: new AbortController(), stamp: sessionAuth.capture(),
+        signOutRevision: getSignOutRevision(), transitioning: false, phase: 'bootstrap', path: window.location.pathname };
+      startupRef.current = startup;
+      void initAuth(startup);
+    } catch {
+      setIsLoading(false);
+      toast.error('Не удалось проверить вход. Обновите страницу.');
+    }
     return () => {
       mountedRef.current = false;
+      providerLifetimeRef.current = null;
+      if (startup) { startup.active = false; startup.controller.abort(); }
+      if (startupRef.current === startup) startupRef.current = null;
       authRevisionRef.current += 1;
       clearWorkspaceReadScope(workspaceReadOwner);
       subscriptionRef.current?.unsubscribe();
@@ -372,7 +405,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         && isCurrentAuthResolution(subject, revision) && userRef.current?.id === subject
         && context.userId === subject && context.sessionUserId === subject
         && !context.isImpersonation && !context.isDemoMode && !context.isSigningOut
-        && !loadStoredImpersonation() && !loadStoredDemoAuth() && callerIsCurrent();
+        && !loadStoredDemoAuth() && callerIsCurrent();
     };
     if (!canApply()) return;
     setUser(previous => {
@@ -423,20 +456,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setIsLoading(Boolean(nextUser));
     }
     return revision;
-  };
-
-  /** Apply stored impersonation state to React state (idempotent). */
-  const applyImpersonationState = (d: ImpersonationData) => {
-    bindWorkspaceReadScope(workspaceReadOwner, d.clinic_id);
-    setIsImpersonation(true);
-    setIsDemoMode(false);
-    setIsStaffMode(false);
-    setClinicId(d.clinic_id);
-    setImpersonationClinicName(d.clinic_name);
-    setUserRole('owner');
-    setRolePermissions(ALL_PERMISSIONS);
-    setVertical(DEFAULT_VERTICAL);
-    setWorkspacePurpose('clinic_services');
   };
 
   const applyDemoWorkspaceState = (d: DemoAuthData) => {
@@ -637,6 +656,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
     membershipsRef.current = memberships;
     const intent = workspaceIntentRef.current?.actorId === supabaseUser.id ? workspaceIntentRef.current : null;
+    const hint = loadStoredImpersonation();
+    const impersonationTarget = hint?.auth_user_id === supabaseUser.id
+      && hint.owner_email?.trim().toLowerCase() === supabaseUser.email?.trim().toLowerCase()
+      ? memberships.find(entry => entry.workspaceId === hint.clinic_id && entry.role === 'owner') ?? null : null;
     if (intent?.blocked) {
       setAvailableWorkspaces(toWorkspaceChoices(memberships));
       rememberSelector(null);
@@ -671,10 +694,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     })();
 
-    const selected = intent
+    const selected = impersonationTarget ?? (intent
       ? memberships.find((entry) => entry.workspaceId === intent.workspaceId) ?? null
       : memberships.find((entry) => entry.workspaceId === storedSelector) ||
-      (memberships.length === 1 ? memberships[0] : null);
+      (memberships.length === 1 ? memberships[0] : null));
 
     if (!selected) {
       // Several memberships and no valid stored choice: the server does not pick
@@ -687,6 +710,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     applyMembership(supabaseUser, selected, memberships);
+    if (impersonationTarget) {
+      // Stored metadata labels a freshly verified owner entry; it grants no role.
+      setIsImpersonation(true);
+      setImpersonationClinicName(selected.workspaceName);
+    }
     return true;
   };
 
@@ -744,7 +772,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           && authIdentityRef.current === subject && userRef.current?.id === subject
           && context.userId === subject && context.sessionUserId === subject
           && !context.isImpersonation && !context.isDemoMode && !context.isSigningOut
-          && !loadStoredImpersonation() && !loadStoredDemoAuth() && !loadStoredStaffAuth();
+          && !loadStoredDemoAuth() && !loadStoredStaffAuth();
       } catch { return false; }
     };
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(workspaceId) || !sameSubject()) return false;
@@ -822,9 +850,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   /* ── 1. Init ──────────────────────────────────────────── */
-  const initAuth = async () => {
+  const providerCurrent = (provider: object | null) => Boolean(provider && mountedRef.current && providerLifetimeRef.current === provider);
+  const startupAlive = (scope: StartupLifetime) => providerCurrent(scope.provider) && startupRef.current === scope
+    && scope.active && !scope.controller.signal.aborted && !isSignOutPending()
+    && scope.signOutRevision === getSignOutRevision() && window.location.pathname === scope.path;
+  const startupCurrent = (scope: StartupLifetime) => startupAlive(scope) && sessionAuth.isCurrent(scope.stamp);
+  const finishAuthLoading = () => setIsLoading(Boolean(startupRef.current?.active && startupRef.current.transitioning));
+
+  const initAuth = async (scope: StartupLifetime) => {
     if (isSignOutPending()) {
-      await signOut();
+      await signOut(true);
       return;
     }
     const params = new URLSearchParams(window.location.search);
@@ -843,82 +878,83 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
      * deployment at all; this closes the consuming half. */
     const devAccessToken  = import.meta.env.DEV ? params.get('dev_access_token') : null;
     const devRefreshToken = import.meta.env.DEV ? params.get('dev_refresh_token') : null;
-    if (devAccessToken && devRefreshToken) {
-      cleanUrl();
-      const { error } = await supabase.auth.setSession({
-        access_token:  devAccessToken,
-        refresh_token: devRefreshToken,
-      });
-      if (error) {
-        toast.error('Тестовый вход не удался: ' + error.message);
+    scope.transitioning = Boolean(token || (devAccessToken && devRefreshToken));
+    if (token || testHash || params.has('dev_access_token') || params.has('dev_refresh_token')) cleanUrl();
+    const deadline = scope.transitioning ? setTimeout(() => {
+      if (startupRef.current !== scope || !providerCurrent(scope.provider)) return;
+      scope.active = false; scope.transitioning = false; scope.controller.abort(); startupRef.current = null;
+      if (!isSignOutPending()) {
+        toast.error('Проверка входа не завершилась. Повторите вход из панели управления.');
+        void setupSupabaseAuth(scope.provider);
       }
-      /* Session established via SDK — setupSupabaseAuth will pick it up */
-      await setupSupabaseAuth();
-      return;
+    }, 30_000) : undefined;
+    try {
+      if (!scope.transitioning) {
+        const staffAuth = loadStoredStaffAuth();
+        if (staffAuth) { applyStaffWorkspaceState(staffAuth); setIsLoading(false); return; }
+        const demoAuth = loadStoredDemoAuth();
+        if (demoAuth) { applyDemoWorkspaceState(demoAuth); setIsLoading(false); return; }
+      }
+      await setupSupabaseAuth(scope.provider);
+      if (!startupCurrent(scope)) return;
+      scope.phase = 'verify';
+      if (devAccessToken && devRefreshToken) {
+        let receipt: AuthStamp | null = null;
+        const { error } = await sessionAuth.setSession({ access_token: devAccessToken, refresh_token: devRefreshToken }, {
+          expected: scope.stamp, isCurrent: () => startupAlive(scope), signal: scope.controller.signal,
+          onReceipt: value => { receipt = value; },
+        });
+        if (!providerCurrent(scope.provider) || startupRef.current !== scope || !receipt || !sessionAuth.isCurrent(receipt)) return;
+        scope.stamp = receipt;
+        if (error) toast.error('Тестовый вход не удался. Повторите вход.');
+      } else if (token) await handleImpersonationToken(token, scope);
+    } catch {
+      if (startupCurrent(scope)) toast.error('Не удалось проверить вход. Повторите попытку.');
+    } finally {
+      clearTimeout(deadline);
+      if (startupRef.current === scope) {
+        const transitioning = scope.transitioning;
+        scope.active = false; scope.transitioning = false; scope.phase = 'finished'; scope.controller.abort();
+        startupRef.current = null;
+        if (transitioning && providerCurrent(scope.provider) && !isSignOutPending()) await setupSupabaseAuth(scope.provider);
+      }
     }
-
-    /* B) Fresh impersonation via URL token */
-    if (token) {
-      await handleImpersonationToken(token);
-      return;
-    }
-
-    /* C) Restore existing impersonation session (page refresh) */
-    const stored = loadStoredImpersonation();
-    if (stored) {
-      applyImpersonationState(stored);
-      /* Also restore the real Supabase session so RLS works */
-      await setupSupabaseAuth();
-      return;
-    }
-
-    const staffAuth = loadStoredStaffAuth();
-    if (staffAuth) {
-      applyStaffWorkspaceState(staffAuth);
-      setIsLoading(false);
-      return;
-    }
-
-    const demoAuth = loadStoredDemoAuth();
-    if (demoAuth) {
-      applyDemoWorkspaceState(demoAuth);
-      setIsLoading(false);
-      return;
-    }
-
-    /* D) Normal Supabase auth */
-    await setupSupabaseAuth();
   };
 
   /* ── 2. Supabase subscription setup ───────────────────── */
-  const setupSupabaseAuth = async () => {
+  const setupSupabaseAuth = async (provider = providerLifetimeRef.current) => {
+    if (!providerCurrent(provider)) return;
+    const setupRevision = ++sdkSetupRevisionRef.current;
+    authRevisionRef.current++;
     /* Set up the persistent listener FIRST so we don't miss events */
     subscriptionRef.current?.unsubscribe();
     const { data: { subscription } } = sessionAuth.onAuthStateChange((_event, sess) => {
-      if (!mountedRef.current || isSignOutPending()) return;
+      if (!providerCurrent(provider) || setupRevision !== sdkSetupRevisionRef.current || isSignOutPending()) return;
+      const startup = startupRef.current;
+      if (_event === 'TOKEN_REFRESHED' && startup?.phase === 'bootstrap') {
+        const stamp = sessionAuth.capture();
+        if (stamp.intent === startup.stamp.intent) startup.stamp = stamp;
+      }
+      if (startup && ((!sessionAuth.isCurrent(startup.stamp) && startup.phase !== 'exchange')
+        || (startup.phase === 'exchange' && startup.exchangeEmail
+          && sess?.user.email?.trim().toLowerCase() !== startup.exchangeEmail))) {
+        startup.active = false; startup.transitioning = false; startup.controller.abort(); startupRef.current = null;
+      }
       const revision = beginAuthResolution(sess?.user ?? null);
       setSession(sess);
       setUser(sess?.user ?? null);
 
-      /* If impersonation is active, keep its context (skip normal role fetch) */
-      const imp = loadStoredImpersonation();
-      if (imp) {
-        applyImpersonationState(imp);
-        setIsLoading(false);
-        return;
-      }
-
       const staffAuth = loadStoredStaffAuth();
       if (staffAuth) {
         applyStaffWorkspaceState(staffAuth, sess?.user ?? null);
-        setIsLoading(false);
+        finishAuthLoading();
         return;
       }
 
       const demoAuth = loadStoredDemoAuth();
       if (demoAuth) {
         applyDemoWorkspaceState(demoAuth);
-        setIsLoading(false);
+        finishAuthLoading();
         return;
       }
 
@@ -927,7 +963,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const handledAsStaff = await tryApplySupabaseStaffUser(sess.user, revision);
           if (!isCurrentAuthResolution(sess.user.id, revision)) return;
           if (handledAsStaff) {
-            setIsLoading(false);
+            finishAuthLoading();
             return;
           }
           applyNoWorkspaceAccess();
@@ -936,38 +972,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setClinicId(null);
         setUserRole(null);
         setRolePermissions({});
-        setIsLoading(false);
+        finishAuthLoading();
       }
     });
     subscriptionRef.current = subscription;
 
     /* Then check the current session */
     const initialRevision = authRevisionRef.current;
-    const { data: { session: sess } } = await supabase.auth.getSession();
-    if (!mountedRef.current || authRevisionRef.current !== initialRevision) return;
+    let sess: Session | null;
+    try {
+      const { data, error } = await supabase.auth.getSession();
+      if (error) throw error;
+      sess = data.session;
+    } catch {
+      if (providerCurrent(provider) && setupRevision === sdkSetupRevisionRef.current && authRevisionRef.current === initialRevision) {
+        beginAuthResolution(null); setSession(null); setUser(null); finishAuthLoading();
+      }
+      return;
+    }
+    if (!providerCurrent(provider) || setupRevision !== sdkSetupRevisionRef.current || authRevisionRef.current !== initialRevision) return;
     const revision = beginAuthResolution(sess?.user ?? null);
     setSession(sess);
     setUser(sess?.user ?? null);
 
-    const imp = loadStoredImpersonation();
-    if (imp) {
-      /* Session may or may not be present — either way, use impersonation data */
-      applyImpersonationState(imp);
-      setIsLoading(false);
-      return;
-    }
-
     const staffAuth = loadStoredStaffAuth();
     if (staffAuth) {
       applyStaffWorkspaceState(staffAuth, sess?.user ?? null);
-      setIsLoading(false);
+      finishAuthLoading();
       return;
     }
 
     const demoAuth = loadStoredDemoAuth();
     if (demoAuth) {
       applyDemoWorkspaceState(demoAuth);
-      setIsLoading(false);
+      finishAuthLoading();
       return;
     }
 
@@ -975,101 +1013,85 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const handledAsStaff = await tryApplySupabaseStaffUser(sess.user, revision);
       if (!isCurrentAuthResolution(sess.user.id, revision)) return;
       if (handledAsStaff) {
-        setIsLoading(false);
+        finishAuthLoading();
         return;
       }
       applyNoWorkspaceAccess();
     } else {
-      setIsLoading(false);
+      finishAuthLoading();
     }
   };
 
   /* ── 3. Handle fresh impersonation token from URL ─────── */
-  const handleImpersonationToken = async (token: string) => {
+  const handleImpersonationToken = async (token: string, scope: StartupLifetime) => {
     const controlApiUrl =
       (import.meta.env.VITE_NEGIS_CONTROL_API_URL as string | undefined)
       || 'https://admin.negis.online';
 
     try {
-      /* Step 1: verify with Negis Control */
-      let verifyRes: Response;
-      try {
-        verifyRes = await fetch(`${controlApiUrl}/api/impersonation/verify`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token }),
-        });
-      } catch {
-        cleanUrl();
-        toast.error('Не удалось проверить доступ через Medina OS');
-        await setupSupabaseAuth();
-        return;
-      }
+      if (!startupCurrent(scope)) return;
+      const verifyRes = await fetch(`${controlApiUrl}/api/impersonation/verify`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }),
+        signal: scope.controller.signal, redirect: 'error', credentials: 'omit', cache: 'no-store',
+      });
+      if (!startupCurrent(scope)) return;
 
       if (verifyRes.status === 401 || verifyRes.status === 403) throw new Error('expired_token');
       if (!verifyRes.ok) throw new Error('invalid_token');
 
-      const data: {
-        clinicId: string;
-        clinicName: string;
-        ownerEmail: string;
-        issuedBy: string;
-      } = await verifyRes.json();
+      const value: unknown = await verifyRes.json();
+      if (!startupCurrent(scope)) return;
+      if (!value || typeof value !== 'object') throw new Error('invalid_token');
+      const data = value as Record<string, unknown>;
+      if (typeof data.clinicId !== 'string' || !data.clinicId.trim() || typeof data.ownerEmail !== 'string'
+        || !data.ownerEmail.trim() || typeof data.clinicName !== 'string' || typeof data.issuedBy !== 'string') throw new Error('invalid_token');
+      const clinicId = data.clinicId.trim(), ownerEmail = data.ownerEmail.trim().toLowerCase();
 
-      /* Step 2: persist impersonation metadata */
-      const impData: ImpersonationData = {
-        active:      true,
-        clinic_id:   data.clinicId,
-        clinic_name: data.clinicName,
-        owner_email: data.ownerEmail,
-        issued_by:   data.issuedBy,
-      };
-      localStorage.setItem(IMP_KEY,    JSON.stringify(impData));
+      const sessionRes = await fetch(apiUrl('/api/impersonation/session'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ impersonateToken: token, ownerEmail: data.ownerEmail }),
+        signal: scope.controller.signal, redirect: 'error', credentials: 'omit', cache: 'no-store',
+      });
+      if (!startupCurrent(scope)) return;
+      if (!sessionRes.ok) throw new Error('invalid_session');
+      const sessionBody: unknown = await sessionRes.json();
+      if (!startupCurrent(scope)) return;
+      const tokenHash = sessionBody && typeof sessionBody === 'object' && 'tokenHash' in sessionBody ? sessionBody.tokenHash : null;
+      if (typeof tokenHash !== 'string' || !tokenHash) throw new Error('invalid_session');
 
-      /* Step 3: apply UI state */
-      applyImpersonationState(impData);
-      cleanUrl();
+      scope.phase = 'exchange';
+      scope.exchangeEmail = ownerEmail;
+      let receipt: AuthStamp | null = null;
+      const result = await sessionAuth.verifyOtp({ token_hash: tokenHash, type: 'email' }, {
+        expected: scope.stamp, isCurrent: () => startupAlive(scope), signal: scope.controller.signal,
+        onReceipt: stamp => { receipt = stamp; },
+      });
+      if (!providerCurrent(scope.provider) || startupRef.current !== scope || !scope.active
+        || isSignOutPending() || scope.signOutRevision !== getSignOutRevision() || !receipt || !sessionAuth.isCurrent(receipt)) return;
+      scope.stamp = receipt;
+      if (!startupCurrent(scope)) return;
+      const exchanged = result.data.session;
+      if (result.error || !exchanged || exchanged.user.email?.trim().toLowerCase() !== ownerEmail) throw new Error('invalid_session');
+      const { data: live, error } = await supabase.auth.getSession();
+      if (!startupCurrent(scope)) return;
+      if (error || live.session?.user.id !== exchanged.user.id || live.session.access_token !== exchanged.access_token) throw new Error('invalid_session');
 
-      /* Step 4: obtain a real Supabase session from the API server
-         so that Supabase RLS policies work exactly like normal login. */
-      try {
-        const sessionRes = await fetch(apiUrl('/api/impersonation/session'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            impersonateToken: token,
-            ownerEmail: data.ownerEmail,
-          }),
-        });
-
-        if (sessionRes.ok) {
-          const { tokenHash } = await sessionRes.json() as { tokenHash?: string };
-          if (tokenHash) {
-            /* Exchange the magic-link hash for a real access/refresh token pair */
-            await supabase.auth.verifyOtp({ token_hash: tokenHash, type: 'email' });
-          }
-        }
-      } catch {
-        /* Non-fatal: banner + clinic_id still work, but RLS queries will be empty */
-        toast.warning('Сессия загружена частично — обновите страницу если данные не отображаются');
-      }
-
-      /* Step 5: set up the Supabase subscription (respects impersonation) */
-      await setupSupabaseAuth();
-
-      setIsLoading(false);
+      const revision = beginAuthResolution(exchanged.user);
+      const access = await fetchAuthContext(exchanged.user.id, revision, { signal: scope.controller.signal, isCurrent: () => startupCurrent(scope) });
+      if (!startupCurrent(scope) || !isCurrentAuthResolution(exchanged.user.id, revision)) return;
+      const owner = access.memberships.find(entry => entry.workspaceId === clinicId && entry.role === 'owner');
+      if (access.sessionChanged || access.status !== 200 || !owner) throw new Error('invalid_membership');
+      const hint: ImpersonationData = { active: true, auth_user_id: exchanged.user.id, clinic_id: owner.workspaceId,
+        clinic_name: owner.workspaceName, owner_email: ownerEmail, issued_by: data.issuedBy };
+      localStorage.setItem(IMP_KEY, JSON.stringify(hint));
       setLocation('/dashboard');
-    } catch (err: any) {
-      cleanUrl();
-      clearAuthStorage();
+    } catch (err) {
+      if (!startupCurrent(scope)) return;
       toast.error(
-        err?.message === 'expired_token'
+        err instanceof Error && err.message === 'expired_token'
           ? 'Доступ по ссылке истёк. Войдите снова из Medina OS.'
           : 'Не удалось проверить доступ через Medina OS.',
       );
-      await setupSupabaseAuth();
-      setIsLoading(false);
-      setLocation('/');
     }
   };
 
@@ -1092,8 +1114,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setVertical(DEFAULT_VERTICAL);
     setWorkspacePurpose(null);
     setIsStaffMode(false);
-    setIsLoading(false);
-    if (!notifyUnlinked) return;
+    finishAuthLoading();
+    if (!notifyUnlinked || startupRef.current?.transitioning) return;
     // Selection-1: a user with several memberships is not unlinked, they have
     // not chosen yet. Telling them to call their administrator sent them to
     // someone who could not have helped.
@@ -1109,7 +1131,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       } catch {
         // Нет хранилища — судим только по адресу.
       }
-      if (path.includes('/join') || path === '/operator' || path === '/contributors' || path === '/partner-company' || /^\/r\/[^/?#\\\s]+\/?$/.test(path) || pendingInvite) return;
+      if (path.includes('/join') || path === '/reset-password' || path === '/operator' || path === '/contributors' || path === '/partner-company' || /^\/r\/[^/?#\\\s]+\/?$/.test(path) || pendingInvite) return;
     }
     toast.error(
       'Аккаунт не привязан к клинике. Если вам присылали ссылку-приглашение — откройте её ещё раз; если нет — попросите администратора клиники выслать приглашение.',
@@ -1117,12 +1139,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   /* ── 5. Sign out ──────────────────────────────────────── */
-  const signOut = (): Promise<void> => {
+  const signOut = (restorePending = false): Promise<void> => {
     if (signOutRequestRef.current) return signOutRequestRef.current;
+    if (restorePending !== true && (!mountedRef.current || profileSubjectRevisionRef.current !== profileSubjectRevision)) return Promise.resolve();
+    const subject = userRef.current?.id ?? null;
+    let expected: AuthStamp | undefined, captureError: unknown;
+    try { expected = sessionAuth.capture(); } catch (error) { captureError = error; }
+    const startup = startupRef.current;
+    if (startup) { startup.active = false; startup.transitioning = false; startup.controller.abort(); startupRef.current = null; }
+    const provider = providerLifetimeRef.current;
     const recovering = isSignOutPending();
     markSignOutPending();
     const signOutRevision = getSignOutRevision();
-    const ownsSignOut = () => getSignOutRevision() === signOutRevision;
+    const ownsSignOut = () => providerCurrent(provider) && getSignOutRevision() === signOutRevision;
+    sdkSetupRevisionRef.current++;
+    subscriptionRef.current?.unsubscribe(); subscriptionRef.current = null;
     beginAuthResolution(null);
     setIsSigningOut(true);
     setSignOutFailed(false);
@@ -1137,8 +1168,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const request = Promise.resolve().then(async () => {
       try {
         if (!ownsSignOut()) return;
+        if (captureError) throw captureError;
         if (!isDemoMode) {
-          const { error } = await sessionAuth.signOut({ isCurrent: ownsSignOut });
+          const { error } = await sessionAuth.signOut({ expected, ...(!recovering || subject ? { expectedUserId: subject } : {}), isCurrent: ownsSignOut });
           // A remounted provider may already own a newer exit. This response
           // must not clear its marker or publish an old completion/error.
           if (!ownsSignOut()) return;
@@ -1155,10 +1187,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // Recovery after a reload ends the stored SDK session before starting
         // the subscription; subsequent sign-ins must still be observed.
         if (!isDemoMode && !subscriptionRef.current) await setupSupabaseAuth();
-      } catch {
+      } catch (error) {
+        if (ownsSignOut() && error instanceof StaleAuthIntentError && clearSignOutPending()) {
+          setIsSigningOut(false); setSignOutFailed(false);
+          await setupSupabaseAuth(provider);
+          return;
+        }
         if (mountedRef.current && ownsSignOut()) setSignOutFailed(true);
       } finally {
-        signOutRequestRef.current = null;
+        if (signOutRequestRef.current === request) signOutRequestRef.current = null;
       }
     });
     signOutRequestRef.current = request;

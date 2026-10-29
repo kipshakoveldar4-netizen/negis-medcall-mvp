@@ -8,6 +8,7 @@
   },
   "include": [
     "src/medina-auth-mutation-entry.test.ts",
-    "src/medina-auth-mutation-session.test.ts"
+    "src/medina-auth-mutation-session.test.ts",
+    "src/medina-auth-password-authority.test.ts"
   ]
 }

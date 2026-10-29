@@ -73,6 +73,8 @@ const lists: Record<string, unknown[]> = {
 const keys: Record<string, string> = { "clinic-doctors": "doctors", "clinic-services": "services", "doctor-shifts": "shifts" };
 export const hasSupabaseFrontendEnv = true;
 export const arrivedByRecoveryLink = false;
+export const getRecoverySessionProof = (): null => null;
+export const consumeRecoverySessionProof = (_id: string): void => {};
 export const supabase = { auth: {
   getSession: async () => advertisingDemoFixture ? advertisingDemoFixture.getSession() : contentStudioFixture ? contentStudioFixture.getSession()
     : ({ data: { session: appointmentCreateFixture ? appointmentCreateFixture.session() : ["/admin", "/operator"].includes(window.location.pathname)
@@ -92,6 +94,7 @@ function currentScope(scope: { isCurrent(): boolean; signal?: AbortSignal }) {
 }
 export const sessionAuth = {
   onAuthStateChange: supabase.auth.onAuthStateChange,
+  updateUserPassword() { throw Error("Password recovery is forbidden in the CRM fixture"); },
   signInWithPassword(_credentials: unknown, scope: Parameters<typeof currentScope>[0]) {
     currentScope(scope); return supabase.auth.signInWithPassword();
   },

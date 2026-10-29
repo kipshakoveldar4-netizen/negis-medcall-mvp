@@ -71,7 +71,7 @@ function deferred<T>() {
   const promise = new Promise<T>((yes) => { resolve = yes; });
   return { promise, resolve };
 }
-type Pending = { method: string; url: string; body: unknown; headers: Headers; jsonReads: number; claimed: boolean;
+type Pending = { method: string; url: string; body: unknown; headers: Headers; signal?: AbortSignal | null; jsonReads: number; claimed: boolean;
   respond(status: number, body: unknown | Promise<unknown>): void };
 async function fixture(t: TestContext, options: { clinic?: boolean; status?: "requested" | "accepted"; guarded?: boolean } = {}) {
   const driver = hookDriver();
@@ -96,7 +96,7 @@ async function fixture(t: TestContext, options: { clinic?: boolean; status?: "re
         assert.equal(init.cache, "no-store");
         const response = deferred<unknown>();
         const pending: Pending = { url, method: init.method ?? "GET", body: init.body ? JSON.parse(String(init.body)) : undefined,
-          headers: new Headers(init.headers), jsonReads: 0, claimed: false,
+          headers: new Headers(init.headers), signal: init.signal, jsonReads: 0, claimed: false,
           respond(status, body) {
             const payload = body as {success?:boolean;data?:unknown};
             if (status === 200 && payload?.success === true && !Object.hasOwn(payload,"data") && pending.method === "PATCH") {
@@ -181,7 +181,25 @@ async function fixture(t: TestContext, options: { clinic?: boolean; status?: "re
     async start() { (action().props.onClick as () => void)(); await driver.flush(); return take("PATCH"); },
     silentActor(value: string | null) { if (actor !== value) epoch++; actor = value; },
     async renderActor(value: string) { actor = value; props = { ...props, actorId: value }; driver.invalidate(); await driver.flush(); },
-    async reload(label = "fresh") { refresh(); await driver.flush(); take("GET").respond(200, list(label)); await driver.flush(); await open(); },
+    async reload(label = "fresh") {
+      // A rendered actor change already starts a read. A manual refresh retires
+      // it; answering only that old read leaves the current one unresolved.
+      const previous = requests.filter(item => item.method === "GET" && !item.claimed);
+      refresh(); await driver.flush();
+      for (const old of previous) {
+        assert.equal(old.signal?.aborted, true, "refresh must retire the preceding actor/list read");
+        old.claimed = true; old.respond(200, list(`retired-${label}`));
+      }
+      if (previous.length) {
+        await driver.flush();
+        assert.equal(driver.nodes().filter(node => node.type === "article").length, 0,
+          "the retired list cannot repopulate the replacement actor's cards");
+      }
+      assert.equal(requests.filter(item => item.method === "GET" && !item.claimed).length, 1);
+      take("GET").respond(200, list(label)); await driver.flush(); await open();
+      assert.ok(driver.nodes().some(node => node.type === "h3" && text(node.props.children) === `Synthetic ${label}`),
+        "the fresh list, not its retired predecessor, must be visible");
+    },
     snapshot() { return { content: driver.nodes().filter((node) => ["p", "h3"].includes(String(node.type))).map((node) => text(node.props.children)),
       cards: driver.nodes().filter((node) => node.type === "article").length,
       nested: driver.nodes().filter((node) => Object.values(boundaries).includes(node.type as symbol)).length,

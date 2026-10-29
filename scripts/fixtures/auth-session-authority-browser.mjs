@@ -203,7 +203,7 @@ const f={ids,view:{isCurrentMutationScope:()=>true},run:crypto.randomUUID(),
   async shutdown(){await this.closeChild();this.unmount();watcher?.disconnect();this.stopObserving();window.removeEventListener('storage',recordStorage);
     for(const owner of scopes.values()){owner.current=false;owner.controller.abort();}
     let timer;try{await Promise.race([Promise.all(tasks.map(t=>t.promise)),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Controlled tasks did not settle')),7000);})]);}
-    finally{clearTimeout(timer);await supabase.auth.stopAutoRefresh();await supabase.auth.dispose();}
+    finally{clearTimeout(timer);sessionAuth.dispose();await supabase.auth.stopAutoRefresh();await supabase.auth.dispose();}
     return{rootChildren:document.getElementById('root').childElementCount,observerUnsubscribed:!probe,sdkDisposed:true,
       pendingControlledTasks:tasks.filter(t=>!t.done).map(t=>t.name),pendingFetches:window.__authorityNetwork.pending,networkDenied:[...window.__authorityNetwork.denied],
       networkTraffic:[...window.__authorityNetwork.traffic],storageEvents:[...storageEvents],children:closedChildren,childFrames:document.querySelectorAll('#authority-child').length,

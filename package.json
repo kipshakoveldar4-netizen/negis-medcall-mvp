@@ -12,6 +12,8 @@
     "test:portal-auth-entry-browser": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:portal-auth-entry-browser",
     "test:auth-authority": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:auth-authority",
     "test:auth-authority-browser": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:auth-authority-browser",
+    "test:auth-startup": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:auth-startup",
+    "test:auth-startup-browser": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:auth-startup-browser",
     "test:readiness-workflows": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:readiness-workflows",
     "test:site-deletion-operations": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:site-deletion-operations",
     "test:site-deletion-client": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:site-deletion-client",
