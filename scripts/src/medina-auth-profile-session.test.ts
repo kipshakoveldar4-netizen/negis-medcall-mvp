@@ -37,7 +37,7 @@ function evaluate(code: string, imports: Record<string, unknown> = {}, bindings:
     }] },
   }).outputText;
   new Script(compiled).runInNewContext({
-    exports, URLSearchParams, Response, ...bindings,
+    exports, URLSearchParams, Response, AbortController, ...bindings,
     require(name: string) {
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "Fragment" };
       assert.ok(name in imports, `Unmocked import: ${name}`);
@@ -288,6 +288,7 @@ function setup(options: Options = {}) {
   }, {
     localStorage: storage, sessionStorage,
     window: { localStorage: storage, sessionStorage,
+      addEventListener() {}, removeEventListener() {},
       location: { search: "", origin: "https://example.test", pathname: options.pathname ?? "/dashboard" }, history: { replaceState() {} } },
     document: { title: "Local auth fixture" },
     fetch: () => { throw new Error("Network is forbidden in the local AuthProvider fixture"); },
@@ -318,6 +319,15 @@ async function withFixture(run: (fixture: Fixture) => Promise<void>, options: Op
   const fixture = setup(options);
   try { await fixture.renderer.flush(); await run(fixture); }
   finally { fixture.renderer.dispose(); }
+}
+async function choose(fixture: Fixture, workspaceId: string, memberships = [membership(), mortgage()],
+  select = fixture.snapshot().selectWorkspace) {
+  const count = fixture.requests.length;
+  select(workspaceId);
+  await fixture.renderer.flush();
+  assert.equal(fixture.requests.length, count + 1, "Every choice must dispatch a fresh membership check");
+  assert.equal(fixture.snapshot().clinicId, null, "Cached permissions stay quarantined before the fresh response");
+  await fixture.respond(fixture.requests[count], success(memberships));
 }
 async function confirm(fixture: Fixture, memberships = [membership()]) {
   await fixture.respond(fixture.request(actorA), success(memberships));
@@ -569,14 +579,13 @@ for (const pathname of ["/r/" + "A".repeat(32), "/r/invalid-code", "/r/" + "B".r
 test("publication fence: verified empty membership still warns and removes confirmed permissions, caches and picker refs", async () => {
   await withFixture(async (fixture) => {
     await confirm(fixture, [membership(), mortgage()]);
-    fixture.snapshot().selectWorkspace(workspaceA);
-    await fixture.renderer.flush();
+    await choose(fixture, workspaceA);
     const oldSelect = fixture.snapshot().selectWorkspace;
     fixture.seedCaches();
     const clearStart = fixture.cacheClears.length;
     fixture.emit(actorA, "USER_UPDATED");
     await fixture.renderer.flush();
-    await fixture.respond(fixture.request(actorA, 1), success([]));
+    await fixture.respond(fixture.request(actorA, 2), success([]));
     assertUnselected(fixture);
     assertCachesEmpty(fixture, clearStart);
     assert.equal(fixture.snapshot().user?.id, actorA);
@@ -614,14 +623,13 @@ for (const [label, body] of [
   test(`publication fence: malformed successful contract (${label}) denies as profile failure, never unlinked`, async () => {
     await withFixture(async (fixture) => {
       await confirm(fixture, [membership(), mortgage()]);
-      fixture.snapshot().selectWorkspace(workspaceA);
-      await fixture.renderer.flush();
+      await choose(fixture, workspaceA);
       const oldSelect = fixture.snapshot().selectWorkspace;
       fixture.seedCaches();
       const clearStart = fixture.cacheClears.length;
       fixture.emit(actorA, "USER_UPDATED");
       await fixture.renderer.flush();
-      await fixture.respond(fixture.request(actorA, 1), body);
+      await fixture.respond(fixture.request(actorA, 2), body);
       assertUnselected(fixture);
       assertCachesEmpty(fixture, clearStart);
       assert.equal(fixture.snapshot().isLoading, false);
@@ -640,14 +648,13 @@ for (const status of [401, 403]) {
   test(`publication fence: live same-account ${status} clears both caches and invalidates old picker refs`, async () => {
     await withFixture(async (fixture) => {
       await confirm(fixture, [membership(), mortgage()]);
-      fixture.snapshot().selectWorkspace(workspaceA);
-      await fixture.renderer.flush();
+      await choose(fixture, workspaceA);
       const oldSelect = fixture.snapshot().selectWorkspace;
       fixture.seedCaches();
       const clearStart = fixture.cacheClears.length;
       fixture.emit(actorA, "USER_UPDATED");
       await fixture.renderer.flush();
-      await fixture.respond(fixture.request(actorA, 1), { success: false }, status);
+      await fixture.respond(fixture.request(actorA, 2), { success: false }, status);
       assertUnselected(fixture);
       assertCachesEmpty(fixture, clearStart);
       assert.equal(fixture.snapshot().isStaffMode, false);
@@ -671,8 +678,7 @@ for (const status of [401, 403]) {
 test("publication fence: live same-account 429 preserves the verified profile, both caches and picker refs", async () => {
   await withFixture(async (fixture) => {
     await confirm(fixture, [membership(), mortgage()]);
-    fixture.snapshot().selectWorkspace(workspaceB);
-    await fixture.renderer.flush();
+    await choose(fixture, workspaceB);
     const oldSelect = fixture.snapshot().selectWorkspace;
     fixture.seedCaches();
     const before = context(fixture);
@@ -682,7 +688,7 @@ test("publication fence: live same-account 429 preserves the verified profile, b
     fixture.emit(actorA, "USER_UPDATED");
     await fixture.renderer.flush();
     assert.deepEqual(context(fixture), before);
-    await fixture.respond(fixture.request(actorA, 1), { success: false }, 429);
+    await fixture.respond(fixture.request(actorA, 2), { success: false }, 429);
     assert.deepEqual(context(fixture), before);
     assert.equal(fixture.cacheClears.length, clearStart);
     assert.deepEqual([...fixture.caches.crm], crmBefore);
@@ -690,8 +696,7 @@ test("publication fence: live same-account 429 preserves the verified profile, b
     assert.equal(fixture.storage.getItem(selectorKey), workspaceB);
     assert.ok(fixture.toasts.length > 0, "rate limiting remains visible without revoking verified access");
     assert.ok(fixture.toasts.every(({ message }) => !message.includes("Аккаунт не привязан")));
-    oldSelect(workspaceA);
-    await fixture.renderer.flush();
+    await choose(fixture, workspaceA, [membership(), mortgage()], oldSelect);
     assert.equal(fixture.snapshot().clinicId, workspaceA);
     assert.equal(fixture.snapshot().userRole, "owner");
     assert.equal(fixture.snapshot().rolePermissions.admin, true);
@@ -734,13 +739,11 @@ test("the user's clinic/mortgage picker swaps purpose, vertical and role and cle
     assertUnselected(fixture, true);
     assert.deepEqual(clone(fixture.snapshot().availableWorkspaces.map((entry) => entry.purpose)), ["clinic_services", "mortgage_leads"]);
     assert.equal(fixture.toasts.length, 0, "a valid multi-workspace picker is not denied access");
-    fixture.snapshot().selectWorkspace(workspaceA);
-    await fixture.renderer.flush();
+    await choose(fixture, workspaceA);
     assert.equal(fixture.snapshot().workspacePurpose, "clinic_services");
     assert.equal(fixture.snapshot().vertical, "beauty");
     assert.equal(fixture.snapshot().userRole, "owner");
-    fixture.snapshot().selectWorkspace(workspaceB);
-    await fixture.renderer.flush();
+    await choose(fixture, workspaceB);
     assert.equal(fixture.snapshot().workspacePurpose, "mortgage_leads");
     assert.equal(fixture.snapshot().vertical, terms.DEFAULT_VERTICAL);
     assert.equal(fixture.snapshot().userRole, "lead_manager");
@@ -749,8 +752,7 @@ test("the user's clinic/mortgage picker swaps purpose, vertical and role and cle
     assert.equal(fixture.snapshot().rolePermissions.ads, false);
     assert.equal(fixture.storage.getItem(selectorKey), workspaceB);
     assert.equal(fixture.locations.at(-1), "/dashboard");
-    fixture.snapshot().selectWorkspace(workspaceA);
-    await fixture.renderer.flush();
+    await choose(fixture, workspaceA);
     assert.equal(fixture.snapshot().workspacePurpose, "clinic_services");
     assert.equal(fixture.snapshot().vertical, "beauty");
     fixture.snapshot().clearWorkspaceSelection();
@@ -759,7 +761,7 @@ test("the user's clinic/mortgage picker swaps purpose, vertical and role and cle
     assert.equal(fixture.storage.getItem(selectorKey), null);
     assert.equal(fixture.snapshot().availableWorkspaces.length, 2);
     assert.equal(fixture.snapshot().user?.id, actorA);
-    assert.equal(fixture.requests.length, 1, "picker selection uses verified memberships, not another bootstrap");
+    assert.equal(fixture.requests.length, 4, "Bootstrap plus three freshly verified selections");
   });
 });
 
@@ -767,8 +769,7 @@ for (const purpose of ["clinic_services", "marketing"] as const) {
   test(`the ${purpose} lead manager picker keeps the leads-only entry route`, async () => {
     await withFixture(async (fixture) => {
       await confirm(fixture, [membership(), { ...mortgage(), purpose }]);
-      fixture.snapshot().selectWorkspace(workspaceB);
-      await fixture.renderer.flush();
+      await choose(fixture, workspaceB, [membership(), { ...mortgage(), purpose }]);
       assert.equal(fixture.snapshot().workspacePurpose, purpose);
       assert.equal(fixture.snapshot().userRole, "lead_manager");
       assert.equal(fixture.snapshot().rolePermissions.admin, false);
@@ -780,8 +781,7 @@ for (const purpose of ["clinic_services", "marketing"] as const) {
 test("a picker cannot apply a workspace outside the current server memberships", async () => {
   await withFixture(async (fixture) => {
     await confirm(fixture, [membership(), mortgage()]);
-    fixture.snapshot().selectWorkspace(workspaceB);
-    await fixture.renderer.flush();
+    await choose(fixture, workspaceB);
     const before = context(fixture);
     const navigations = [...fixture.locations];
     fixture.snapshot().selectWorkspace(unknownWorkspace);
@@ -835,8 +835,7 @@ test("a successful current-account response with missing/invalid purpose cannot 
 test("account A to B clears context, both caches and membership refs synchronously before B token/response", async () => {
   await withFixture(async (fixture) => {
     await confirm(fixture, [membership(), mortgage()]);
-    fixture.snapshot().selectWorkspace(workspaceA);
-    await fixture.renderer.flush();
+    await choose(fixture, workspaceA);
     const oldSelect = fixture.snapshot().selectWorkspace;
     fixture.seedCaches();
     const clearStart = fixture.cacheClears.length;
@@ -849,13 +848,13 @@ test("account A to B clears context, both caches and membership refs synchronous
     assert.equal(fixture.snapshot().user?.id, actorB);
     assert.equal(fixture.snapshot().isLoading, true);
     assert.equal(fixture.snapshot().isStaffMode, false);
-    assert.equal(fixture.requests.length, 1, "B token is still pending");
+    assert.equal(fixture.requests.length, 2, "Bootstrap and verified A selection; B token is still pending");
     oldSelect(workspaceA);
     fixture.renderer.commit();
     assertUnselected(fixture);
     tokenGate.resolve("local-b-gated-token");
     await fixture.renderer.flush();
-    assert.deepEqual(fixture.tokenCalls, [actorA, actorA, actorB], "confirmed A is reverified; B remains gated until its own token arrives");
+    assert.deepEqual(fixture.tokenCalls, [actorA, actorA, actorA, actorA, actorB], "Bootstrap and selection reverify A; B remains gated until its own token arrives");
     assertUnselected(fixture);
     await fixture.respond(fixture.request(actorB), success([mortgage()]));
     assert.equal(fixture.snapshot().workspacePurpose, "mortgage_leads");
@@ -976,11 +975,10 @@ test("SIGNED_OUT invalidates pending bootstrap success and denial without restor
 test("signOut clears the confirmed profile and invalidates rechecks before a pending SDK logout resolves", async () => {
   await withFixture(async (fixture) => {
     await confirm(fixture, [membership(), mortgage()]);
-    fixture.snapshot().selectWorkspace(workspaceB);
-    await fixture.renderer.flush();
+    await choose(fixture, workspaceB);
     fixture.emit(actorA, "USER_UPDATED");
     await fixture.renderer.flush();
-    const recheck = fixture.request(actorA, 1);
+    const recheck = fixture.request(actorA, 2);
     const gate = fixture.holdSignOut();
     fixture.seedCaches();
     const clearStart = fixture.cacheClears.length;
@@ -1188,14 +1186,13 @@ test("a retired logout which has not called the SDK cannot dispatch after a newe
 test("same-account USER_UPDATED plus 503 preserves confirmed role, purpose, choices and both caches", async () => {
   await withFixture(async (fixture) => {
     await confirm(fixture, [membership(), mortgage()]);
-    fixture.snapshot().selectWorkspace(workspaceB);
-    await fixture.renderer.flush();
+    await choose(fixture, workspaceB);
     fixture.seedCaches();
     const before = context(fixture), clearStart = fixture.cacheClears.length;
     fixture.emit(actorA, "USER_UPDATED");
     await fixture.renderer.flush();
     assert.deepEqual(context(fixture), before, "confirmed context remains during the same-user recheck");
-    await fixture.respond(fixture.request(actorA, 1), { success: false }, 503);
+    await fixture.respond(fixture.request(actorA, 2), { success: false }, 503);
     assert.deepEqual(context(fixture), before);
     assert.equal(fixture.caches.crm.size, 1);
     assert.equal(fixture.caches.lists.size, 1);
@@ -1207,8 +1204,7 @@ test("same-account USER_UPDATED plus 503 preserves confirmed role, purpose, choi
 test("new-account 503 cannot inherit A's confirmed role, purpose, choices, refs or cached data", async () => {
   await withFixture(async (fixture) => {
     await confirm(fixture, [membership(), mortgage()]);
-    fixture.snapshot().selectWorkspace(workspaceB);
-    await fixture.renderer.flush();
+    await choose(fixture, workspaceB);
     const oldSelect = fixture.snapshot().selectWorkspace;
     fixture.seedCaches();
     const clearStart = fixture.cacheClears.length;

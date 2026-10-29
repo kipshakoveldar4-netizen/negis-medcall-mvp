@@ -184,6 +184,7 @@ type Snapshot = {
   rolePermissions: Record<string, boolean>; vertical: string; workspacePurpose: string | null;
   availableWorkspaces: { id: string; name: string; role: string; vertical: string; purpose: string }[];
   isLoading: boolean; isStaffMode: boolean; isDemoMode: boolean; isImpersonation: boolean; isSigningOut: boolean;
+  workspaceSelectionFailed: boolean;
   enterWorkspace(id: string, options: EntryOptions): Promise<boolean>;
   selectWorkspace(id: string): void; clearWorkspaceSelection(): void; signOut(): Promise<void>;
 };
@@ -208,6 +209,33 @@ function setup(options: Options = {}) {
   const tokenCalls: (string | undefined)[] = [], locations: string[] = [], toasts: unknown[] = [];
   const caches = { crm: new Map<string, unknown>(), lists: new Map<string, unknown>() };
   const readScopes: { kind: "bind" | "clear"; args: unknown[] }[] = [];
+  const listeners = new Map<string, Set<(event: Event) => void>>();
+  const location = { search: "", hash: "", origin: "https://example.test", pathname: "/partner-company",
+    href: "https://example.test/partner-company" };
+  function updateLocation(url?: string | URL | null) {
+    if (url == null) return;
+    const next = new URL(String(url), location.href);
+    Object.assign(location, { pathname: next.pathname, search: next.search, hash: next.hash, href: next.href });
+  }
+  // Wouter's installed history wrappers dispatch these events after mutating history.
+  const pushState = (_data: unknown, _unused: string, url?: string | URL | null) => {
+    updateLocation(url); browser.dispatchEvent(new Event("pushState"));
+  };
+  const replaceState = (_data: unknown, _unused: string, url?: string | URL | null) => {
+    updateLocation(url); browser.dispatchEvent(new Event("replaceState"));
+  };
+  const history = { pushState, replaceState };
+  const browser = { localStorage: storage, sessionStorage, location, history,
+    addEventListener(type: string, listener: (event: Event) => void) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type)!.add(listener);
+    },
+    removeEventListener(type: string, listener: (event: Event) => void) { listeners.get(type)?.delete(listener); },
+    dispatchEvent(event: Event) {
+      for (const listener of [...(listeners.get(event.type) ?? [])]) listener(event);
+      return true;
+    },
+  };
   let snapshot!: Snapshot;
   let sdkActor = options.initialActor === undefined ? actorA : options.initialActor;
   let tokenReply: ((expected?: string) => Promise<string>) | undefined;
@@ -233,7 +261,10 @@ function setup(options: Options = {}) {
     "../../../../lib/vertical/terms": terms,
     "../../../../lib/crm/workspace-purpose": purposes,
     "@/lib/permissions": permissions,
-    wouter: { useLocation: () => ["/partner-company", (location: string) => locations.push(location)] },
+    wouter: { useLocation: () => [location.pathname, (next: string) => {
+      locations.push(next);
+      browser.history.pushState(null, "", next);
+    }] },
     sonner: { toast: new Proxy({}, { get: (_target, kind) => (message: string) => toasts.push({ kind, message }) }) },
     "@/lib/demoStorage": {
       WORKSPACE_SELECTOR_KEY: selectorKey,
@@ -267,8 +298,7 @@ function setup(options: Options = {}) {
     } },
   }, {
     localStorage: storage, sessionStorage,
-    window: { localStorage: storage, sessionStorage,
-      location: { search: "", origin: "https://example.test", pathname: "/partner-company" }, history: { replaceState() {} } },
+    window: browser,
     document: { title: "Isolated workspace handoff" },
     fetch() { throw new Error("Network forbidden in the local AuthProvider harness"); },
   });
@@ -276,6 +306,13 @@ function setup(options: Options = {}) {
   renderer.mount(auth.AuthProvider, Probe);
   return {
     renderer, storage, sessionStorage, requests, attempts, tokenCalls, locations, toasts, caches, readScopes, emit,
+    route: () => location.pathname + location.search + location.hash,
+    windowListeners: () => [...listeners.values()].reduce((count, registered) => count + registered.size, 0),
+    historyRestored: () => browser.history.pushState === pushState && browser.history.replaceState === replaceState,
+    navigate(method: "popstate" | "hashchange" | "pushState" | "replaceState", url: string) {
+      if (method === "pushState" || method === "replaceState") browser.history[method](null, "", url);
+      else { updateLocation(url); browser.dispatchEvent(new Event(method)); }
+    },
     snapshot: () => snapshot,
     subscriptions: () => callbacks.size,
     token(reply?: typeof tokenReply) { tokenReply = reply; },
@@ -296,12 +333,29 @@ type Fixture = ReturnType<typeof setup>;
 async function withFixture(run: (fixture: Fixture) => Promise<void>, options: Options = {}) {
   const fixture = setup(options);
   try { await fixture.renderer.flush(); await run(fixture); }
-  finally { fixture.renderer.dispose(); }
+  finally {
+    fixture.renderer.dispose();
+    fixture.releaseSignOut();
+    assert.equal(fixture.subscriptions(), 0, "fixture disposal releases the SDK subscription");
+    assert.equal(fixture.windowListeners(), 0, "fixture disposal releases navigation listeners");
+    assert.equal(fixture.historyRestored(), true, "fixture disposal restores its owned history methods");
+  }
 }
 async function confirm(fixture: Fixture, memberships = [membership()]) {
   await fixture.respond(fixture.request(0), success(memberships));
   assert.equal(fixture.snapshot().isLoading, false);
   assert.equal(typeof fixture.snapshot().enterWorkspace, "function", "the actual AuthProvider must expose enterWorkspace");
+}
+async function beginPick(fixture: Fixture, workspaceId: string) {
+  const requests = fixture.requests.length;
+  assert.equal(fixture.snapshot().selectWorkspace(workspaceId), undefined, "the picker retains its void API");
+  await fixture.renderer.flush();
+  assert.equal(fixture.requests.length, requests + 1, "a known current picker choice starts one fresh verification");
+  return fixture.request();
+}
+async function pick(fixture: Fixture, workspaceId: string, memberships = [membership()]) {
+  await fixture.respond(await beginPick(fixture, workspaceId), success(memberships));
+  assert.equal(fixture.snapshot().isLoading, false);
 }
 function entryOptions(patch: Partial<EntryOptions> = {}): EntryOptions {
   return { expectedUserId: actorA, signal: new AbortController().signal, isCurrent: () => true, ...patch };
@@ -346,6 +400,42 @@ function settle(fixture: Fixture, pending: Promise<boolean>) {
   return settleObserved(fixture, observe(pending));
 }
 
+test("generic picker reproduction: silent SDK actor replacement cannot apply cached W or leave tenant caches", async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture);
+    const oldPick = fixture.snapshot().selectWorkspace;
+    fixture.seedCaches();
+    fixture.setSdkActor(actorB);
+    oldPick(workspaceA);
+    await fixture.renderer.flush();
+    assert.deepEqual(clone({ clinicId: fixture.snapshot().clinicId, role: fixture.snapshot().userRole,
+      selector: fixture.storage.getItem(selectorKey), locations: fixture.locations,
+      crm: [...fixture.caches.crm], lists: [...fixture.caches.lists], scope: fixture.readScopes.at(-1)?.args[1] }),
+    { clinicId: null, role: null, selector: null, locations: [], crm: [], lists: [], scope: null },
+    "cached W belongs to A; an SDK-only replacement by B must quarantine it without navigation");
+  });
+});
+
+test("generic picker reproduction: old A callback cannot act as the new A after actor ABA", async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    const oldPick = fixture.snapshot().selectWorkspace;
+    fixture.emit(actorB);
+    await fixture.renderer.flush();
+    await fixture.respond(fixture.request(), success([target({ workspaceId: workspaceC })]));
+    fixture.emit(actorA);
+    await fixture.renderer.flush();
+    await fixture.respond(fixture.request(), success([membership(), target()]));
+    fixture.seedCaches();
+    const before = effects(fixture), tokens = fixture.tokenCalls.length, attempts = fixture.attempts.length;
+    oldPick(workspaceA);
+    await fixture.renderer.flush();
+    assert.deepEqual(effects(fixture), before, "a captured A callback must not adopt a later A identity epoch");
+    assert.equal(fixture.tokenCalls.length, tokens);
+    assert.equal(fixture.attempts.length, attempts);
+  });
+});
+
 test("fresh owner-only handoff clears the old tenant before token lookup and applies fresh target metadata", async () => {
   await withFixture(async fixture => {
     await confirm(fixture);
@@ -389,33 +479,34 @@ test("fresh owner-only handoff clears the old tenant before token lookup and app
 });
 
 const denials: { name: string; body?: unknown; status?: number; raw?: string; reject?: boolean;
-  denialStatus?: number; workspaceId?: string }[] = [
+  denialStatus?: number; workspaceId?: string; ownerOnly?: boolean; retryCandidates?: boolean; pickerChoices?: string[] }[] = [
   { name: "no memberships", body: success([]), denialStatus: 403 },
-  { name: "another owner is not the target", body: success([membership()]), denialStatus: 403 },
+  { name: "another owner is not the target", body: success([membership()]), denialStatus: 403, pickerChoices: [workspaceA] },
   ...["admin", "manager", "lead_manager", "receptionist"].map(role => ({ name: `target ${role} is not owner`,
-    body: success([target({ role })]), denialStatus: 403 })),
-  { name: "duplicate target membership", body: success([target(), target()]), denialStatus: 403 },
-  { name: "conflicting duplicate target role", body: success([target(), target({ role: "lead_manager" })]), denialStatus: 403 },
+    body: success([target({ role })]), denialStatus: 403, ownerOnly: true })),
+  { name: "duplicate target membership", body: success([target(), target()]), denialStatus: 403, pickerChoices: [workspaceB, workspaceB] },
+  { name: "conflicting duplicate target role", body: success([target(), target({ role: "lead_manager" })]), denialStatus: 403,
+    pickerChoices: [workspaceB, workspaceB] },
   { name: "case-insensitive duplicate target", workspaceId: "abcdefab-0000-4000-8000-000000000204",
     body: success([target({ workspaceId: "abcdefab-0000-4000-8000-000000000204" }),
-      target({ workspaceId: "ABCDEFAB-0000-4000-8000-000000000204" })]), denialStatus: 403 },
+      target({ workspaceId: "ABCDEFAB-0000-4000-8000-000000000204" })]), denialStatus: 403,
+    pickerChoices: ["abcdefab-0000-4000-8000-000000000204", "ABCDEFAB-0000-4000-8000-000000000204"] },
   { name: "success false", body: { success: false, data: { memberships: [target()] } } },
   { name: "missing data", body: { success: true } },
   { name: "membership list is not an array", body: { success: true, data: { memberships: { target: target() } } } },
   { name: "malformed purpose", body: success([target({ purpose: "untrusted-purpose" })]) },
   { name: "malformed role", body: success([target({ role: "OWNER" })]) },
   { name: "malformed member", body: { success: true, data: { memberships: [null, target()] } } },
-  { name: "invalid JSON", raw: "{not-json" },
+  { name: "invalid JSON", raw: "{not-json", retryCandidates: true },
   { name: "empty response body", raw: "" },
   ...[401, 403, 422, 429, 503].map(status => ({ name: `HTTP ${status}`, status, body: { success: false },
-    denialStatus: status === 401 || status === 403 ? status : undefined })),
-  { name: "network rejection", reject: true },
+    denialStatus: status === 401 || status === 403 ? status : undefined, retryCandidates: status === 429 || status >= 500 })),
+  { name: "network rejection", reject: true, retryCandidates: true },
 ];
 for (const denial of denials) test(`handoff refuses ${denial.name} without restoring a stored selector or old clinic`, async () => {
   await withFixture(async fixture => {
     await confirm(fixture, [membership(), target()]);
-    fixture.snapshot().selectWorkspace(workspaceA);
-    await fixture.renderer.flush();
+    await pick(fixture, workspaceA, [membership(), target()]);
     fixture.locations.length = 0;
     fixture.storage.setItem(selectorKey, workspaceB);
     const outcome = observe(fixture.snapshot().enterWorkspace(denial.workspaceId ?? workspaceB, entryOptions()));
@@ -633,8 +724,7 @@ test("a newer regular auth resolution plus valid picker choice invalidates the p
     fixture.emit(actorA, "USER_UPDATED");
     await fixture.renderer.flush();
     await fixture.respond(fixture.request(), success([membership(), target({ role: "lead_manager" })]));
-    fixture.snapshot().selectWorkspace(workspaceA);
-    await fixture.renderer.flush();
+    await pick(fixture, workspaceA, [membership(), target({ role: "lead_manager" })]);
     assert.equal(fixture.snapshot().clinicId, workspaceA);
     const before = effects(fixture);
     old.reply(success([target()]));
@@ -701,6 +791,7 @@ test("invalid stale picker and clear-selection callbacks do not retire an active
     const oldPick = fixture.snapshot().selectWorkspace, oldClear = fixture.snapshot().clearWorkspaceSelection;
     oldPick(workspaceA);
     await fixture.renderer.flush();
+    await fixture.respond(fixture.request(), success([membership(), target({ role: "lead_manager" })]));
     fixture.locations.length = 0;
     const pending = fixture.snapshot().enterWorkspace(workspaceB, entryOptions());
     await fixture.renderer.flush();
@@ -716,17 +807,415 @@ test("invalid stale picker and clear-selection callbacks do not retire an active
   });
 });
 
-test("ordinary picker still permits a listed non-owner and keeps its existing destination", async () => {
+for (const choice of [
+  { role: "lead_manager", purpose: "clinic_services", route: "/leads", admin: false },
+  { role: "lead_manager", purpose: "mortgage_leads", route: "/dashboard", admin: false },
+  { role: "manager", purpose: "clinic_services", route: "/dashboard", admin: true },
+  { role: "owner", purpose: "clinic_services", route: "/dashboard", admin: true },
+]) test(`ordinary picker verifies fresh ${choice.role}/${choice.purpose} and routes to ${choice.route}`, async () => {
   await withFixture(async fixture => {
-    await confirm(fixture, [membership(), target({ role: "lead_manager", purpose: "clinic_services" })]);
+    await confirm(fixture, [membership(), target({ role: "admin", purpose: "clinic_services", vertical: "beauty" })]);
+    fixture.seedCaches();
+    const tokens = fixture.tokenCalls.length, request = await beginPick(fixture, workspaceB);
+    assertUnselected(fixture);
+    assert.equal(fixture.snapshot().isLoading, true);
+    assert.equal(fixture.caches.crm.size, 0);
+    assert.equal(fixture.caches.lists.size, 0);
+    assert.equal(fixture.readScopes.at(-1)?.args[1], null);
+    assert.equal(request.init.expectedUserId, actorA);
+    assert.equal(request.init.accessToken, `local-fixture:${actorA}:initial`);
+    assert.equal(request.init.cache, "no-store");
+    assert.equal(request.init.signal?.aborted, false);
+    assert.equal(request.init.dispatchGuard?.(), true);
+    assert.deepEqual(fixture.locations, []);
+    await fixture.respond(request, success([membership(), target({ role: choice.role, purpose: choice.purpose,
+      workspaceName: "Fresh verified picker target" })]));
+    assert.equal(fixture.snapshot().clinicId, workspaceB);
+    assert.equal(fixture.snapshot().userRole, choice.role);
+    assert.equal(fixture.snapshot().workspacePurpose, choice.purpose);
+    assert.equal(fixture.snapshot().vertical, "dental");
+    assert.equal(fixture.snapshot().rolePermissions.admin, choice.admin);
+    assert.equal(fixture.snapshot().availableWorkspaces.find(value => value.id === workspaceB)?.name,
+      "Fresh verified picker target");
+    assert.equal(fixture.storage.getItem(selectorKey), workspaceB);
+    assert.equal(fixture.readScopes.at(-1)?.args[1], workspaceB);
+    assert.equal(fixture.snapshot().isLoading, false);
+    assert.deepEqual(fixture.locations, [choice.route]);
+    assert.ok(fixture.tokenCalls.length >= tokens + 2, "picker token is verified again before publication");
+    assert.equal(fixture.windowListeners(), 0);
+    assert.equal(fixture.historyRestored(), true);
+  }, { storage: { [selectorKey]: workspaceA } });
+});
+
+test("generic picker quarantines both caches and the memory read scope before looking up a fresh token", async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    fixture.seedCaches();
+    const token = deferred<string>(), requests = fixture.requests.length;
+    fixture.token(() => {
+      assert.equal(fixture.storage.getItem(selectorKey), null);
+      assert.equal(fixture.caches.crm.size, 0);
+      assert.equal(fixture.caches.lists.size, 0);
+      assert.equal(fixture.readScopes.at(-1)?.kind, "bind");
+      assert.equal(fixture.readScopes.at(-1)?.args[1], null);
+      return token.promise;
+    });
+    assert.equal(fixture.snapshot().selectWorkspace(workspaceB), undefined);
+    await fixture.renderer.flush();
+    assertUnselected(fixture);
+    assert.equal(fixture.snapshot().isLoading, true);
+    assert.equal(fixture.requests.length, requests);
+    fixture.token();
+    token.resolve(`local-fixture:${actorA}:initial`);
+    await fixture.renderer.flush();
+    assert.equal(fixture.requests.length, requests + 1);
+    await fixture.respond(fixture.request(), success([target({ role: "lead_manager", purpose: "clinic_services" })]));
+    assert.equal(fixture.snapshot().clinicId, workspaceB);
+    assert.deepEqual(fixture.locations, ["/leads"]);
+  }, { storage: { [selectorKey]: workspaceA } });
+});
+
+for (const workspaceId of [workspaceC, "not-a-workspace", ""])
+test(`generic picker refuses an unlisted target ${workspaceId || "(empty)"} before token lookup or dispatch`, async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    fixture.seedCaches();
+    const before = effects(fixture), tokens = fixture.tokenCalls.length, attempts = fixture.attempts.length;
+    fixture.snapshot().selectWorkspace(workspaceId);
+    await fixture.renderer.flush();
+    assert.equal(fixture.tokenCalls.length, tokens);
+    assert.equal(fixture.attempts.length, attempts);
+    assert.deepEqual({ ...effects(fixture), toasts: [] }, { ...before, toasts: [] });
+  }, { storage: { [selectorKey]: workspaceA } });
+});
+
+test("generic picker checks the current whitelist instead of a captured callback's old memberships", async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    const oldPick = fixture.snapshot().selectWorkspace;
+    fixture.emit(actorA, "USER_UPDATED");
+    await fixture.renderer.flush();
+    await fixture.respond(fixture.request(), success([membership()]));
+    const before = effects(fixture), tokens = fixture.tokenCalls.length, attempts = fixture.attempts.length;
+    oldPick(workspaceB);
+    await fixture.renderer.flush();
+    assert.equal(fixture.tokenCalls.length, tokens);
+    assert.equal(fixture.attempts.length, attempts);
+    assert.deepEqual({ ...effects(fixture), toasts: [] }, { ...before, toasts: [] });
+  });
+});
+
+for (const denial of denials.filter(value => !value.ownerOnly))
+test(`generic picker refuses fresh ${denial.name} with no cached membership fallback`, async () => {
+  await withFixture(async fixture => {
+    const workspaceId = denial.workspaceId ?? workspaceB;
+    await confirm(fixture, [membership(), target({ workspaceId })]);
+    fixture.seedCaches();
+    const request = await beginPick(fixture, workspaceId);
+    assertUnselected(fixture);
+    if (denial.reject) request.reject(new Error("Isolated picker offline response"));
+    else if (denial.raw !== undefined) request.resolve(new Response(denial.raw, { status: 200 }));
+    else request.reply(denial.body, denial.status ?? 200);
+    await fixture.renderer.flush();
+    assertNeutral(fixture);
+    assert.deepEqual(clone(fixture.snapshot().availableWorkspaces.map(choice => choice.id)),
+      denial.retryCandidates ? [workspaceA, workspaceId] : denial.pickerChoices ?? []);
+    assert.equal(fixture.snapshot().workspaceSelectionFailed, true);
+    assert.equal(fixture.snapshot().isLoading, false);
+    assert.equal(fixture.caches.crm.size, 0);
+    assert.equal(fixture.caches.lists.size, 0);
+    assert.equal(fixture.readScopes.at(-1)?.args[1], null);
+    assert.deepEqual(fixture.locations, []);
+    assert.equal(fixture.windowListeners(), 0);
+    assert.equal(fixture.historyRestored(), true);
+  }, { storage: { [selectorKey]: workspaceA } });
+});
+
+for (const reply of ["missing", "throw"] as const)
+test(`generic picker fails closed on a ${reply} fresh token before dispatch`, async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    fixture.seedCaches();
+    fixture.token(async () => {
+      if (reply === "throw") throw new Error("isolated picker token lookup failure");
+      return "";
+    });
     fixture.snapshot().selectWorkspace(workspaceB);
     await fixture.renderer.flush();
+    assertUnselected(fixture);
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.snapshot().isLoading, false);
+    assert.equal(fixture.caches.crm.size, 0);
+    assert.equal(fixture.caches.lists.size, 0);
+    assert.deepEqual(fixture.locations, []);
+    assert.equal(fixture.windowListeners(), 0);
+    assert.equal(fixture.historyRestored(), true);
+  }, { storage: { [selectorKey]: workspaceA } });
+});
+
+for (const status of [0, 429, 503])
+test(`generic picker transient ${status} retains retry candidates only and the retry verifies a fresh role`, async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    fixture.seedCaches();
+    const request = await beginPick(fixture, workspaceB);
+    if (status === 0) request.reject(new Error("isolated retryable picker failure"));
+    else request.reply({ success: false }, status);
+    await fixture.renderer.flush();
+    assertNeutral(fixture);
+    assert.equal(fixture.snapshot().workspaceSelectionFailed, true);
+    assert.deepEqual(clone(fixture.snapshot().availableWorkspaces.map(choice => choice.id)), [workspaceA, workspaceB]);
+    assert.equal(fixture.caches.crm.size, 0);
+    assert.equal(fixture.caches.lists.size, 0);
+    assert.equal(fixture.readScopes.at(-1)?.args[1], null);
+    assert.deepEqual(fixture.locations, []);
+    const retry = await beginPick(fixture, workspaceB);
+    assertUnselected(fixture);
+    assert.equal(fixture.snapshot().workspaceSelectionFailed, false);
+    await fixture.respond(retry, success([target({ role: "lead_manager", purpose: "clinic_services" })]));
+    assert.equal(fixture.requests.length, 3);
     assert.equal(fixture.snapshot().clinicId, workspaceB);
     assert.equal(fixture.snapshot().userRole, "lead_manager");
     assert.equal(fixture.snapshot().rolePermissions.admin, false);
-    assert.equal(fixture.requests.length, 1, "generic picker does not become a fresh owner-only read");
+    assert.equal(fixture.snapshot().workspaceSelectionFailed, false);
+    assert.deepEqual(fixture.locations, ["/leads"]);
+  }, { storage: { [selectorKey]: workspaceA } });
+});
+
+for (const status of [0, 429, 503])
+for (const reason of ["silent SDK replacement", "token rotation"] as const)
+test(`generic picker transient ${status} cannot restore retry candidates after ${reason}`, async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    const request = await beginPick(fixture, workspaceB);
+    if (reason === "silent SDK replacement") fixture.setSdkActor(actorB);
+    else fixture.rotateToken();
+    if (status === 0) request.reject(new Error("isolated obsolete retryable failure"));
+    else request.reply({ success: false }, status);
+    await fixture.renderer.flush();
+    assertUnselected(fixture);
+    assert.equal(fixture.readScopes.at(-1)?.args[1], null);
+    assert.deepEqual(fixture.locations, []);
+    assert.equal(fixture.windowListeners(), 0);
+    if (reason === "silent SDK replacement") {
+      assert.equal(fixture.snapshot().workspaceSelectionFailed, false);
+      assert.deepEqual(fixture.toasts, []);
+    }
+  });
+});
+
+test("a fresh single different membership stays unselected until another explicit fresh choice", async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    await fixture.respond(await beginPick(fixture, workspaceB), success([membership()]));
+    assertNeutral(fixture);
+    assert.equal(fixture.snapshot().workspaceSelectionFailed, true);
+    assert.deepEqual(clone(fixture.snapshot().availableWorkspaces.map(choice => choice.id)), [workspaceA]);
+    assert.deepEqual(fixture.locations, []);
+    await pick(fixture, workspaceA, [membership({ role: "lead_manager" })]);
+    assert.equal(fixture.snapshot().clinicId, workspaceA);
+    assert.equal(fixture.snapshot().userRole, "lead_manager");
+    assert.equal(fixture.snapshot().workspaceSelectionFailed, false);
     assert.deepEqual(fixture.locations, ["/leads"]);
   });
+});
+
+for (const reason of ["silent SDK replacement", "actor ABA", "navigation", "unmount", "signout", "token throws"] as const)
+test(`generic picker error UI's extra token recheck cannot publish after ${reason}`, async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    const request = await beginPick(fixture, workspaceB), token = deferred<string>();
+    let calls = 0;
+    fixture.token(async expected => {
+      assert.equal(expected, actorA);
+      return ++calls === 1 ? `local-fixture:${actorA}:initial` : token.promise;
+    });
+    request.reply({ success: false }, 503);
+    await fixture.renderer.flush();
+    assert.equal(calls, 2, "the error UI waits for an additional expected-actor token check after the response check");
+    assertNeutral(fixture);
+    assert.equal(fixture.snapshot().workspaceSelectionFailed, false);
+    assert.deepEqual(fixture.toasts, []);
+    fixture.token();
+    let signingOut: Promise<void> | undefined;
+    if (reason === "silent SDK replacement") fixture.setSdkActor(actorB);
+    if (reason === "actor ABA") { fixture.emit(actorB); fixture.emit(actorA); }
+    if (reason === "navigation") fixture.navigate("pushState", "/profile#newer-route");
+    if (reason === "unmount") fixture.renderer.dispose();
+    if (reason === "signout") signingOut = fixture.snapshot().signOut();
+    await fixture.renderer.flush();
+    const before = effects(fixture);
+    if (reason === "token throws") token.reject(new Error("isolated error-UI token check failure"));
+    else token.resolve(reason === "silent SDK replacement" ? "" : `local-fixture:${actorA}:initial`);
+    await fixture.renderer.flush();
+    assert.deepEqual(effects(fixture), before, "the obsolete failure UI cannot set retry state, toast or navigate");
+    assert.equal(fixture.windowListeners(), 0);
+    if (reason === "navigation") assert.equal(fixture.route(), "/profile#newer-route");
+    fixture.releaseSignOut();
+    await signingOut;
+  }, { deferSignOut: true });
+});
+
+for (const reason of ["silent SDK replacement", "token rotation"] as const)
+test(`generic picker cannot publish a fresh response after ${reason}`, async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    const request = await beginPick(fixture, workspaceB);
+    if (reason === "silent SDK replacement") fixture.setSdkActor(actorB);
+    else fixture.rotateToken();
+    await fixture.respond(request, success([target()]));
+    assertUnselected(fixture);
+    assert.equal(fixture.snapshot().isLoading, false);
+    assert.deepEqual(fixture.locations, []);
+    assert.equal(fixture.windowListeners(), 0);
+  });
+});
+
+for (const reason of ["actor switch", "actor ABA", "unmount", "signout"] as const)
+test(`captured generic picker refuses ${reason} before a rerender or fresh token lookup`, async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    const oldPick = fixture.snapshot().selectWorkspace;
+    let signingOut: Promise<void> | undefined;
+    if (reason === "actor switch" || reason === "actor ABA") fixture.emit(actorB);
+    if (reason === "actor ABA") fixture.emit(actorA);
+    if (reason === "unmount") fixture.renderer.dispose();
+    if (reason === "signout") signingOut = fixture.snapshot().signOut();
+    const before = effects(fixture), tokens = fixture.tokenCalls.length, attempts = fixture.attempts.length;
+    oldPick(workspaceB);
+    assert.deepEqual(effects(fixture), before, "a retired caller cannot change state, caches, selector, scope or toasts");
+    assert.equal(fixture.tokenCalls.length, tokens);
+    assert.equal(fixture.attempts.length, attempts);
+    fixture.releaseSignOut();
+    await signingOut;
+  }, { deferSignOut: true });
+});
+
+for (const reason of ["actor switch", "actor ABA", "regular resolution", "unmount", "signout"] as const)
+test(`generic picker held token cannot dispatch after ${reason}`, async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    const token = deferred<string>();
+    fixture.token(() => token.promise);
+    fixture.snapshot().selectWorkspace(workspaceB);
+    await fixture.renderer.flush();
+    fixture.token();
+    let signingOut: Promise<void> | undefined;
+    if (reason === "actor switch" || reason === "actor ABA") fixture.emit(actorB);
+    if (reason === "actor ABA") fixture.emit(actorA);
+    if (reason === "regular resolution") fixture.emit(actorA, "USER_UPDATED");
+    if (reason === "unmount") fixture.renderer.dispose();
+    if (reason === "signout") signingOut = fixture.snapshot().signOut();
+    await fixture.renderer.flush();
+    const before = effects(fixture), attempts = fixture.attempts.length;
+    token.resolve(`local-fixture:${actorA}:initial`);
+    await fixture.renderer.flush();
+    assert.equal(fixture.attempts.length, attempts, "retired picker token cannot reach the transport");
+    assert.deepEqual(effects(fixture), before);
+    fixture.releaseSignOut();
+    await signingOut;
+  }, { deferSignOut: true });
+});
+
+test("generic picker dispatch guard refuses a delayed send after actor ABA", async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    const dispatch = fixture.holdDispatch();
+    fixture.snapshot().selectWorkspace(workspaceB);
+    await fixture.renderer.flush();
+    const old = fixture.attempts.at(-1)!;
+    assert.equal(old.init.dispatchGuard?.(), true);
+    fixture.emit(actorB); fixture.emit(actorA);
+    assert.equal(old.init.dispatchGuard?.(), false);
+    dispatch.resolve();
+    await fixture.renderer.flush();
+    assert.ok(!fixture.requests.includes(old), "a retired picker never crosses the last-moment send boundary");
+    assert.deepEqual(fixture.locations, []);
+  });
+});
+
+for (const reason of ["actor switch", "actor ABA", "new explicit choice", "signout", "unmount"] as const)
+for (const outcome of ["success", "denied", "network"] as const)
+test(`late generic picker ${outcome} cannot publish effects after ${reason}`, async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    const old = await beginPick(fixture, workspaceB);
+    let signingOut: Promise<void> | undefined;
+    if (reason === "actor switch" || reason === "actor ABA") fixture.emit(actorB);
+    if (reason === "actor ABA") fixture.emit(actorA);
+    if (reason === "new explicit choice") fixture.emit(actorA, "USER_UPDATED");
+    if (reason === "signout") signingOut = fixture.snapshot().signOut();
+    if (reason === "unmount") fixture.renderer.dispose();
+    await fixture.renderer.flush();
+    if (reason === "actor switch" || reason === "actor ABA" || reason === "new explicit choice") {
+      const memberships = [target({ workspaceId: workspaceC, purpose: "clinic_services", role: "lead_manager" })];
+      await fixture.respond(fixture.request(), success(memberships));
+      if (reason === "new explicit choice") await pick(fixture, workspaceC, memberships);
+      assert.equal(fixture.snapshot().clinicId, workspaceC);
+    }
+    const before = effects(fixture), tokens = fixture.tokenCalls.length;
+    if (outcome === "network") old.reject(new Error("obsolete isolated picker response"));
+    else old.reply(outcome === "success" ? success([target()]) : { success: false }, outcome === "denied" ? 403 : 200);
+    await fixture.renderer.flush();
+    assert.deepEqual(effects(fixture), before, "obsolete void picker completion has no state, scope, cache, toast or routing effects");
+    assert.equal(fixture.tokenCalls.length, tokens, "retired picker does not recheck a newer caller's token");
+    fixture.releaseSignOut();
+    await signingOut;
+  }, { deferSignOut: true });
+});
+
+for (const stage of ["token", "transport", "body", "token recheck"] as const)
+for (const method of ["popstate", "hashchange", "pushState", "replaceState"] as const)
+test(`generic picker ${stage} is cancelled by ${method} without stealing the newer route`, async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    const token = deferred<string>(), body = deferred<string>();
+    const requests = fixture.requests.length;
+    if (stage === "token") fixture.token(() => token.promise);
+    fixture.snapshot().selectWorkspace(workspaceB);
+    await fixture.renderer.flush();
+    const request = stage === "token" ? undefined : fixture.request();
+    if (stage === "body") request!.resolve({ ok: true, status: 200, text: () => body.promise } as Response);
+    if (stage === "token recheck") {
+      fixture.token(() => token.promise);
+      request!.reply(success([target()]));
+    }
+    await fixture.renderer.flush();
+    const route = method === "hashchange" ? "/partner-company#new-route" : "/profile?tab=security#new-route";
+    fixture.navigate(method, route);
+    await fixture.renderer.flush();
+    assertUnselected(fixture);
+    if (request) assert.equal(request.init.dispatchGuard?.(), false, "navigation retires the pending picker guard");
+    fixture.token();
+    if (stage === "token" || stage === "token recheck") token.resolve(`local-fixture:${actorA}:initial`);
+    if (stage === "body") body.resolve(JSON.stringify(success([target()])));
+    if (stage === "transport") request!.reply(success([target()]));
+    await fixture.renderer.flush();
+    assertUnselected(fixture);
+    assert.equal(fixture.snapshot().isLoading, false);
+    assert.equal(fixture.route(), route);
+    assert.deepEqual(fixture.locations, []);
+    assert.equal(fixture.requests.length, requests + (stage === "token" ? 0 : 1));
+    assert.equal(fixture.windowListeners(), 0, "completed cancellation removes its browser event listeners");
+    assert.equal(fixture.historyRestored(), true);
+  });
+});
+
+test("a genuine explicit picker choice after failure and a same-actor recheck can still select W", async () => {
+  await withFixture(async fixture => {
+    await confirm(fixture, [membership(), target()]);
+    await fixture.respond(await beginPick(fixture, workspaceB), { success: false }, 503);
+    assertNeutral(fixture);
+    fixture.emit(actorA, "USER_UPDATED");
+    await fixture.renderer.flush();
+    await fixture.respond(fixture.request(), success([membership()]));
+    assertNeutral(fixture);
+    assert.deepEqual(fixture.locations, []);
+    await pick(fixture, workspaceA);
+    assert.equal(fixture.snapshot().clinicId, workspaceA);
+    assert.equal(fixture.storage.getItem(selectorKey), workspaceA);
+    assert.deepEqual(fixture.locations, ["/dashboard"]);
+  }, { storage: { [selectorKey]: workspaceA } });
 });
 
 for (const outcome of ["success", "denied", "network"] as const)
@@ -1000,8 +1489,7 @@ test(`${event} listing only the previous W cannot auto-select it during/after ${
     assertNeutral(fixture);
     assert.deepEqual(fixture.locations, []);
     assert.equal(fixture.snapshot().availableWorkspaces.some(choice => choice.id === workspaceA), true);
-    fixture.snapshot().selectWorkspace(workspaceA);
-    await fixture.renderer.flush();
+    await pick(fixture, workspaceA);
     assert.equal(fixture.snapshot().clinicId, workspaceA, "an explicit current picker choice is still permitted");
     assert.deepEqual(fixture.locations, ["/dashboard"]);
   });

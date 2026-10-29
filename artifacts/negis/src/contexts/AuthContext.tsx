@@ -95,6 +95,7 @@ interface AuthContextType {
    * server verified.
    */
   availableWorkspaces: WorkspaceChoice[];
+  workspaceSelectionFailed: boolean;
   /** Applies one of `availableWorkspaces`. Anything else is refused. */
   selectWorkspace: (workspaceId: string) => void;
   /** Fresh owner membership is required; a previous selector is never a fallback. */
@@ -314,6 +315,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [impersonationClinicName, setImpersonationClinicName] = useState<string | null>(null);
   // Memberships the server confirmed for this user; drives explicit workspace choice.
   const [availableWorkspaces, setAvailableWorkspaces] = useState<WorkspaceChoice[]>([]);
+  const [workspaceSelectionFailed, setWorkspaceSelectionFailed] = useState(false);
   // The picker runs long after the bootstrap resolved, so the memberships and
   // the verified user are kept in refs: reading them from state inside the
   // callback would capture whatever the closure saw when it was created.
@@ -401,6 +403,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     userRef.current = nextUser;
     const revision = ++authRevisionRef.current;
     if (changed || !nextUser) {
+      setWorkspaceSelectionFailed(false);
       workspaceIntentRef.current = null;
       bindWorkspaceReadScope(workspaceReadOwner, null);
       profileSubjectRevisionRef.current++;
@@ -700,23 +703,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const selected = memberships.find((entry) => entry.workspaceId === workspaceId);
     const supabaseUser = userRef.current;
 
-    if (!mountedRef.current || isSignOutPending() || !selected || !supabaseUser || authIdentityRef.current !== supabaseUser.id) {
+    if (!mountedRef.current || isSignOutPending() || !supabaseUser || authIdentityRef.current !== supabaseUser.id
+      || profileSubjectRevisionRef.current !== profileSubjectRevision) return;
+    if (!selected) {
       toast.error('Клиника недоступна. Войдите заново.');
       return;
     }
-    workspaceSelectionRevisionRef.current++;
-    workspaceIntentRef.current = { actorId: supabaseUser.id, workspaceId: selected.workspaceId, blocked: false };
-
-    // The read cache is keyed by path, and workspaceId travels in the path, so
-    // the previous clinic's answers could not be served here anyway. Dropping
-    // them is belt and braces: a cache that outlives a tenant switch is exactly
-    // the bug that would leak one clinic's list into another's screen.
-    clearCrmCache();
-    applyMembership(supabaseUser, selected, memberships);
-    setLocation(selected.purpose === 'mortgage_leads' ? '/dashboard' : selected.role === 'lead_manager' ? '/leads' : '/dashboard');
+    const subject = supabaseUser.id, controller = new AbortController();
+    const cancel = () => controller.abort();
+    const events = ['popstate', 'pushState', 'replaceState', 'hashchange'];
+    for (const event of events) window.addEventListener(event, cancel);
+    setWorkspaceSelectionFailed(false);
+    const pending = resolveWorkspaceSelection(selected.workspaceId, { expectedUserId: subject,
+      signal: controller.signal, isCurrent: () => !controller.signal.aborted }, false);
+    const revision = authRevisionRef.current, selection = workspaceSelectionRevisionRef.current;
+    const current = () => !controller.signal.aborted && isCurrentAuthResolution(subject, revision)
+      && workspaceSelectionRevisionRef.current === selection;
+    const failed = async () => {
+      if (!current()) return;
+      try { if (!await getSupabaseAccessToken(subject) || !current()) return; }
+      catch { return; }
+      setWorkspaceSelectionFailed(true);
+      toast.error('Не удалось подтвердить доступ. Повторите выбор или обновите список доступов.');
+    };
+    void pending.then(opened => opened ? undefined : failed(), failed).finally(() => {
+      for (const event of events) window.removeEventListener(event, cancel);
+      controller.abort();
+    });
   };
 
-  const enterWorkspace: AuthContextType['enterWorkspace'] = async (workspaceId, options) => {
+  const resolveWorkspaceSelection = async (workspaceId: string, options: Parameters<AuthContextType['enterWorkspace']>[1],
+    ownerOnly: boolean): Promise<boolean> => {
     const subject = options.expectedUserId;
     const sameSubject = () => {
       try {
@@ -733,6 +750,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(workspaceId) || !sameSubject()) return false;
     const revision = ++authRevisionRef.current;
     const selection = ++workspaceSelectionRevisionRef.current;
+    const previousMemberships = membershipsRef.current;
     workspaceIntentRef.current = { actorId: subject, workspaceId, blocked: true };
     const ownsRead = () => isCurrentAuthResolution(subject, revision) && workspaceSelectionRevisionRef.current === selection;
     const current = () => ownsRead() && sameSubject();
@@ -754,9 +772,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!current() || result.sessionChanged) return false;
       if (result.status === 401 || result.status === 403)
         throw new CrmApiError(result.status, 'partner_company_access_denied', 'Доступ к выбранной компании изменился.');
-      if (result.status !== 200) return false;
+      if (result.status !== 200) {
+        // Candidates are not authority: a transient failure may offer retry,
+        // but the next choice still performs a fresh subject-bound read.
+        if (!ownerOnly && (result.status === 0 || result.status === 429 || result.status >= 500)) {
+          membershipsRef.current = previousMemberships;
+          setAvailableWorkspaces(toWorkspaceChoices(previousMemberships));
+        }
+        return false;
+      }
+      if (!ownerOnly) {
+        membershipsRef.current = result.memberships;
+        setAvailableWorkspaces(toWorkspaceChoices(result.memberships));
+      }
       const matches = result.memberships.filter(entry => entry.workspaceId.toLowerCase() === workspaceId.toLowerCase());
-      if (matches.length !== 1 || matches[0].role !== 'owner')
+      if (matches.length !== 1 || (ownerOnly && matches[0].role !== 'owner'))
         throw new CrmApiError(403, 'partner_company_access_denied', 'Доступ к выбранной компании изменился.');
       const resolvedUser = userRef.current;
       if (!resolvedUser || !current()) return false;
@@ -764,7 +794,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       membershipsRef.current = result.memberships;
       applyMembership(resolvedUser, matches[0], result.memberships);
       setIsLoading(false);
-      setLocation('/dashboard');
+      setLocation(matches[0].purpose === 'mortgage_leads' ? '/dashboard' : matches[0].role === 'lead_manager' ? '/leads' : '/dashboard');
       return true;
     } catch (error) {
       if (current() && error instanceof CrmApiError) throw error;
@@ -772,6 +802,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
     finally { if (ownsRead()) setIsLoading(false); }
   };
+
+  const enterWorkspace: AuthContextType['enterWorkspace'] = (workspaceId, options) =>
+    resolveWorkspaceSelection(workspaceId, options, true);
 
   /** Returns a multi-clinic user to the picker without ending the session. */
   const clearWorkspaceSelection = () => {
@@ -1138,7 +1171,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       rolePermissions,
       isImpersonation, isDemoMode, isStaffMode, impersonationClinicName, vertical,
       workspacePurpose,
-      availableWorkspaces, selectWorkspace, enterWorkspace, clearWorkspaceSelection,
+      availableWorkspaces, workspaceSelectionFailed, selectWorkspace, enterWorkspace, clearWorkspaceSelection,
       applyConfirmedProfile,
       signOut,
     }}>

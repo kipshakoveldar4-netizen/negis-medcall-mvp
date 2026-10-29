@@ -219,6 +219,7 @@ async function runtime(t: TestContext, delayInitialSession = false) {
       if (dependency === "lucide-react") return Object.fromEntries(source.iconNames.map(icon => [icon, Symbol(icon)]));
       if (dependency === "wouter") return { Link: (props: Props) => jsx("a", props) };
       if (dependency === "@/lib/supabase") return { supabase: { auth }, hasSupabaseFrontendEnv: true };
+      if (dependency === "@/contexts/AuthContext") return { useAuth: () => ({ signOut: async () => { await auth.signOut(); } }) };
       if (dependency === "@/lib/operatorApi") return { operatorApi };
       if (dependency === "@/components/portals/PortalShell") return { PortalShell };
       if (dependency === "@/components/contributors/PartnerLedger") return { PartnerLedger };

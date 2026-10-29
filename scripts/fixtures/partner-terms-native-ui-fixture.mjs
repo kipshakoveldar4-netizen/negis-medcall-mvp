@@ -41,7 +41,8 @@ export async function partnerUiNativeBundle(f){
     let actor=new URLSearchParams(location.search).get('actor')||${JSON.stringify(f.owner)};const listeners=new Set(),tokens=${JSON.stringify(f.tokens)};
     const session=()=>actor?{user:{id:actor},access_token:tokens[actor]}:null;
     export function change(next){actor=next;for(const fn of [...listeners])fn('SIGNED_IN',session());}
-    export const supabase={auth:{getSession:async()=>({data:{session:session()},error:null}),onAuthStateChange:fn=>{listeners.add(fn);return{data:{subscription:{unsubscribe:()=>listeners.delete(fn)}}};},signOut:async()=>{change(null);return{error:null};}}};`;
+    export const supabase={auth:{getSession:async()=>({data:{session:session()},error:null}),onAuthStateChange:fn=>{listeners.add(fn);return{data:{subscription:{unsubscribe:()=>listeners.delete(fn)}}};},signOut:async()=>{change(null);return{error:null};}}};
+    export const useAuth=()=>({signOut:async()=>{await supabase.auth.signOut();}});`;
   const entry=`import React,{StrictMode,useState}from'react';import{createRoot}from'react-dom/client';import{flushSync}from'react-dom';
     import{Contributors}from ${component(path.join(control,'src/screens/Contributors.tsx'))};
     import ContributorPortal from ${component(path.join(frontend,'src/pages/ContributorPortal.tsx'))};import{change,supabase}from'owned-partner-sdk';
@@ -52,7 +53,7 @@ export async function partnerUiNativeBundle(f){
     void supabase.auth.getSession().then(()=>createRoot(document.getElementById('root')).render(<StrictMode><Host/></StrictMode>));`;
   const result=await esbuild.build({stdin:{contents:entry,resolveDir:frontend,loader:'tsx'},bundle:true,write:false,outfile:'bundle.js',format:'iife',platform:'browser',jsx:'automatic',
     define:{'process.env.NODE_ENV':'"production"','import.meta.env.BASE_URL':'"/"','import.meta.env.VITE_API_BASE_URL':'""'},plugins:[{name:'owned-partner-sdk-only',setup(build){
-      build.onResolve({filter:/^(owned-partner-sdk|@\/lib\/supabase)$/},()=>({path:'sdk',namespace:'owned'}));
+      build.onResolve({filter:/^(owned-partner-sdk|@\/lib\/supabase|@\/contexts\/AuthContext)$/},()=>({path:'sdk',namespace:'owned'}));
       build.onResolve({filter:/^\.\/supabase$/},args=>args.importer===path.join(control,'src/lib/api.ts').replaceAll('\\','/')||path.normalize(args.importer)===path.join(control,'src/lib/api.ts')?{path:'sdk',namespace:'owned'}:undefined);
       build.onLoad({filter:/.*/,namespace:'owned'},()=>({contents:sdk,loader:'ts'}));
       build.onResolve({filter:/^@\//},args=>{const base=path.join(frontend,'src',args.path.slice(2)),p=[base+'.ts',base+'.tsx'].find(existsSync);assert.ok(p,args.path);return{path:p};});

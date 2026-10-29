@@ -17,6 +17,8 @@
     "test:migration-chain-review": "node --test ./fixtures/migration-chain-review.test.mjs ./fixtures/migration-checkout.test.mjs",
     "test:appointment-preview-cutover": "node --test ./fixtures/appointment-preview-cutover.test.mjs",
     "test:profile-session": "tsx --test ./src/medina-profile-session-lifetime.test.ts",
+    "test:portal-auth-entry": "node --import tsx --test ./src/medina-contributor-auth-entry.test.ts ./src/medina-operator-auth-entry.test.ts ./src/medina-auth-workspace-handoff.test.ts ./src/medina-workspace-selection.test.ts ./src/medina-auth-profile-session.test.ts ./src/medina-signout-boundary.test.ts ./src/medina-contributor-design-navigation.test.ts",
+    "test:portal-auth-entry-browser": "node --import tsx --test ./fixtures/portal-auth-entry-browser.test.mjs",
     "test:video-worker-process": "tsx --test ./src/medina-video-worker-process-sandbox.test.ts",
     "test:telegram-delivery-postgres": "node --test ./fixtures/telegram-delivery-postgres.test.mjs",
     "test:telegram-recipient-native-http": "node --test ./fixtures/telegram-recipient-native-http.test.mjs",

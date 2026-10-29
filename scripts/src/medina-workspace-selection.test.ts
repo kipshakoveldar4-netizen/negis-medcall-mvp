@@ -296,7 +296,7 @@ test("W5 the picker is mounted and renders only when a choice is actually pendin
   assert.ok(app.includes("<WorkspacePicker />"), "App must mount the picker");
 
   const picker = await readFile(path.join(negisSrc, "components", "WorkspacePicker.tsx"), "utf8");
-  for (const condition of ["!isLoading", "!clinicId", "!isDemoMode", "!isImpersonation", "availableWorkspaces.length > 1"]) {
+  for (const condition of ["!isLoading", "!clinicId", "!isDemoMode", "!isImpersonation", "availableWorkspaces.length > 0", "workspaceSelectionFailed"]) {
     assert.ok(picker.includes(condition), `the picker must be gated on ${condition}`);
   }
   assert.ok(picker.includes("selectWorkspace(workspace.id)"), "choosing must go through the context");
@@ -314,9 +314,11 @@ test("W6 selecting a workspace is refused unless the server listed it", async ()
   );
   assert.ok(
     /if \([^\n]*!selected/.test(body) && body.includes("return;")
-      && body.indexOf("!selected") < body.indexOf("applyMembership("),
+      && body.indexOf("!selected") < body.indexOf("resolveWorkspaceSelection("),
     "anything not in that list must be refused",
   );
+  assert.ok(!body.includes("applyMembership("), "A cached candidate cannot directly grant a workspace");
+  assert.ok(body.includes("expectedUserId: subject"), "Fresh selection is bound to the original subject");
 });
 
 test("W7 the choice is reversible: the sidebar offers it back to multi-clinic users only", async () => {

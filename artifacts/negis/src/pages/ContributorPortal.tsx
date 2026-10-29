@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Link } from "wouter";
 import { ArrowRight, ClipboardList, ExternalLink, FileText, Home, Image, RefreshCw, Send, UserRound, Users, Video } from "lucide-react";
 import { PortalShell } from "@/components/portals/PortalShell";
+import { useAuth } from "@/contexts/AuthContext";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { operatorApi } from "@/lib/operatorApi";
 import { validatePasswordRules } from "../../../../lib/auth/password-rules";
@@ -14,20 +15,30 @@ import { PartnerTerms } from "@/components/contributors/PartnerTerms";
 import { CreatorJobs } from "@/components/contributors/CreatorJobs";
 
 export default function ContributorPortal() {
+  const { signOut } = useAuth();
   const [session, setSession] = useState<{ id: string | null; epoch: number } | null>(null);
   const live = useRef<{ id: string | null; epoch: number }>({ id: null, epoch: 0 });
+  const exiting = useRef(false);
   useLayoutEffect(() => {
     let alive = true, observed = false;
     const apply = (id: string | null) => {
-      if (!alive) return;
+      if (!alive || exiting.current) return;
       if (id !== live.current.id) live.current = { id, epoch: live.current.epoch + 1 };
       setSession(live.current);
     };
     const { data } = supabase.auth.onAuthStateChange((_event, next) => { observed = true; apply(next?.user.id ?? null); });
-    void supabase.auth.getSession().then(({ data, error }) => { if (!observed) apply(error ? null : data.session?.user.id ?? null); }, () => { if (!observed) apply(null); });
+    void Promise.resolve().then(() => supabase.auth.getSession()).then(({ data, error }) => { if (!observed) apply(error ? null : data.session?.user.id ?? null); }, () => { if (!observed) apply(null); });
     return () => { alive = false; live.current = { id: null, epoch: live.current.epoch + 1 }; data.subscription.unsubscribe(); };
   }, []);
-  if (session?.id) return <Application key={session.epoch} userId={session.id} isActorCurrent={() => live.current === session} />;
+  function signOutActor() {
+    if (!session?.id || exiting.current || live.current !== session) return;
+    // Retire private callbacks before the provider starts its asynchronous exit.
+    exiting.current = true;
+    live.current = { id: null, epoch: session.epoch + 1 };
+    setSession(live.current);
+    void signOut().catch(() => {});
+  }
+  if (session?.id) return <Application key={session.epoch} userId={session.id} isActorCurrent={() => live.current === session} onSignOut={signOutActor} />;
   return <PortalShell title="Кабинет блогера" homeHref="/contributors" roleLabel="Партнёрам и авторам" activeId="entry" onNavigate={() => {}}
     items={[{ id: "entry", label: "Вход в кабинет", icon: UserRound }, { id: "operator", label: "Кабинет оператора", icon: ClipboardList, href: "/operator" }, { id: "team", label: "Вход для команды", icon: Users, href: "/login" }]}>
     <div className="portal-form-layout">{!session ? <p role="status">Проверяем вход…</p> : <ContributorLogin key={session.epoch} isCurrent={() => live.current === session} />}</div>
@@ -35,16 +46,32 @@ export default function ContributorPortal() {
 }
 
 function ContributorLogin({ isCurrent }: { isCurrent: () => boolean }) {
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  // Identity, not just the mode string, retires callbacks across repeated modes.
+  const [login, setLogin] = useState<{ mode: "signin" | "signup" }>({ mode: "signin" });
+  const mode = login.mode;
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const liveLogin = useRef(login);
+  const mounted = useRef<object | null>(null);
+  const submission = useRef<object | null>(null);
+  const current = () => mounted.current !== null && liveLogin.current === login && isCurrent();
+  useLayoutEffect(() => {
+    const lifetime = {};
+    mounted.current = lifetime;
+    return () => { mounted.current = null; submission.current = null; };
+  }, []);
+  function changeMode(value: "signin" | "signup") {
+    if (!current() || submission.current) return;
+    const next = { mode: value };
+    liveLogin.current = next;
+    setLogin(next); setPassword(""); setMessage("");
+  }
   async function authenticate(event: React.FormEvent) {
     event.preventDefault();
-    if (busy || !isCurrent()) return;
+    const lifetime = mounted.current;
+    if (!lifetime || !current() || submission.current) return;
     setMessage("");
     if (!hasSupabaseFrontendEnv) { setMessage("Вход пока не настроен."); return; }
     if (mode === "signup") {
@@ -52,30 +79,41 @@ function ContributorLogin({ isCurrent }: { isCurrent: () => boolean }) {
       if (isSyntheticEmail(email) || !email.includes("@")) { setMessage("Укажите личную почту."); return; }
       if (errors.length) { setMessage(errors[0]); return; }
     }
-    setBusy(true);
+    const attempt = {};
+    const credentials = { email: mode === "signup" ? email.trim().toLowerCase() : loginOrEmailToAuthEmail(email), password };
+    submission.current = attempt;
+    const valid = () => mounted.current === lifetime && liveLogin.current === login && submission.current === attempt && isCurrent();
+    setBusy(true); setPassword("");
     try {
       const result = mode === "signup"
-        ? await supabase.auth.signUp({ email: email.trim().toLowerCase(), password, options: { emailRedirectTo: `${window.location.origin}/contributors` } })
-        : await supabase.auth.signInWithPassword({ email: loginOrEmailToAuthEmail(email), password });
-      if (!mounted.current || !isCurrent()) return;
-      setPassword("");
+        ? await supabase.auth.signUp({ ...credentials, options: { emailRedirectTo: `${window.location.origin}/contributors` } })
+        : await supabase.auth.signInWithPassword(credentials);
+      if (!valid()) return;
       if (result.error) setMessage("Не удалось войти. Проверьте почту, пароль и подтверждение почты.");
       else if (!result.data.session) setMessage("Подтвердите почту по ссылке из письма.");
-    } catch { if (mounted.current && isCurrent()) setMessage("Нет связи с сервером. Попробуйте позже."); }
-    finally { if (mounted.current && isCurrent()) setBusy(false); }
+    } catch { if (valid()) setMessage("Нет связи с сервером. Попробуйте позже."); }
+    finally {
+      if (valid()) {
+        submission.current = null;
+        // Old form callbacks must not reuse their captured credentials.
+        const next = { mode };
+        liveLogin.current = next;
+        setLogin(next); setBusy(false);
+      }
+    }
   }
   return <section className="max-w-md space-y-5">
-    <div className="flex gap-2" role="group" aria-label="Способ входа">{(["signin", "signup"] as const).map(value => <button key={value} type="button" aria-pressed={mode === value} disabled={busy} className={mode === value ? "neu-btn neu-btn-primary" : "neu-btn"} onClick={() => { setMode(value); setPassword(""); setMessage(""); }}>{value === "signin" ? "Вход" : "Регистрация"}</button>)}</div>
+    <div className="flex gap-2" role="group" aria-label="Способ входа">{(["signin", "signup"] as const).map(value => <button key={value} type="button" aria-pressed={mode === value} disabled={busy} className={mode === value ? "neu-btn neu-btn-primary" : "neu-btn"} onClick={() => changeMode(value)}>{value === "signin" ? "Вход" : "Регистрация"}</button>)}</div>
     <form onSubmit={event => void authenticate(event)} className="space-y-4">
-      <label className="block text-sm">Почта<input className="neu-input mt-2 w-full" type="email" autoComplete="username" required maxLength={254} value={email} onChange={e => setEmail(e.target.value)} disabled={busy} /></label>
-      <label className="block text-sm">Пароль<input className="neu-input mt-2 w-full" type="password" autoComplete={mode === "signup" ? "new-password" : "current-password"} required value={password} onChange={e => setPassword(e.target.value)} disabled={busy} /></label>
+      <label className="block text-sm">Почта<input className="neu-input mt-2 w-full" type="email" autoComplete="username" required maxLength={254} value={email} onChange={e => { if (current() && !submission.current) setEmail(e.target.value); }} disabled={busy} /></label>
+      <label className="block text-sm">Пароль<input className="neu-input mt-2 w-full" type="password" autoComplete={mode === "signup" ? "new-password" : "current-password"} required value={password} onChange={e => { if (current() && !submission.current) setPassword(e.target.value); }} disabled={busy} /></label>
       <button className="neu-btn neu-btn-primary" disabled={busy} type="submit"><ArrowRight size={16} />{busy ? "Подождите…" : mode === "signin" ? "Войти" : "Зарегистрироваться"}</button>
     </form>
     {message && <p role="status" className="text-sm break-words">{message}</p>}
   </section>;
 }
 
-function Application({ userId, isActorCurrent }: { userId: string; isActorCurrent: () => boolean }) {
+function Application({ userId, isActorCurrent, onSignOut }: { userId: string; isActorCurrent: () => boolean; onSignOut: () => void }) {
   const [profile, setProfile] = useState<ContributorProfile | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
@@ -151,7 +189,7 @@ function Application({ userId, isActorCurrent }: { userId: string; isActorCurren
   const roleStatus = activeMode === "partner" ? profile?.partnerStatus : profile?.creatorStatus;
   const title = isProfile ? "Мой профиль" : section === "portfolio" ? "Моё портфолио" : section === "terms" ? "Условия партнёрства" : activeMode === "partner" ? "Партнёрский кабинет" : "Мои задания";
   return <PortalShell title={title} homeHref="/contributors" roleLabel={activeMode === "partner" ? "Кабинет партнёра" : "Кабинет автора"} displayName={profile?.displayName}
-    onSignOut={() => void supabase.auth.signOut()} activeId={section} onNavigate={setSection}
+    onSignOut={onSignOut} activeId={section} onNavigate={setSection}
     items={[
       { id: "overview", label: activeMode === "partner" ? "Обзор" : "Мои задания", icon: activeMode === "partner" ? Home : ClipboardList },
       ...(activeMode === "partner" ? [{ id: "terms", label: "Код и условия", icon: FileText }] : [{ id: "portfolio", label: "Портфолио", icon: Image }]),

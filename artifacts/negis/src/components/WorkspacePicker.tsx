@@ -2,6 +2,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useLocation } from 'wouter';
 import { isStaffRole } from '@/lib/permissions';
 import { staffRoleLabels } from '../../../../lib/vertical/terms';
+import { RefreshCw } from 'lucide-react';
 
 /**
  * Selection-1: the choice /api/crm/auth-context has been asking for.
@@ -18,11 +19,12 @@ import { staffRoleLabels } from '../../../../lib/vertical/terms';
  */
 export function WorkspacePicker() {
   const [location] = useLocation();
-  const { availableWorkspaces, clinicId, isLoading, isDemoMode, isImpersonation, selectWorkspace, signOut } = useAuth();
+  const { availableWorkspaces, workspaceSelectionFailed, clinicId, isLoading, isDemoMode, isImpersonation, selectWorkspace, signOut } = useAuth();
 
   const needsChoice =
-    !isLoading && !clinicId && !isDemoMode && !isImpersonation && availableWorkspaces.length > 1;
-  if (!needsChoice || location === '/operator' || location === '/partner-company' || /^\/r\/[^/?#\\\s]+\/?$/.test(location)) return null;
+    !isLoading && !clinicId && !isDemoMode && !isImpersonation && (availableWorkspaces.length > 0 || workspaceSelectionFailed);
+  if (!needsChoice || ['/operator', '/contributors', '/partner-company', '/privacy', '/terms', '/data-deletion', '/reset-password'].includes(location)
+    || /^\/r\/[^/?#\\\s]+\/?$/.test(location)) return null;
 
   return (
     <div
@@ -37,9 +39,8 @@ export function WorkspacePicker() {
         style={{ background: 'var(--negis-surface)', color: 'var(--negis-text)' }}
       >
         <h2 className="text-lg font-semibold">Выберите клинику</h2>
-        <p className="mt-1 text-sm opacity-70">
-          Ваш аккаунт связан с несколькими клиниками. Выберите, в какой работать сейчас.
-        </p>
+        <p className="mt-1 text-sm opacity-70">Выберите пространство для работы.</p>
+        {workspaceSelectionFailed && <p role="alert" className="mt-3 text-sm">Доступ не подтверждён. Повторите выбор или обновите список доступов.</p>}
 
         <ul className="mt-5 space-y-2">
           {availableWorkspaces.map((workspace) => (
@@ -62,6 +63,9 @@ export function WorkspacePicker() {
             </li>
           ))}
         </ul>
+        {workspaceSelectionFailed && <button type="button" className="neu-btn mt-4" onClick={() => window.location.reload()}>
+          <RefreshCw size={16} aria-hidden="true" />Обновить доступ
+        </button>}
 
         <button
           type="button"

@@ -230,6 +230,46 @@ checkout/fixture/bundle and 35+30 shared Auth/API tests. Full standard build wit
 353 compiled cold-start checks and final browser 31/31 pass. These overlapping
 local layers do not establish real Auth, cloud or commercial acceptance.
 
+## Current IAB Follow-Up, 29 October
+
+The user reconfirmed the three source mocks. This pass reused the existing
+portals and styles; its runtime changes concern portal entry/sign-out and fresh
+workspace selection, not a new visual direction or public activation.
+
+Current IAB evidence is in `output/design-qa/approved-portals-2026-10-29/`:
+separate `operator`, `partner` and `creator` desktop/mobile images, operator
+mobile menu/filter captures, `*-comparison.png` and `*-header-focus.png`.
+The final operator comparison uses in-progress selection, partner October 2026,
+and creator all jobs. Synthetic identities/counts/history differ intentionally
+from generated illustrations. No real funds, contacts or accounts are shown.
+
+CSS viewports were 1440x1000 and 375x900, DPR 1. The IAB screenshot API returned
+1425x990 and 360x864 pixel files respectively; do not label these as native
+1:1 viewport captures. Full-view comparisons resize only the 1487x1058 source
+proportionally to 1425x1014, crop 59 screenshot pixels of fixture toolbar, and
+place the unscaled implementation beside it with an 8px gutter and bottom
+padding (2858x1014). Header focus pairs are unscaled 900x280 crops on an
+1808x280 canvas. Final matching operator/partner captures were taken after
+observing scrollY 0; the earlier desktop observation file records an interim
+scroll offset, not the final comparison position. An initial partner comparison
+was scrolled and invalid; it was recaptured, regenerated and reopened.
+
+Both source and implementation comparisons were opened. Typography retains
+local Inter and the existing softer UI weights; mint/neutral colors and real
+Lucide icons remain. Mobile navigation, in-progress filtering, opening/closing
+a job and month selection were exercised in IAB. Final mobile observation
+records no horizontal overflow, loaded image and no captured console warnings
+or errors. Browser source uses synthetic Auth/API, not a real session.
+
+This does not resolve the prior full-parity blockers: operator contact-success
+and planned next-contact data still have no authoritative definition, and the
+implemented information density/navigation is not an exact copy of invented
+mock workflows. The creator metadata and longer truthful job descriptions still
+push fewer desktop rows above the fold than the reference. Public applicant
+Auth/consent remains unaccepted. No visual handoff as fully complete is claimed.
+The SDK persistence gap and exact local test layers are recorded in
+`docs/PORTAL-ENTRY-ACCEPTANCE-2026-10-29.md`.
+
 ## Implementation Checklist
 
 - [x] Shared scoped shell, previous font, reduced-motion behavior, actual navigation.

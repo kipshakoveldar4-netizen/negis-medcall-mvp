@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { Link } from "wouter";
 import { ClipboardList, FileText, RefreshCw, Send, UserRound, Users } from "lucide-react";
 import { PortalShell } from "@/components/portals/PortalShell";
+import { useAuth } from "@/contexts/AuthContext";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { operatorApi } from "@/lib/operatorApi";
 import { OperatorRequests } from "@/components/operators/OperatorRequests";
@@ -17,6 +18,7 @@ import {
 } from "../../../../lib/auth/staff-logins";
 
 export default function OperatorPortal() {
+  const { signOut } = useAuth();
   const [userId, setUserId] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [profile, setProfile] = useState<OperatorProfile | null>(null);
@@ -29,11 +31,49 @@ export default function OperatorPortal() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [section, setSection] = useState("work");
+  const mounted = useRef(false);
+  const mountEpoch = useRef(0);
+  const authEpoch = useRef(0);
+  const formEpoch = useRef(0);
+  const currentMode = useRef(mode);
+  const submitting = useRef(false);
+  const exiting = useRef(false);
   const currentUserId = useRef<string | null>(null);
   const profileEpoch = useRef(0);
+  const profileRead = useRef<AbortController | null>(null);
   const profileMutation = useRef<AbortController | null>(null);
+  const renderedMountEpoch = mountEpoch.current;
+  const renderedAuthEpoch = authEpoch.current;
+  const renderedFormEpoch = formEpoch.current;
+  const isAuthSessionCurrent = useCallback(() =>
+    mounted.current && !exiting.current &&
+    mountEpoch.current === renderedMountEpoch &&
+    authEpoch.current === renderedAuthEpoch &&
+    currentUserId.current === userId,
+  [userId, renderedMountEpoch, renderedAuthEpoch]);
+  const retirePrivateState = useCallback(() => {
+    profileRead.current?.abort();
+    profileRead.current = null;
+    profileMutation.current?.abort();
+    profileMutation.current = null;
+    profileEpoch.current += 1;
+    formEpoch.current += 1;
+    submitting.current = false;
+    currentMode.current = "signin";
+    setMode("signin");
+    setEmail("");
+    setPassword("");
+    setName("");
+    // Batched A -> B -> A events still require a new authoritative read.
+    setRevision((value) => value + 1);
+    setProfile(null);
+    setLoaded(false);
+    setBusy(false);
+    setMessage("");
+    setSection("work");
+  }, []);
   const refreshProfile = useCallback(() => {
-    if (!userId || currentUserId.current !== userId) return;
+    if (!userId || !isAuthSessionCurrent()) return;
     profileEpoch.current += 1;
     // The profile controls access to every clinic below. Hide the old account
     // state before asking the server whether approval is still active.
@@ -42,53 +82,65 @@ export default function OperatorPortal() {
     setBusy(Boolean(profileMutation.current));
     setMessage("");
     setRevision((value) => value + 1);
-  }, [userId]);
+  }, [userId, isAuthSessionCurrent]);
   useLayoutEffect(() => {
-    let alive = true;
+    mounted.current = true;
+    // Effect replay can retain userId/ready. Publish fresh lifetime guards
+    // even when the next session snapshot has the same subject.
+    if (mountEpoch.current > 0) retirePrivateState();
+    const startedAtMount = mountEpoch.current;
+    const startedAtAuthEpoch = authEpoch.current;
+    const isMounted = () => mounted.current && !exiting.current &&
+      mountEpoch.current === startedAtMount;
     let authEventSeen = false;
-    const updateSession = (id: string | null) => {
-      if (currentUserId.current !== id) {
-        profileMutation.current?.abort();
-        profileMutation.current = null;
+    const updateSession = (id: string | null, newAuthEpoch = false) => {
+      if (!isMounted()) return;
+      if (currentUserId.current !== id || newAuthEpoch) {
+        authEpoch.current += 1;
         currentUserId.current = id;
-        profileEpoch.current += 1;
-        // Batched A -> B -> A events still require a new authoritative read.
-        setRevision((value) => value + 1);
-        setProfile(null);
-        setLoaded(false);
-        setBusy(false);
-        setMessage("");
-        setSection("work");
+        retirePrivateState();
       }
       setUserId(id);
       setReady(true);
     };
-    void supabase.auth.getSession().then(({ data }) => {
-      if (alive && !authEventSeen) {
-        updateSession(data.session?.user.id ?? null);
-      }
-    });
-    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!isMounted()) return;
       authEventSeen = true;
-      if (alive) updateSession(session?.user.id ?? null);
+      updateSession(session?.user.id ?? null, event === "SIGNED_IN" || event === "SIGNED_OUT");
+    });
+    const canApplySnapshot = () => isMounted() && !authEventSeen &&
+      authEpoch.current === startedAtAuthEpoch;
+    void Promise.resolve().then(() => supabase.auth.getSession()).then(({ data, error }) => {
+      if (canApplySnapshot()) updateSession(error ? null : data.session?.user.id ?? null);
+    }).catch(() => {
+      if (canApplySnapshot()) updateSession(null);
     });
     return () => {
-      alive = false;
+      mounted.current = false;
+      mountEpoch.current += 1;
+      authEpoch.current += 1;
+      formEpoch.current += 1;
+      profileEpoch.current += 1;
+      submitting.current = false;
+      profileRead.current?.abort();
+      profileRead.current = null;
       profileMutation.current?.abort();
       profileMutation.current = null;
       data.subscription.unsubscribe();
     };
-  }, []);
+  }, [retirePrivateState]);
   useEffect(() => {
+    if (!isAuthSessionCurrent()) return;
     setProfile(null);
     setLoaded(false);
     setMessage("");
     if (!userId) return;
     const controller = new AbortController();
+    profileRead.current = controller;
     const startedAtEpoch = profileEpoch.current;
     const isCurrent = () =>
       !controller.signal.aborted &&
-      currentUserId.current === userId &&
+      isAuthSessionCurrent() &&
       profileEpoch.current === startedAtEpoch;
     void operatorApi<OperatorProfile | null>(
       "operator-account",
@@ -112,8 +164,11 @@ export default function OperatorPortal() {
               : "Не удалось загрузить профиль",
           );
       });
-    return () => controller.abort();
-  }, [userId, revision]);
+    return () => {
+      controller.abort();
+      if (profileRead.current === controller) profileRead.current = null;
+    };
+  }, [userId, revision, isAuthSessionCurrent]);
   useEffect(() => {
     if (!userId) return;
     let lastRevalidation = 0;
@@ -133,8 +188,22 @@ export default function OperatorPortal() {
       document.removeEventListener("visibilitychange", revalidateVisibleTab);
     };
   }, [userId, refreshProfile]);
+  function isAuthFormCurrent() {
+    return ready && userId === null && isAuthSessionCurrent() &&
+      formEpoch.current === renderedFormEpoch && currentMode.current === mode;
+  }
+  function changeAuthMode(value: typeof mode) {
+    if (submitting.current || !isAuthFormCurrent() || currentMode.current === value) return;
+    formEpoch.current += 1;
+    currentMode.current = value;
+    setMode(value);
+    setPassword("");
+    setBusy(false);
+    setMessage("");
+  }
   async function authenticate(event: React.FormEvent) {
     event.preventDefault();
+    if (!isAuthFormCurrent() || submitting.current) return;
     setMessage("");
     if (!hasSupabaseFrontendEnv) {
       setMessage(
@@ -153,22 +222,26 @@ export default function OperatorPortal() {
         return;
       }
     }
+    submitting.current = true;
+    const submittedPassword = password;
+    const isCurrent = isAuthFormCurrent;
+    setPassword("");
     setBusy(true);
     try {
       const result =
         mode === "signup"
           ? await supabase.auth.signUp({
               email: email.trim().toLowerCase(),
-              password,
+              password: submittedPassword,
               options: {
                 emailRedirectTo: `${window.location.origin}/operator`,
               },
             })
           : await supabase.auth.signInWithPassword({
               email: loginOrEmailToAuthEmail(email),
-              password,
+              password: submittedPassword,
             });
-      setPassword("");
+      if (!isCurrent()) return;
       if (result.error) {
         setMessage(
           "Не удалось войти. Проверьте почту, пароль и подтверждение почты.",
@@ -180,20 +253,24 @@ export default function OperatorPortal() {
           "Подтвердите почту по ссылке из письма и вернитесь в кабинет оператора.",
         );
     } catch {
-      setMessage("Нет связи с сервером. Попробуйте позже.");
+      if (isCurrent()) setMessage("Нет связи с сервером. Попробуйте позже.");
     } finally {
-      setBusy(false);
+      if (isCurrent()) {
+        formEpoch.current += 1;
+        submitting.current = false;
+        setBusy(false);
+      }
     }
   }
   async function save(body: unknown, method = "POST") {
-    if (!userId || currentUserId.current !== userId || profileMutation.current) return;
+    if (!userId || !isAuthSessionCurrent() || profileMutation.current) return;
     const controller = new AbortController();
     profileMutation.current = controller;
     // A focus refresh or account change invalidates even a successful old PATCH.
     const startedAtEpoch = ++profileEpoch.current;
     const isCurrent = () =>
       !controller.signal.aborted &&
-      currentUserId.current === userId &&
+      isAuthSessionCurrent() &&
       profileEpoch.current === startedAtEpoch;
     setBusy(true);
     setMessage("");
@@ -214,7 +291,7 @@ export default function OperatorPortal() {
     } finally {
       if (profileMutation.current === controller) {
         profileMutation.current = null;
-        if (!controller.signal.aborted && currentUserId.current === userId) {
+        if (!controller.signal.aborted && isAuthSessionCurrent()) {
           if (isCurrent()) setBusy(false);
           // A focus GET may have read the pre-write profile. Reconcile after
           // the write settles without publishing its obsolete approval state.
@@ -223,13 +300,23 @@ export default function OperatorPortal() {
       }
     }
   }
+  function handleSignOut() {
+    if (!userId || !isAuthSessionCurrent()) return;
+    exiting.current = true;
+    authEpoch.current += 1;
+    currentUserId.current = null;
+    retirePrivateState();
+    setUserId(null);
+    setReady(false);
+    void signOut().catch(() => {});
+  }
   const renderedProfileEpoch = profileEpoch.current;
-  const isProfileSessionCurrent = () => currentUserId.current === userId
+  const isProfileSessionCurrent = () => isAuthSessionCurrent()
     && profileEpoch.current === renderedProfileEpoch;
   return (
     <PortalShell homeHref="/operator" title={section === "profile" ? "Мой профиль" : section === "terms" ? "Условия работы" : "Мой рабочий день"}
       roleLabel="Кабинет оператора" displayName={profile?.displayName}
-      activeId={section} onNavigate={setSection} onSignOut={userId ? () => void supabase.auth.signOut() : undefined}
+      activeId={section} onNavigate={setSection} onSignOut={userId ? handleSignOut : undefined}
       actions={userId ? <button type="button" className="neu-btn" disabled={busy}
         title={section === "work" ? "Обновить рабочий день" : "Обновить статус профиля"}
         aria-label={section === "work" ? "Обновить рабочий день" : "Обновить статус профиля"} onClick={refreshProfile}>
@@ -255,10 +342,11 @@ export default function OperatorPortal() {
                 <button
                   type="button"
                   role="tab"
+                  disabled={busy}
                   aria-selected={mode === value}
                   key={value}
                   className={`border-b-2 py-2 ${mode === value ? "border-teal-600 font-semibold" : "border-transparent"}`}
-                  onClick={() => setMode(value)}
+                  onClick={() => changeAuthMode(value)}
                 >
                   {value === "signin" ? "Войти" : "Регистрация"}
                 </button>
@@ -269,10 +357,13 @@ export default function OperatorPortal() {
               <input
                 className="neu-input mt-1 w-full"
                 required
+                disabled={busy}
                 autoComplete="username"
                 type={mode === "signin" ? "text" : "email"}
                 value={email}
-                onChange={(event) => setEmail(event.target.value)}
+                onChange={(event) => {
+                  if (!submitting.current && isAuthFormCurrent()) setEmail(event.target.value);
+                }}
               />
             </label>
             <label className="block text-sm">
@@ -280,12 +371,15 @@ export default function OperatorPortal() {
               <input
                 className="neu-input mt-1 w-full"
                 required
+                disabled={busy}
                 type="password"
                 autoComplete={
                   mode === "signin" ? "current-password" : "new-password"
                 }
                 value={password}
-                onChange={(event) => setPassword(event.target.value)}
+                onChange={(event) => {
+                  if (!submitting.current && isAuthFormCurrent()) setPassword(event.target.value);
+                }}
               />
             </label>
             <button className="neu-btn-primary" disabled={busy} type="submit">
@@ -324,7 +418,9 @@ export default function OperatorPortal() {
                 maxLength={120}
                 className="neu-input mt-1 w-full"
                 value={name}
-                onChange={(event) => setName(event.target.value)}
+                onChange={(event) => {
+                  if (isAuthSessionCurrent()) setName(event.target.value);
+                }}
               />
             </label>
             <button type="submit" className="neu-btn-primary" disabled={busy}>

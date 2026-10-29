@@ -2,6 +2,8 @@ import { createPortalDesignStore } from "./portal-design-store";
 
 export const portalDesignStore = createPortalDesignStore(window.location.href);
 export const hasSupabaseFrontendEnv = true;
+// Visual fixture only; composed provider/sign-out behavior is covered separately.
+export const useAuth = () => ({ signOut: async () => { portalDesignStore.switchActor(null); } });
 export const supabase = { auth: {
   getSession: async () => ({ data: { session: portalDesignStore.session() }, error: null }),
   onAuthStateChange: portalDesignStore.onAuthStateChange,

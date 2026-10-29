@@ -35,6 +35,7 @@ export async function portalDesignConfig(port = 5290, { prebundle = true, watch 
   const resolve = isolatedPwaResolve();
   resolve.alias = resolve.alias.filter(alias => !['@/contexts/AuthContext', '@/lib/api', '@/lib/supabase'].includes(alias.find));
   resolve.alias.unshift({ find: '@/lib/supabase', replacement: mocks });
+  resolve.alias.unshift({ find: '@/contexts/AuthContext', replacement: mocks });
   const cache = path.join(tmpdir(), `medina-portal-design-${process.pid}-${port}`, 'node_modules/.vite');
   const allowed = [path.join(frontend, 'src'), path.join(frontend, 'public'), path.join(root, 'scripts/fixtures'), path.join(root, 'lib/crm'), path.join(root, 'lib/auth'), path.join(root, 'node_modules'), path.join(frontend, 'node_modules'), cache];
   let origin;
@@ -44,7 +45,7 @@ export async function portalDesignConfig(port = 5290, { prebundle = true, watch 
       if (/^(?:https?:|\/\/|@supabase\/|@anthropic-ai\/|openai(?:\/|$)|node:)/i.test(source)) throw Error('Fixture blocked an external or server import');
       const target = source.startsWith('.') && importer ? path.resolve(path.dirname(importer.split('?')[0]), source) : source;
       if (/\/src\/lib\/supabase(?:\.[cm]?[jt]s)?$/.test(normalize(target))) return mocks;
-      if (/\/src\/contexts\/authcontext(?:\.tsx)?$/.test(normalize(target))) throw Error('Fixture must not load the production Auth provider');
+      if (/\/src\/contexts\/authcontext(?:\.tsx)?$/.test(normalize(target))) return mocks;
       return null;
     },
     configureServer(vite) {
