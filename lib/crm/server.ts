@@ -7271,7 +7271,7 @@ async function confirmPrivateVideoBucket(supabase: NonNullable<ReturnType<typeof
     if (error || data?.id !== bucket || data.public !== false || !Number.isSafeInteger(data.file_size_limit)
       || Number(data.file_size_limit) < size || Number(data.file_size_limit) > 500 * 1024 * 1024
       || !Array.isArray(data.allowed_mime_types) || !data.allowed_mime_types.includes(mime)
-      || data.allowed_mime_types.some(value => !VIDEO_MIME_TYPES.has(value))) throw new Error();
+      || data.allowed_mime_types.some((value: string) => !VIDEO_MIME_TYPES.has(value))) throw new Error();
   } catch { throw new VideoJobReceiptError(503); }
 }
 
