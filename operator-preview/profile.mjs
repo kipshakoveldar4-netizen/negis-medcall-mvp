@@ -82,7 +82,7 @@ export function requireOperatorPreview(env, phase, expectedProjectId = qaProject
     if (platformBinding(name.toUpperCase())) continue;
     unexpectedBindings.push(name);
   }
-  if (unexpectedBindings.length) fail("unexpected_binding");
+  if (unexpectedBindings.length) fail("unexpected_binding:" + unexpectedBindings.join(","));
   if (phase === "build") {
     if (env.VITE_SUPABASE_URL !== testDatabaseOrigin
       || (env.VITE_API_BASE_URL && env.VITE_API_BASE_URL !== "/")) fail("frontend_origin");
