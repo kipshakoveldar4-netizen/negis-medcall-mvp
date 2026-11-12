@@ -68,7 +68,7 @@ export function requireOperatorPreview(env, phase, expectedProjectId = qaProject
     if (name === "NODE_OPTIONS" && isSafeNodeOptions(value)) continue;
     if (name === "NODE_OPTIONS") fail("node_options:" + value.replace(/[^A-Za-z0-9_=.-]/g, "_"));
     if (platformBinding(name.toUpperCase())) continue;
-    fail("unexpected_binding");
+    fail("unexpected_binding:" + name);
   }
   if (phase === "build") {
     if (env.VITE_SUPABASE_URL !== testDatabaseOrigin
