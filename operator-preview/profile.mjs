@@ -23,6 +23,14 @@ const systemBindings = new Set([
   "LD_LIBRARY_PATH", "LAMBDA_TASK_ROOT", "LAMBDA_RUNTIME_DIR",
   "UV_PYTHON_BIN_DIR",
   "TRACESTATE", "TRACEPARENT", "BAGGAGE",
+  "UV_PYTHON_INSTALL_DIR", "VITE_VERCEL_OBSERVABILITY_CLIENT_CONFIG", "FAKEROOTKEY",
+  "PUBLIC_VERCEL_OBSERVABILITY_CLIENT_CONFIG", "CARGO_HOME", "RUNTIME_CACHE_ENDPOINT",
+  "pnpm_config_cache_dir", "RUNTIME_CACHE_HEADERS", "NEXT_SHARP_PATH", "NOW_BUILDER",
+  "TURBO_DOWNLOAD_LOCAL_ENABLED", "DD_TRACE_STARTUP_LOGS", "NX_DAEMON", "RUSTUP_HOME",
+  "TURBO_CACHE", "UV_PYTHON_PREFERENCE", "TURBO_REMOTE_ONLY", "NEXT_PUBLIC_VERCEL_OBSERVABILITY_CLIENT_CONFIG",
+  "VERCEL", "DD_TAGS", "TURBO_RUN_SUMMARY", "TURBO_PLATFORM_ENV", "UV_THREADPOOL_SIZE",
+  "BUN_INSTALL_GLOBAL_STORE", "NEXT_ENABLE_ADAPTER", "__VERCEL_BUILD_RUNNING", "NEXT_PRIVATE_MULTI_PAYLOAD",
+  "UV_PYTHON_DOWNLOADS", "UV_PYTHON_DOWNLOADS_JSON_URL",
   "PORT", "INIT_CWD", "PNPM_SCRIPT_SRC_DIR", "NPM_EXECPATH",
 ]);
 
@@ -74,7 +82,7 @@ export function requireOperatorPreview(env, phase, expectedProjectId = qaProject
     if (platformBinding(name.toUpperCase())) continue;
     unexpectedBindings.push(name);
   }
-  if (unexpectedBindings.length) fail("unexpected_binding:" + unexpectedBindings.join(","));
+  if (unexpectedBindings.length) fail("unexpected_binding");
   if (phase === "build") {
     if (env.VITE_SUPABASE_URL !== testDatabaseOrigin
       || (env.VITE_API_BASE_URL && env.VITE_API_BASE_URL !== "/")) fail("frontend_origin");
