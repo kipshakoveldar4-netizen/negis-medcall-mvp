@@ -32,6 +32,11 @@ function fail(code) {
   throw new Error("Operator Preview refused: " + code);
 }
 
+function isSafeNodeOptions(value) {
+  return typeof value === "string" && value.trim().split(/\s+/).every(flag =>
+    flag === "--enable-source-maps" || /^--max-old-space-size=\d+$/.test(flag));
+}
+
 function assertLegacySupabaseBinding(value, role) {
   const parts = typeof value === "string" && value.length <= 4096 ? value.split(".") : [];
   if (parts.length !== 3 || parts.some(part => !/^[A-Za-z0-9_-]+$/.test(part))) fail("key_format");
@@ -60,9 +65,9 @@ export function requireOperatorPreview(env, phase, expectedProjectId = qaProject
     if (typeof value !== "string" || !value.trim()) continue;
     if (allowedBindings.has(name)) continue;
     if (disabledFlags.has(name) && value === "false") continue;
-    if (name === "NODE_OPTIONS" && value === "--enable-source-maps") continue;
+    if (name === "NODE_OPTIONS" && isSafeNodeOptions(value)) continue;
     if (platformBinding(name.toUpperCase())) continue;
-    fail("unexpected_binding:" + name);
+    fail("unexpected_binding");
   }
   if (phase === "build") {
     if (env.VITE_SUPABASE_URL !== testDatabaseOrigin
