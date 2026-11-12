@@ -3,6 +3,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 type Config = { supabase: SupabaseClient; origin: string; serviceRoleKey: string };
 type Row = Record<string, unknown>;
+type StorageUploadReply = { data: { path?: string } | null; error: unknown };
+type StorageResponse = { body: ReadableStream<Uint8Array> | null; headers: { get(name: string): string | null }; status: number; redirected: boolean; url: string };
+type StorageFetch = (url: string, init: RequestInit) => Promise<StorageResponse>;
 type Claim = { operationId: string; workspaceId: string; fileName: string; mimeType: string; fileSize: number;
   issuedAt: number; expiresAt: number; claimId: string; claimedUntil: string };
 const bucket = "ad-creatives-staging";
@@ -80,7 +83,8 @@ async function provePrivateTombstone(config: Config, url: string, mimeType: stri
     timer = setTimeout(() => { controller.abort(); reject(unavailable()); }, 10_000);
   });
   try {
-    const pending = fetch(url, { method: "GET", redirect: "error", credentials: "omit", cache: "no-store",
+    const request = fetch as unknown as StorageFetch;
+    const pending = request(url, { method: "GET", redirect: "error", credentials: "omit", cache: "no-store",
       signal: controller.signal, headers: { Authorization: `Bearer ${config.serviceRoleKey}`, apikey: config.serviceRoleKey } });
     void pending.then(response => {
       if (controller.signal.aborted) {
@@ -138,7 +142,8 @@ export async function reclaimStagedCreativeUploads(config: Config, workspaceId: 
       if (!(isoTime(claim.claimedUntil) > Date.now())) throw unavailable();
       let unknownOutcome = true;
       try {
-        const reply = await bounded(() => config.supabase.storage.from(bucket).upload(path, Buffer.from(bytes), { contentType: claim.mimeType, upsert: true }));
+        const upload = config.supabase.storage.from(bucket).upload(path, Buffer.from(bytes), { contentType: claim.mimeType, upsert: true });
+        const reply = await bounded(() => upload as unknown as Promise<StorageUploadReply>);
         unknownOutcome = Boolean(reply.error) || reply.data?.path !== path;
       } catch { /* A lost SDK ACK is reconciled only against exact private bytes. */ }
       try { await provePrivateTombstone(config, url, claim.mimeType, bytes.length, sha256); break; }
