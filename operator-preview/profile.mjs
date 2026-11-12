@@ -34,7 +34,7 @@ function fail(code) {
 
 function isSafeNodeOptions(value) {
   return typeof value === "string" && value.trim().split(/\s+/).every(flag =>
-    flag === "--enable-source-maps" || /^--max-old-space-size=\d+$/.test(flag));
+    flag === "--enable-source-maps" || /^--max[_-]old[_-]space[_-]size=\d+$/.test(flag));
 }
 
 function assertLegacySupabaseBinding(value, role) {
@@ -67,7 +67,7 @@ export function requireOperatorPreview(env, phase, expectedProjectId = qaProject
     if (disabledFlags.has(name) && value === "false") continue;
     if (name === "NODE_OPTIONS" && isSafeNodeOptions(value)) continue;
     if (platformBinding(name.toUpperCase())) continue;
-    fail("unexpected_binding:" + name);
+    fail("unexpected_binding");
   }
   if (phase === "build") {
     if (env.VITE_SUPABASE_URL !== testDatabaseOrigin
