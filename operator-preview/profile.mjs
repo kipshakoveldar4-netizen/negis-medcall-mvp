@@ -22,6 +22,7 @@ const systemBindings = new Set([
   "LANG", "LANGUAGE", "TERM", "FORCE_COLOR", "NO_COLOR", "COREPACK_HOME", "PNPM_HOME",
   "LD_LIBRARY_PATH", "LAMBDA_TASK_ROOT", "LAMBDA_RUNTIME_DIR",
   "UV_PYTHON_BIN_DIR",
+  "TRACESTATE", "TRACEPARENT", "BAGGAGE",
   "PORT", "INIT_CWD", "PNPM_SCRIPT_SRC_DIR", "NPM_EXECPATH",
 ]);
 
@@ -70,7 +71,7 @@ export function requireOperatorPreview(env, phase, expectedProjectId = qaProject
     if (name === "NODE_OPTIONS" && isSafeNodeOptions(value)) continue;
     if (name === "NEXT_EXPERIMENTAL_LARGE_FUNCTIONS" && ["1", "true"].includes(value.toLowerCase())) continue;
     if (platformBinding(name.toUpperCase())) continue;
-    fail("unexpected_binding:" + name);
+    fail("unexpected_binding");
   }
   if (phase === "build") {
     if (env.VITE_SUPABASE_URL !== testDatabaseOrigin
