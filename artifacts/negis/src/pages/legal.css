@@ -1,0 +1,21 @@
+.public-legal-page {
+  overflow-wrap: anywhere;
+}
+
+.public-legal-panel {
+  padding: 48px 52px;
+}
+
+.public-legal-title {
+  font-size: 28px;
+}
+
+@media (max-width: 600px) {
+  .public-legal-panel {
+    padding: 28px 20px;
+  }
+
+  .public-legal-title {
+    font-size: 24px;
+  }
+}

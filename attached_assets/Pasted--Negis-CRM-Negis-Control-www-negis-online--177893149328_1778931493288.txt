@@ -1,0 +1,228 @@
+Настроить Negis CRM для входа из Negis Control через домен www.negis.online.
+
+У меня есть отдельная супер-админка Negis Control. Домен для неё:
+
+https://www.negis.online
+
+Нужно в основном Replit-проекте Negis CRM добавить поддержку входа из Negis Control без ввода логина и пароля.
+
+1. Добавить в Replit Secrets основного Negis CRM:
+
+Key:
+VITE_NEGIS_CONTROL_API_URL
+
+Value:
+https://www.negis.online
+
+2. ВАЖНО: не ломать существующую авторизацию.
+
+Обычный вход клиники по email/паролю должен работать как раньше.
+
+Нужно добавить отдельный startup-flow:
+
+если в URL есть параметр impersonate_token → обработать вход из Negis Control;
+если impersonate_token нет → работать по старой логике.
+
+3. Когда Negis CRM открывается по ссылке вида:
+
+https://negis-crm.replit.app/?impersonate_token=JWT_TOKEN&clinic_id=CLINIC_ID
+
+приложение должно до обычного redirect на login:
+- прочитать impersonate_token из URL;
+- отправить его на Negis Control API;
+- получить данные клиники;
+- создать локальную сессию администратора клиники;
+- убрать токен из URL;
+- открыть основной dashboard CRM.
+
+4. Endpoint проверки токена:
+
+POST https://www.negis.online/api/impersonation/verify
+Content-Type: application/json
+
+Body:
+{
+  "token": "JWT_TOKEN_FROM_URL"
+}
+
+Успешный ответ:
+
+{
+  "clinicId": "uuid",
+  "clinicName": "Clinic name",
+  "ownerEmail": "owner@email.com",
+  "issuedBy": "superadmin@email.com"
+}
+
+Ошибка:
+
+{
+  "error": "Токен истёк или недействителен"
+}
+
+5. Реализация на frontend.
+
+Найти текущую auth/session логику проекта. Проверить файлы:
+
+- src/App.tsx
+- src/main.tsx
+- src/hooks/useAuth.ts
+- src/context/AuthContext.tsx
+- src/lib/auth.ts
+- src/pages/Login.tsx
+- src/integrations/supabase/client.ts
+- index.html, если проект single-file
+
+Добавить проверку impersonate_token до обычной проверки авторизации.
+
+Пример логики:
+
+const params = new URLSearchParams(window.location.search);
+const token = params.get('impersonate_token');
+
+if (token) {
+  const apiUrl = import.meta.env.VITE_NEGIS_CONTROL_API_URL;
+
+  if (!apiUrl) {
+    showError('Negis Control API не настроен');
+    redirectToLogin();
+    return;
+  }
+
+  const response = await fetch(`${apiUrl}/api/impersonation/verify`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ token })
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    clearImpersonationSession();
+    window.history.replaceState({}, document.title, window.location.origin + window.location.pathname);
+    showError(data.error || 'Доступ по ссылке истёк. Войдите снова из Negis Control.');
+    redirectToLogin();
+    return;
+  }
+
+  createClinicAdminSession(data);
+  window.history.replaceState({}, document.title, window.location.origin + window.location.pathname);
+  redirectToDashboard();
+}
+
+6. Функция createClinicAdminSession должна заполнить localStorage/session так, чтобы Negis CRM считал пользователя авторизованным администратором выбранной клиники.
+
+Минимальные ключи:
+
+localStorage.setItem('negis_session', JSON.stringify({
+  mode: 'impersonation',
+  role: 'admin',
+  clinic_id: data.clinicId,
+  clinic_name: data.clinicName,
+  email: data.ownerEmail,
+  issued_by: data.issuedBy,
+  started_at: new Date().toISOString()
+}));
+
+localStorage.setItem('negis_impersonation', JSON.stringify({
+  active: true,
+  clinic_id: data.clinicId,
+  clinic_name: data.clinicName,
+  owner_email: data.ownerEmail,
+  issued_by: data.issuedBy
+}));
+
+localStorage.setItem('negis_clinic_id', data.clinicId);
+
+Но обязательно нужно изучить, какие ключи Negis CRM уже использует после обычного входа клиники. Если есть ключи вроде:
+
+- negis_user
+- negis_current_user
+- currentUser
+- auth_user
+- userRole
+- clinic_id
+- selected_clinic
+- supabase.auth.token
+- любые другие auth/session keys
+
+их тоже нужно заполнить так же, как после обычного login администратора клиники.
+
+7. Data scoping.
+
+В режиме impersonation все данные должны быть отфильтрованы по:
+
+clinic_id = data.clinicId
+
+Пользователь должен видеть только:
+- лиды выбранной клиники;
+- записи выбранной клиники;
+- сотрудников выбранной клиники;
+- услуги выбранной клиники;
+- настройки выбранной клиники;
+- аналитику выбранной клиники.
+
+Нельзя показывать данные других клиник.
+
+8. Баннер режима просмотра.
+
+Если localStorage.negis_impersonation.active === true, сверху CRM должен показывать красный баннер:
+
+Режим просмотра: {clinicName} | Выйти
+
+Кнопка “Выйти” должна:
+- удалить negis_session;
+- удалить negis_impersonation;
+- удалить negis_clinic_id;
+- удалить все дополнительные auth/session keys, созданные impersonation-flow;
+- вернуть на обычный login screen.
+
+9. Ошибка токена.
+
+Если токен истёк или недействителен:
+- удалить impersonate_token из URL;
+- очистить impersonation/session keys;
+- показать ошибку:
+  Доступ по ссылке истёк. Войдите снова из Negis Control.
+- открыть login screen.
+
+10. Безопасность.
+
+НЕ использовать service_role key во frontend.
+
+Если в Replit Secrets есть:
+VITE_SUPABASE_SERVICE_ROLE_KEY
+
+не использовать его в браузерном коде. Всё с VITE_ попадает во frontend bundle.
+
+Разрешённые frontend-переменные:
+VITE_SUPABASE_URL
+VITE_SUPABASE_ANON_KEY
+VITE_NEGIS_CONTROL_API_URL
+
+Опасные переменные, которые нельзя использовать во frontend:
+VITE_SUPABASE_SERVICE_ROLE_KEY
+VITE_TELEGRAM_BOT_TOKEN
+
+Если service role или Telegram bot token нужны, они должны быть server-side без VITE_:
+SUPABASE_SERVICE_ROLE_KEY
+TELEGRAM_BOT_TOKEN
+
+11. Acceptance criteria.
+
+После доработки:
+
+- обычный login Negis CRM работает как раньше;
+- если открыть CRM без impersonate_token, ничего не меняется;
+- если открыть CRM с impersonate_token, CRM не спрашивает email/password;
+- CRM сразу открывается как admin/owner выбранной клиники;
+- все данные отфильтрованы по выбранному clinic_id;
+- сверху виден красный баннер “Режим просмотра: {clinicName} | Выйти”;
+- refresh страницы сохраняет impersonation-сессию;
+- “Выйти” из баннера очищает impersonation и возвращает на login;
+- истёкший/невалидный токен возвращает на login с ошибкой;
+- service role key не попадает в frontend bundle.
+
+12. Важно: сначала сделать backup/duplicate Replit проекта, затем вносить изменения.

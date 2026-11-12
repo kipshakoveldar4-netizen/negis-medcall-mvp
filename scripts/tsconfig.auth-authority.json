@@ -1,0 +1,14 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "lib": ["es2022", "dom", "dom.iterable"],
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": [
+    "src/medina-auth-mutation-entry.test.ts",
+    "src/medina-auth-mutation-session.test.ts",
+    "src/medina-auth-password-authority.test.ts"
+  ]
+}

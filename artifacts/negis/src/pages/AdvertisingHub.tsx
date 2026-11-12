@@ -1,0 +1,1485 @@
+import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation } from "wouter";
+import {
+  AlertTriangle,
+  ArrowRight,
+  BarChart3,
+  Bot,
+  CheckCircle2,
+  Clapperboard,
+  Clock3,
+  FlaskConical,
+  History,
+  Megaphone,
+  MousePointerClick,
+  RefreshCw,
+  Rocket,
+  Target,
+  Upload,
+  WalletCards,
+} from "lucide-react";
+import { PageLayout } from "@/components/layout/PageLayout";
+import { PageHeader } from "@/components/ui/page-header";
+import { MetricCard } from "@/components/ui/metric-card";
+import { useAuth } from "@/contexts/AuthContext";
+import { crmFetch } from "@/lib/api";
+import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
+import { isRealWorkspace, readDemoStorage, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
+import { getSupabaseAccessToken } from "@/lib/serverAuth";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
+import { parseMetaInsightsHistorySummaries, type MetaInsightsHistorySummary } from "@/lib/metaInsightsHistory";
+import {
+  ADVERTISING_CAMPAIGN_PREFILL_KEY,
+  ADVERTISING_CONTENT_STUDIO_PREFILL_KEY,
+  createAdvertisingCampaignPrefill,
+  normalizeAdvertisingContentApproval,
+  type AdvertisingContentApproval,
+} from "../../../../lib/advertising/campaignBrief";
+import { buildAdvertisingAssistantBrief } from "../../../../lib/advertising/assistant";
+import { buildCreativeExperimentGroups } from "../../../../lib/advertising/creativeEvidence";
+import { KZ_META_CITY_OPTIONS } from "../../../../lib/meta/cities";
+
+type LoadState = "loading" | "ready" | "error";
+type LaunchState = "paused" | "active" | "failed" | "dry_run" | "video_processing" | "unknown";
+type InsightsAccess = "idle" | "checking" | "ready" | "required" | "forbidden" | "error";
+type AdvertisingLaunch = {
+  id: string;
+  campaignName: string;
+  status: string;
+  metaStatus: string;
+  metaCampaignId: string;
+  budgetDailyMinor: number | null;
+  currency: string;
+  lastError: string;
+  createdAt: string;
+  contentApproval?: AdvertisingContentApproval;
+};
+
+type LaunchesResponse = {
+  success?: boolean;
+  mode?: string;
+  data?: {
+    launches?: unknown;
+    items?: unknown;
+  };
+};
+
+type ApiEnvelope<T> = {
+  success?: boolean;
+  mode?: string;
+  data?: T;
+  error?: string;
+  details?: string[];
+};
+
+type ServerAdminAuthContext = {
+  workspaceId?: string;
+  role?: string;
+  isAdmin?: boolean;
+};
+
+type AdvertisingInsightsAggregate = {
+  campaignsWithData: number;
+  spendByCurrency: Array<{
+    currency: string;
+    currencyExponent: number;
+    spendMinor: bigint;
+  }>;
+  impressions: bigint;
+  clicks: bigint;
+  inlineLinkClicks: bigint;
+  metaLeads: bigint;
+  hasMetaLeads: boolean;
+  coveredDateStart: string | null;
+  coveredDateStop: string | null;
+  latestFetchedAt: string | null;
+};
+
+type CrmAdvertisingOutcomes = {
+  attributedLeads: number;
+  unattributedLeads: number;
+  paidAttributedDeals: number;
+  paidUnattributedDeals: number;
+  paidAppointmentDeals: number;
+  paidAttributedAppointmentDeals: number;
+  pendingDeals: number;
+  attributedRevenueByCurrency: Array<{
+    currency: string;
+    currencyExponent: number;
+    amountMinor: bigint;
+  }>;
+  generatedAt: string;
+};
+
+type CrmAdvertisingOutcomesPayload = {
+  attributedLeads?: unknown;
+  unattributedLeads?: unknown;
+  paidAttributedDeals?: unknown;
+  paidUnattributedDeals?: unknown;
+  paidAppointmentDeals?: unknown;
+  paidAttributedAppointmentDeals?: unknown;
+  pendingDeals?: unknown;
+  attributedRevenueByCurrency?: unknown;
+  generatedAt?: unknown;
+};
+
+const EMPTY_CRM_ADVERTISING_OUTCOMES: CrmAdvertisingOutcomes = {
+  attributedLeads: 0,
+  unattributedLeads: 0,
+  paidAttributedDeals: 0,
+  paidUnattributedDeals: 0,
+  paidAppointmentDeals: 0,
+  paidAttributedAppointmentDeals: 0,
+  pendingDeals: 0,
+  attributedRevenueByCurrency: [],
+  generatedAt: "",
+};
+
+type CampaignGoalForm = {
+  service: string;
+  cityId: string;
+  targetPatients: string;
+  durationDays: string;
+  maxBudget: string;
+};
+
+type CampaignGoalDestination = "/ads-automation" | "/content-studio";
+
+const defaultCampaignGoal: CampaignGoalForm = {
+  service: "",
+  cityId: "astana",
+  targetPatients: "",
+  durationDays: "14",
+  maxBudget: "",
+};
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function readString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function readNullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+async function readJson<T>(response: Response): Promise<ApiEnvelope<T>> {
+  const text = await response.text();
+  if (!text.trim()) return {};
+  try {
+    return JSON.parse(text) as ApiEnvelope<T>;
+  } catch {
+    return {};
+  }
+}
+
+function readNonNegativeBigInt(value: unknown): bigint {
+  if (typeof value === "bigint") return value >= 0n ? value : 0n;
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 0 ? BigInt(value) : 0n;
+  }
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!/^\d+$/.test(normalized)) return 0n;
+  try {
+    return BigInt(normalized);
+  } catch {
+    return 0n;
+  }
+}
+
+function requiredCount(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error("invalid_crm_outcome_count");
+  }
+  return value;
+}
+
+function requiredMinorAmount(value: unknown): bigint {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!/^\d+$/.test(normalized)) throw new Error("invalid_crm_outcome_amount");
+  return BigInt(normalized);
+}
+
+function parseCrmAdvertisingOutcomes(value: unknown): CrmAdvertisingOutcomes {
+  const payload = asRecord(value) as CrmAdvertisingOutcomesPayload;
+  const revenueRows = payload.attributedRevenueByCurrency;
+  if (!Array.isArray(revenueRows)) throw new Error("invalid_crm_outcome_revenue");
+
+  const attributedRevenueByCurrency = revenueRows.map((raw) => {
+    const row = asRecord(raw);
+    const currency = readString(row.currency).toUpperCase();
+    const currencyExponent = row.currencyExponent;
+    if (!/^[A-Z]{3}$/.test(currency) || !Number.isInteger(currencyExponent) || Number(currencyExponent) < 0 || Number(currencyExponent) > 6) {
+      throw new Error("invalid_crm_outcome_currency");
+    }
+    return {
+      currency,
+      currencyExponent: Number(currencyExponent),
+      amountMinor: requiredMinorAmount(row.amountMinor),
+    };
+  });
+  const generatedAt = readString(payload.generatedAt);
+  if (!generatedAt || Number.isNaN(Date.parse(generatedAt))) throw new Error("invalid_crm_outcome_time");
+
+  const paidAttributedDeals = requiredCount(payload.paidAttributedDeals);
+  const paidUnattributedDeals = requiredCount(payload.paidUnattributedDeals);
+  const paidAppointmentDeals = requiredCount(payload.paidAppointmentDeals);
+  const paidAttributedAppointmentDeals = requiredCount(payload.paidAttributedAppointmentDeals);
+  const totalPaidDeals = paidAttributedDeals + paidUnattributedDeals;
+  if (
+    !Number.isSafeInteger(totalPaidDeals)
+    || paidAppointmentDeals > totalPaidDeals
+    || paidAttributedAppointmentDeals > paidAppointmentDeals
+    || paidAttributedAppointmentDeals > paidAttributedDeals
+  ) {
+    throw new Error("invalid_crm_outcome_links");
+  }
+
+  return {
+    attributedLeads: requiredCount(payload.attributedLeads),
+    unattributedLeads: requiredCount(payload.unattributedLeads),
+    paidAttributedDeals,
+    paidUnattributedDeals,
+    paidAppointmentDeals,
+    paidAttributedAppointmentDeals,
+    pendingDeals: requiredCount(payload.pendingDeals),
+    attributedRevenueByCurrency,
+    generatedAt,
+  };
+}
+
+function formatCount(value: bigint): string {
+  return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatMinorAmount(value: bigint, currencyExponent: number, currency: string): string {
+  if (!Number.isInteger(currencyExponent) || currencyExponent < 0 || currencyExponent > 6) return "Нет данных";
+  const divisor = 10n ** BigInt(currencyExponent);
+  const whole = value / divisor;
+  const fraction = currencyExponent > 0
+    ? (value % divisor).toString().padStart(currencyExponent, "0").replace(/0+$/, "")
+    : "";
+  const amount = `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(whole)}${fraction ? `,${fraction}` : ""}`;
+  return `${amount} ${currency}`;
+}
+
+function formatCrmRevenueAmount(value: bigint, currencyExponent: number, currency: string): string {
+  const formatted = formatMinorAmount(value, currencyExponent, currency);
+  return currency === "KZT" ? formatted.replace(/ KZT$/, " ₸") : formatted;
+}
+
+function formatInsightsDateRange(dateStart: string | null, dateStop: string | null): string {
+  if (!dateStart || !dateStop) return "Период не указан";
+  const start = new Date(`${dateStart}T00:00:00`);
+  const stop = new Date(`${dateStop}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(stop.getTime())) return "Период не указан";
+  const formatter = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short", year: "numeric" });
+  return dateStart === dateStop ? formatter.format(start) : `${formatter.format(start)} - ${formatter.format(stop)}`;
+}
+
+function formatInsightsUpdate(value: string | null): string {
+  if (!value) return "Время обновления не указано";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Время обновления не указано";
+  return `Обновлено ${new Intl.DateTimeFormat("ru-RU", {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date)}`;
+}
+
+function aggregateAdvertisingInsights(summaries: MetaInsightsHistorySummary[]): AdvertisingInsightsAggregate {
+  const available = summaries.filter(
+    (summary) => summary.availability === "available" && summary.freshness === "fresh" && summary.rowCount > 0,
+  );
+  const spend = new Map<string, { currency: string; currencyExponent: number; spendMinor: bigint }>();
+  let impressions = 0n;
+  let clicks = 0n;
+  let inlineLinkClicks = 0n;
+  let metaLeads = 0n;
+  let hasMetaLeads = false;
+  let coveredDateStart: string | null = null;
+  let coveredDateStop: string | null = null;
+  let latestFetchedAt: string | null = null;
+  let latestFetchedTime = Number.NEGATIVE_INFINITY;
+
+  for (const summary of available) {
+    impressions += readNonNegativeBigInt(summary.impressions);
+    clicks += readNonNegativeBigInt(summary.clicks);
+    inlineLinkClicks += readNonNegativeBigInt(summary.inlineLinkClicks);
+    if (summary.metaLeads !== null) {
+      metaLeads += readNonNegativeBigInt(summary.metaLeads);
+      hasMetaLeads = true;
+    }
+    if (summary.coveredDateStart && (!coveredDateStart || summary.coveredDateStart < coveredDateStart)) {
+      coveredDateStart = summary.coveredDateStart;
+    }
+    if (summary.coveredDateStop && (!coveredDateStop || summary.coveredDateStop > coveredDateStop)) {
+      coveredDateStop = summary.coveredDateStop;
+    }
+    const fetchedTime = Date.parse(summary.latestFetchedAt || "");
+    if (Number.isFinite(fetchedTime) && fetchedTime > latestFetchedTime) {
+      latestFetchedTime = fetchedTime;
+      latestFetchedAt = summary.latestFetchedAt;
+    }
+    for (const item of summary.spendByCurrency) {
+      const currency = item.currency.trim().toUpperCase();
+      if (!currency || !Number.isInteger(item.currencyExponent)) continue;
+      const key = `${currency}:${item.currencyExponent}`;
+      const current = spend.get(key);
+      spend.set(key, {
+        currency,
+        currencyExponent: item.currencyExponent,
+        spendMinor: (current?.spendMinor || 0n) + readNonNegativeBigInt(item.spendMinor),
+      });
+    }
+  }
+
+  return {
+    campaignsWithData: available.length,
+    spendByCurrency: [...spend.values()].sort((left, right) => left.currency.localeCompare(right.currency)),
+    impressions,
+    clicks,
+    inlineLinkClicks,
+    metaLeads,
+    hasMetaLeads,
+    coveredDateStart,
+    coveredDateStop,
+    latestFetchedAt,
+  };
+}
+
+function normalizeLaunch(value: unknown): AdvertisingLaunch {
+  const row = asRecord(value);
+  const contentApproval = normalizeAdvertisingContentApproval(
+    asRecord(row.payload).contentApproval,
+  );
+  return {
+    id: readString(row.id),
+    campaignName: readString(row.campaignName ?? row.campaign_name) || "Рекламная кампания",
+    status: readString(row.status),
+    metaStatus: readString(row.metaStatus ?? row.meta_status),
+    metaCampaignId: readString(row.metaCampaignId ?? row.meta_campaign_id),
+    budgetDailyMinor: readNullableNumber(row.budgetDailyMinor ?? row.budget_daily_minor),
+    currency: readString(row.currency) || "USD",
+    lastError: readString(row.lastError ?? row.last_error),
+    createdAt: readString(row.createdAt ?? row.created_at),
+    ...(contentApproval ? { contentApproval } : {}),
+  };
+}
+
+function isDryRunId(value: string): boolean {
+  return value.toLowerCase().startsWith("dryrun_");
+}
+
+function launchState(launch: AdvertisingLaunch): LaunchState {
+  const status = launch.status.toLowerCase();
+  const metaStatus = launch.metaStatus.toLowerCase();
+  if (status === "dry_run" || metaStatus === "dry_run" || isDryRunId(launch.metaCampaignId)) return "dry_run";
+  if (status === "video_processing" || metaStatus === "video_processing") return "video_processing";
+  if (status === "failed" || metaStatus === "failed" || launch.lastError) return "failed";
+  if (status === "active" || metaStatus === "active") return "active";
+  if (status === "paused" || metaStatus === "paused" || launch.metaCampaignId) return "paused";
+  return "unknown";
+}
+
+const launchLabels: Record<LaunchState, string> = {
+  paused: "Создана выключенной",
+  active: "Отмечена активной",
+  failed: "Требует внимания",
+  dry_run: "Проверка без запуска",
+  video_processing: "Видео обрабатывается",
+  unknown: "Статус уточняется",
+};
+
+const launchTones: Record<LaunchState, { background: string; color: string }> = {
+  paused: { background: "#ECFDF5", color: "#047857" },
+  active: { background: "#EFF6FF", color: "#1D4ED8" },
+  failed: { background: "#FEF2F2", color: "#B91C1C" },
+  dry_run: { background: "#F3F4F6", color: "#475569" },
+  video_processing: { background: "#FFFBEB", color: "#B45309" },
+  unknown: { background: "#F3F4F6", color: "#64748B" },
+};
+
+function launchTime(value: string): number {
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : 0;
+}
+
+function formatLaunchDate(value: string): string {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return "Дата не указана";
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(time));
+}
+
+function formatPlannedBudget(minor: number | null, currency: string): string {
+  if (minor === null || minor < 0) return "План не указан";
+  try {
+    return `${new Intl.NumberFormat("ru-RU", {
+      style: "currency",
+      currency,
+      maximumFractionDigits: 2,
+    }).format(minor / 100)} в день`;
+  } catch {
+    return `${(minor / 100).toLocaleString("ru-RU")} ${currency} в день`;
+  }
+}
+
+function localHistoryKey(workspaceId: string): string {
+  return `negis_ads_launch_history_${workspaceId}`;
+}
+
+export default function AdvertisingHub() {
+  const { user, userRole, clinicId, workspacePurpose, isLoading, isSigningOut, isDemoMode, isImpersonation } = useAuth();
+  const workspaceId = clinicId || readWorkspaceId();
+  const actorId = clinicId && !isLoading && !isSigningOut && !isDemoMode && !isImpersonation ? user?.id || "" : "";
+  const localDraftsOnly = isDemoMode && !isLoading && !isSigningOut && !isImpersonation
+    && !isRealWorkspace(workspaceId) && readWorkspaceId() === workspaceId;
+  const observedActorRef = useRef(user?.id || "");
+  const [authEpoch, setAuthEpoch] = useState(0);
+  useLayoutEffect(() => {
+    if (!hasSupabaseFrontendEnv) return;
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((_event, session) => {
+      const nextActor = session?.user.id || "";
+      if (observedActorRef.current === nextActor) return;
+      observedActorRef.current = nextActor;
+      setAuthEpoch((value) => value + 1);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+  return <AdvertisingHubSession
+    key={JSON.stringify([actorId, workspaceId, userRole, workspacePurpose, authEpoch, localDraftsOnly])}
+    actorId={actorId}
+    observedSdkActorId={observedActorRef.current}
+    workspaceId={workspaceId}
+    localDraftsOnly={localDraftsOnly}
+    canReadPrivate={userRole === "owner" || userRole === "admin"}
+  />;
+}
+
+function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, localDraftsOnly, canReadPrivate }: {
+  actorId: string; observedSdkActorId: string; workspaceId: string; localDraftsOnly: boolean; canReadPrivate: boolean;
+}) {
+  const [, setLocation] = useLocation();
+  const productionWorkspace = isRealWorkspace(workspaceId);
+  const sessionRef = useRef<AbortController | null>(null);
+  const signOutRevisionRef = useRef(getSignOutRevision());
+  useLayoutEffect(() => {
+    const session = new AbortController();
+    sessionRef.current = session;
+    const subscription = hasSupabaseFrontendEnv
+      ? sessionAuth.onAuthStateChange((_event, next) => {
+          // Demo follows the SDK lifetime without gaining a CRM actor or server access.
+          if ((next?.user.id || "") !== (localDraftsOnly ? observedSdkActorId : actorId)) session.abort();
+        }).data.subscription
+      : null;
+    return () => {
+      session.abort();
+      subscription?.unsubscribe();
+      if (sessionRef.current === session) sessionRef.current = null;
+    };
+  }, [actorId, observedSdkActorId, workspaceId, localDraftsOnly]);
+
+  function isSessionAlive(session: AbortController | null): session is AbortController {
+    // The keyed lifetime follows verified membership even when selector storage is unavailable.
+    return Boolean(actorId && session && sessionRef.current === session && !session.signal.aborted
+      && !isSignOutPending() && signOutRevisionRef.current === getSignOutRevision());
+  }
+
+  function sessionFetch(session: AbortController | null, endpoint: string, accessToken?: string) {
+    if (!isSessionAlive(session)) throw new DOMException("Advertising session changed", "AbortError");
+    return crmFetch(endpoint, {
+      accessToken, expectedUserId: actorId, signal: session.signal, cache: "no-store",
+      dispatchGuard: () => isSessionAlive(session),
+    });
+  }
+  const [launches, setLaunches] = useState<AdvertisingLaunch[]>([]);
+  const [loadState, setLoadState] = useState<LoadState>("loading");
+  const launchesRequestRef = useRef(0);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [insightsAccess, setInsightsAccess] = useState<InsightsAccess>("idle");
+  const [insightsSummaries, setInsightsSummaries] = useState<MetaInsightsHistorySummary[]>([]);
+  const [insightsMessage, setInsightsMessage] = useState("");
+  const [crmOutcomesAccess, setCrmOutcomesAccess] = useState<InsightsAccess>("idle");
+  const [crmOutcomes, setCrmOutcomes] = useState<CrmAdvertisingOutcomes>(EMPTY_CRM_ADVERTISING_OUTCOMES);
+  const [crmOutcomesMessage, setCrmOutcomesMessage] = useState("");
+  const [campaignGoal, setCampaignGoal] = useState<CampaignGoalForm>(defaultCampaignGoal);
+  const [campaignGoalError, setCampaignGoalError] = useState("");
+
+  const goalPlan = useMemo(() => {
+    const targetPatients = Number(campaignGoal.targetPatients);
+    const durationDays = Number(campaignGoal.durationDays);
+    const maxBudget = Number(campaignGoal.maxBudget);
+    const ready = Boolean(campaignGoal.service.trim())
+      && Number.isInteger(targetPatients)
+      && targetPatients > 0
+      && Number.isInteger(durationDays)
+      && durationDays > 0
+      && durationDays <= 90
+      && Number.isFinite(maxBudget)
+      && maxBudget > 0;
+    const dailyBudget = ready ? Math.round((maxBudget / durationDays) * 100) / 100 : null;
+
+    return { ready, targetPatients, durationDays, maxBudget, dailyBudget };
+  }, [campaignGoal]);
+
+  function canUseReadControls() {
+    const session = sessionRef.current;
+    return Boolean(session && !session.signal.aborted
+      && !isSignOutPending() && signOutRevisionRef.current === getSignOutRevision()
+      && (localDraftsOnly || isSessionAlive(session)));
+  }
+
+  function canUseCampaignControls() {
+    return canUseReadControls() && (localDraftsOnly || canReadPrivate);
+  }
+
+  function updateCampaignGoal(field: keyof CampaignGoalForm, value: string) {
+    if (!canUseCampaignControls()) return;
+    setCampaignGoal((current) => ({ ...current, [field]: value }));
+    if (campaignGoalError) setCampaignGoalError("");
+  }
+
+  function prepareCampaign(destination: CampaignGoalDestination) {
+    if (!canUseCampaignControls() || readWorkspaceId() !== workspaceId) return;
+    if (!goalPlan.ready || goalPlan.dailyBudget === null) {
+      setCampaignGoalError("Укажите услугу, число пациентов, период до 90 дней и максимальный бюджет.");
+      return;
+    }
+
+    const city = KZ_META_CITY_OPTIONS.find((option) => option.id === campaignGoal.cityId) || KZ_META_CITY_OPTIONS[0];
+    try {
+      const prefill = createAdvertisingCampaignPrefill({
+        platform: "meta",
+        sourceModule: "advertising-hub",
+        sourceKind: "goal",
+        campaignName: `${campaignGoal.service.trim()} · ${city.labelRu}`,
+        service: campaignGoal.service.trim(),
+        city: city.labelRu,
+        cityId: city.id,
+        targetPatients: goalPlan.targetPatients,
+        durationDays: goalPlan.durationDays,
+        maxBudget: goalPlan.maxBudget,
+        dailyBudget: goalPlan.dailyBudget,
+        budgetCurrency: "USD",
+        generatedAt: new Date().toISOString(),
+      });
+      window.localStorage.setItem(
+        workspaceScopedKey(
+          destination === "/content-studio"
+            ? ADVERTISING_CONTENT_STUDIO_PREFILL_KEY
+            : ADVERTISING_CAMPAIGN_PREFILL_KEY,
+        ),
+        JSON.stringify(prefill),
+      );
+      setLocation(destination);
+    } catch {
+      setCampaignGoalError("Не удалось подготовить бриф. Проверьте введённые данные и повторите.");
+    }
+  }
+
+  function submitCampaignGoal(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    prepareCampaign("/ads-automation");
+  }
+
+  function refreshLaunches() {
+    if (!canUseReadControls()) return;
+    launchesRequestRef.current += 1;
+    setLoadState("loading");
+    setReloadKey((value) => value + 1);
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    const session = sessionRef.current;
+    const requestId = ++launchesRequestRef.current;
+    const latest = () => !cancelled && requestId === launchesRequestRef.current;
+    const current = () => latest() && isSessionAlive(session);
+
+    async function loadLaunches() {
+      setLoadState("loading");
+
+      if (!productionWorkspace) {
+        const local = localDraftsOnly ? readDemoStorage<unknown[]>(localHistoryKey(workspaceId), []) : [];
+        if (latest()) {
+          setLaunches(local.map(normalizeLaunch).sort((left, right) => launchTime(right.createdAt) - launchTime(left.createdAt)).slice(0, 40));
+          setLoadState("ready");
+        }
+        return;
+      }
+
+      try {
+        const response = await sessionFetch(session, `/api/crm/meta-launches?workspaceId=${encodeURIComponent(workspaceId)}`);
+        const text = await response.text();
+        const body = text ? (JSON.parse(text) as LaunchesResponse) : {};
+        if (!response.ok || body.success !== true || body.mode !== "supabase") {
+          throw new Error("launches_unavailable");
+        }
+
+        const raw = Object.prototype.hasOwnProperty.call(body.data ?? {}, "launches")
+          ? body.data?.launches
+          : body.data?.items;
+        if (!Array.isArray(raw)) throw new Error("launches_invalid");
+        const normalized = raw
+          .map(normalizeLaunch)
+          .sort((left, right) => launchTime(right.createdAt) - launchTime(left.createdAt))
+          .slice(0, 40);
+
+        if (current()) {
+          setLaunches(normalized);
+          setLoadState("ready");
+        }
+      } catch {
+        if (latest() && (current() || !actorId)) {
+          setLaunches([]);
+          setLoadState("error");
+        }
+      }
+    }
+
+    void loadLaunches();
+    return () => {
+      cancelled = true;
+    };
+  }, [productionWorkspace, reloadKey, workspaceId, actorId, localDraftsOnly]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const session = sessionRef.current;
+    const current = () => !cancelled && isSessionAlive(session);
+    setCrmOutcomes(EMPTY_CRM_ADVERTISING_OUTCOMES);
+    setCrmOutcomesMessage("");
+
+    if (!productionWorkspace) {
+      setCrmOutcomesAccess("idle");
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (!actorId || !canReadPrivate) {
+      setCrmOutcomesAccess(actorId ? "forbidden" : "required");
+      setCrmOutcomesMessage("Результат рекламы в CRM доступен владельцу и администратору клиники.");
+      return () => { cancelled = true; };
+    }
+
+    setCrmOutcomesAccess("checking");
+    void (async () => {
+      try {
+        const accessToken = await getSupabaseAccessToken(actorId);
+        if (!current()) return;
+        if (!accessToken) {
+          setCrmOutcomesAccess("required");
+          setCrmOutcomesMessage("Войдите как владелец клиники, чтобы увидеть результат в CRM.");
+          return;
+        }
+
+        const authResponse = await sessionFetch(
+          session,
+          `/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`,
+          accessToken,
+        );
+        const authBody = await readJson<ServerAdminAuthContext>(authResponse);
+        if (!current()) return;
+        if (authResponse.status === 401) {
+          setCrmOutcomesAccess("required");
+          setCrmOutcomesMessage("Сессия истекла. Войдите снова, чтобы увидеть результат в CRM.");
+          return;
+        }
+        if (authResponse.status === 403) {
+          setCrmOutcomesAccess("forbidden");
+          setCrmOutcomesMessage("Результат рекламы в CRM доступен владельцу клиники.");
+          return;
+        }
+        if (!authResponse.ok) throw new Error("auth_unavailable");
+        if (
+          authBody.success !== true
+          || authBody.mode !== "supabase"
+          || authBody.data?.isAdmin !== true
+          || !["owner", "admin"].includes(authBody.data.role || "")
+          || authBody.data.workspaceId !== workspaceId
+        ) {
+          setCrmOutcomesAccess("forbidden");
+          setCrmOutcomesMessage("Результат рекламы в CRM доступен владельцу клиники.");
+          return;
+        }
+
+        const outcomesResponse = await sessionFetch(
+          session,
+          `/api/crm/advertising-outcomes?workspaceId=${encodeURIComponent(workspaceId)}`,
+          accessToken,
+        );
+        const outcomesBody = await readJson<{ outcomes?: CrmAdvertisingOutcomesPayload }>(outcomesResponse);
+        if (!current()) return;
+        if (outcomesResponse.status === 401) {
+          setCrmOutcomesAccess("required");
+          setCrmOutcomesMessage("Сессия истекла. Войдите снова, чтобы увидеть результат в CRM.");
+          return;
+        }
+        if (outcomesResponse.status === 403) {
+          setCrmOutcomesAccess("forbidden");
+          setCrmOutcomesMessage("Результат рекламы в CRM доступен владельцу и администратору клиники.");
+          return;
+        }
+        if (!outcomesResponse.ok || outcomesBody.success !== true || outcomesBody.mode !== "supabase") {
+          throw new Error("crm_outcomes_unavailable");
+        }
+        setCrmOutcomes(parseCrmAdvertisingOutcomes(outcomesBody.data?.outcomes));
+        setCrmOutcomesAccess("ready");
+      } catch {
+        if (current()) {
+          setCrmOutcomesAccess("error");
+          setCrmOutcomesMessage("Не удалось обновить связанные заявки и продажи. Попробуйте позже.");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [productionWorkspace, reloadKey, workspaceId, actorId, canReadPrivate]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const session = sessionRef.current;
+    const current = () => !cancelled && isSessionAlive(session);
+    setInsightsSummaries([]);
+    setInsightsMessage("");
+
+    if (!productionWorkspace) {
+      setInsightsAccess("idle");
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (!actorId || !canReadPrivate) {
+      setInsightsAccess(actorId ? "forbidden" : "required");
+      setInsightsMessage("Результаты расходов доступны владельцу и администратору клиники.");
+      return () => { cancelled = true; };
+    }
+
+    setInsightsAccess("checking");
+    void (async () => {
+      try {
+        const accessToken = await getSupabaseAccessToken(actorId);
+        if (!current()) return;
+        if (!accessToken) {
+          setInsightsAccess("required");
+          setInsightsMessage("Войдите как владелец клиники, чтобы увидеть результаты рекламы.");
+          return;
+        }
+
+        const authResponse = await sessionFetch(
+          session,
+          `/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`,
+          accessToken,
+        );
+        const authBody = await readJson<ServerAdminAuthContext>(authResponse);
+        if (!current()) return;
+        if (authResponse.status === 401) {
+          setInsightsAccess("required");
+          setInsightsMessage("Сессия истекла. Войдите снова, чтобы увидеть результаты рекламы.");
+          return;
+        }
+        if (authResponse.status === 403) {
+          setInsightsAccess("forbidden");
+          setInsightsMessage("Результаты расходов доступны владельцу клиники.");
+          return;
+        }
+        if (!authResponse.ok) throw new Error("auth_unavailable");
+        if (
+          authBody.success !== true
+          || authBody.mode !== "supabase"
+          || authBody.data?.isAdmin !== true
+          || !["owner", "admin"].includes(authBody.data.role || "")
+          || authBody.data.workspaceId !== workspaceId
+        ) {
+          setInsightsAccess("forbidden");
+          setInsightsMessage("Результаты расходов доступны владельцу клиники.");
+          return;
+        }
+
+        const insightsResponse = await sessionFetch(
+          session,
+          `/api/crm/meta-insights-history?workspaceId=${encodeURIComponent(workspaceId)}`,
+          accessToken,
+        );
+        const insightsBody = await readJson<{ summaries?: MetaInsightsHistorySummary[] }>(insightsResponse);
+        if (!current()) return;
+        if (insightsResponse.status === 401) {
+          setInsightsAccess("required");
+          setInsightsMessage("Сессия истекла. Войдите снова, чтобы увидеть результаты рекламы.");
+          return;
+        }
+        if (insightsResponse.status === 403) {
+          setInsightsAccess("forbidden");
+          setInsightsMessage("Результаты расходов доступны владельцу клиники.");
+          return;
+        }
+        if (!insightsResponse.ok || insightsBody.success !== true || insightsBody.mode !== "supabase") {
+          throw new Error("insights_unavailable");
+        }
+
+        setInsightsSummaries(parseMetaInsightsHistorySummaries(insightsBody.data?.summaries));
+        setInsightsAccess("ready");
+      } catch {
+        if (current()) {
+          setInsightsAccess("error");
+          setInsightsMessage("Не удалось обновить результаты рекламы. Попробуйте позже.");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [productionWorkspace, reloadKey, workspaceId, actorId, canReadPrivate]);
+
+  const summary = useMemo(() => {
+    const states = launches.map(launchState);
+    return {
+      created: states.filter((state) => state === "paused" || state === "active").length,
+      paused: states.filter((state) => state === "paused").length,
+      failed: states.filter((state) => state === "failed").length,
+      dryRuns: states.filter((state) => state === "dry_run").length,
+      processing: states.filter((state) => state === "video_processing").length,
+    };
+  }, [launches]);
+
+  const insights = useMemo(() => aggregateAdvertisingInsights(insightsSummaries), [insightsSummaries]);
+
+  const creativeExperiments = useMemo(() => buildCreativeExperimentGroups(
+    launches.map((launch) => ({
+      id: launch.id,
+      campaignName: launch.campaignName,
+      createdAt: launch.createdAt,
+      contentApproval: launch.contentApproval,
+    })),
+    insightsSummaries,
+  ), [insightsSummaries, launches]);
+
+  const insightsStates = useMemo(() => ({
+    fresh: insightsSummaries.filter((summary) => summary.availability === "available" && summary.freshness === "fresh").length,
+    stale: insightsSummaries.filter((summary) => summary.availability === "available" && summary.freshness === "stale").length,
+    unknownFreshness: insightsSummaries.filter((summary) => summary.availability === "available" && summary.freshness !== "fresh" && summary.freshness !== "stale").length,
+    empty: insightsSummaries.filter((summary) => summary.availability === "empty").length,
+    running: insightsSummaries.filter((summary) => summary.availability === "running").length,
+    failed: insightsSummaries.filter((summary) => summary.availability === "failed").length,
+    notSynced: insightsSummaries.filter((summary) => summary.availability === "not_synced").length,
+  }), [insightsSummaries]);
+
+  const insightsEmptyMessage = useMemo(() => {
+    if (insightsStates.running > 0) return "Meta обновляет данные. Результаты появятся после завершения синхронизации.";
+    if (insightsStates.stale > 0) return "Сохранённые данные Meta устарели и не включены в текущую сводку. Обновите Insights в истории запусков.";
+    if (insightsStates.unknownFreshness > 0) return "Свежесть сохранённых данных Meta не подтверждена. Они доступны в истории, но не включены в текущую сводку.";
+    if (insightsStates.empty > 0) return "Meta не вернула данные за выбранный период. Это нормально для выключенных или не откручивавшихся кампаний.";
+    if (insightsStates.failed > 0) return "Не удалось обновить данные Meta. Подробности доступны владельцу в истории запусков.";
+    if (insightsStates.notSynced > 0) return "Результаты ещё не синхронизированы. Кампания и её плановый бюджет уже сохранены.";
+    return "Фактические результаты появятся после первого рекламного показа.";
+  }, [insightsStates]);
+
+  const crmRevenueValue = crmOutcomes.attributedRevenueByCurrency.length === 0
+    ? "0 ₸"
+    : crmOutcomes.attributedRevenueByCurrency.length === 1
+      ? formatCrmRevenueAmount(
+          crmOutcomes.attributedRevenueByCurrency[0].amountMinor,
+          crmOutcomes.attributedRevenueByCurrency[0].currencyExponent,
+          crmOutcomes.attributedRevenueByCurrency[0].currency,
+        )
+      : "По валютам";
+
+  const crmRevenueByCurrency = crmOutcomes.attributedRevenueByCurrency
+    .map((item) => formatCrmRevenueAmount(item.amountMinor, item.currencyExponent, item.currency))
+    .join(" · ");
+
+  const assistant = useMemo(() => buildAdvertisingAssistantBrief({
+    launchLoadState: loadState,
+    createdLaunches: summary.created,
+    failedLaunches: summary.failed,
+    processingLaunches: summary.processing,
+    insightsAccess,
+    campaignsWithInsights: insights.campaignsWithData,
+    insightsEmpty: insightsStates.empty,
+    insightsRunning: insightsStates.running,
+    insightsNotSynced: insightsStates.notSynced,
+    creativeTestsComparable: creativeExperiments.filter((group) => group.reviewState === "same_period").length,
+    creativeTestsIncomplete: creativeExperiments.filter((group) => group.reviewState !== "same_period").length,
+    crmAccess: crmOutcomesAccess,
+    unattributedLeads: crmOutcomes.unattributedLeads,
+    paidUnattributedDeals: crmOutcomes.paidUnattributedDeals,
+  }), [creativeExperiments, crmOutcomes, crmOutcomesAccess, insights.campaignsWithData, insightsAccess, insightsStates, loadState, summary]);
+
+  const AssistantIcon = assistant.tone === "error"
+    ? AlertTriangle
+    : assistant.reason === "loading" || assistant.reason === "checking_results" || assistant.reason === "insights_syncing" || assistant.reason === "video_processing"
+      ? Clock3
+      : assistant.tone === "success"
+        ? CheckCircle2
+        : assistant.reason === "first_campaign"
+          ? Rocket
+          : Bot;
+  const metricValue = (value: number) => (loadState === "ready" ? value : undefined);
+
+  return (
+    <PageLayout>
+      <div className="mx-auto max-w-6xl space-y-7 px-4 py-6 sm:px-6">
+        <PageHeader
+          kicker="Рост"
+          title="Рекламный агент"
+          description="Создание креативов, безопасный запуск рекламы и понятная история кампаний в одном разделе."
+          actions={(
+            <Link href="/ads-automation">
+              <span className="neu-btn-primary inline-flex cursor-pointer items-center justify-center gap-2 px-5 py-2.5 text-sm">
+                <Rocket size={16} />
+                Создать рекламу
+              </span>
+            </Link>
+          )}
+        />
+
+        <section className="negis-glass overflow-hidden p-5 sm:p-6" aria-labelledby="campaign-goal-title">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex min-w-0 items-start gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg" style={{ background: "var(--negis-primary-soft)", color: "var(--negis-primary)" }}>
+                <Target size={19} />
+              </span>
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase" style={{ color: "var(--negis-primary)", letterSpacing: 0 }}>Цель клиники</p>
+                <h2 id="campaign-goal-title" className="mt-1 text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Что должна дать реклама</h2>
+                <p className="mt-1 max-w-2xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                  Назовите ключевые ограничения. Рекламный мастер подготовит бриф и оставит запуск выключенным до вашей проверки.
+                </p>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-1 rounded-lg border p-1" style={{ borderColor: "var(--negis-border)", background: "var(--negis-surface)" }} aria-label="Рекламная площадка">
+              <button type="button" className="min-h-9 rounded-md px-3 text-sm font-semibold" style={{ background: "var(--negis-primary)", color: "white" }} aria-pressed="true">
+                Meta
+              </button>
+              <button type="button" className="min-h-9 rounded-md px-3 text-sm font-semibold opacity-60" style={{ color: "var(--negis-muted)" }} disabled title="Клиентский запуск TikTok готовится">
+                TikTok · скоро
+              </button>
+            </div>
+          </div>
+
+          <form className="mt-5" onSubmit={submitCampaignGoal}>
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+              <label className="min-w-0 sm:col-span-2 xl:col-span-1">
+                <span className="mb-1.5 block text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Услуга</span>
+                <input
+                  className="neu-input min-h-11 w-full"
+                  value={campaignGoal.service}
+                  onChange={(event) => updateCampaignGoal("service", event.target.value)}
+                  placeholder="Например, консультация"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="min-w-0">
+                <span className="mb-1.5 block text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Город показа</span>
+                <select
+                  className="neu-input min-h-11 w-full"
+                  value={campaignGoal.cityId}
+                  onChange={(event) => updateCampaignGoal("cityId", event.target.value)}
+                >
+                  {KZ_META_CITY_OPTIONS.map((city) => <option key={city.id} value={city.id}>{city.labelRu}</option>)}
+                </select>
+              </label>
+              <label className="min-w-0">
+                <span className="mb-1.5 block text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Нужно пациентов</span>
+                <input
+                  className="neu-input min-h-11 w-full"
+                  type="number"
+                  inputMode="numeric"
+                  min="1"
+                  step="1"
+                  value={campaignGoal.targetPatients}
+                  onChange={(event) => updateCampaignGoal("targetPatients", event.target.value)}
+                  placeholder="20"
+                />
+              </label>
+              <label className="min-w-0">
+                <span className="mb-1.5 block text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Период, дней</span>
+                <input
+                  className="neu-input min-h-11 w-full"
+                  type="number"
+                  inputMode="numeric"
+                  min="1"
+                  max="90"
+                  step="1"
+                  value={campaignGoal.durationDays}
+                  onChange={(event) => updateCampaignGoal("durationDays", event.target.value)}
+                />
+              </label>
+              <label className="min-w-0">
+                <span className="mb-1.5 block text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Максимальный бюджет, USD</span>
+                <input
+                  className="neu-input min-h-11 w-full"
+                  type="number"
+                  inputMode="decimal"
+                  min="1"
+                  step="0.01"
+                  value={campaignGoal.maxBudget}
+                  onChange={(event) => updateCampaignGoal("maxBudget", event.target.value)}
+                  placeholder="280"
+                />
+              </label>
+            </div>
+
+            <div className="mt-5 grid gap-4 border-t pt-4" style={{ borderColor: "var(--negis-border)" }}>
+              <div className="min-w-0">
+                {goalPlan.dailyBudget !== null ? (
+                  <p className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                    Дневной лимит в мастере: {goalPlan.dailyBudget.toLocaleString("ru-RU", { maximumFractionDigits: 2 })} USD
+                  </p>
+                ) : (
+                  <p className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Заполните цель кампании</p>
+                )}
+                <p className="mt-1 text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                  Цель по пациентам является ориентиром, а не прогнозом или гарантией результата.
+                </p>
+                {campaignGoalError ? <p className="mt-2 text-sm font-semibold text-red-700" role="alert">{campaignGoalError}</p> : null}
+              </div>
+              <div className="grid w-full gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  className="neu-btn-primary inline-flex min-h-11 items-center justify-center gap-2 whitespace-normal px-5 text-sm"
+                  onClick={() => prepareCampaign("/content-studio")}
+                >
+                  <Bot size={17} className="shrink-0" />
+                  Создать креатив с ИИ
+                  <ArrowRight size={16} className="shrink-0" />
+                </button>
+                <button type="submit" className="neu-btn inline-flex min-h-11 items-center justify-center gap-2 whitespace-normal px-5 text-sm">
+                  <Upload size={16} className="shrink-0" />
+                  У меня есть креатив
+                </button>
+              </div>
+            </div>
+          </form>
+        </section>
+
+        <section aria-labelledby="advertising-summary-title">
+          <div className="mb-3 flex items-end justify-between gap-3">
+            <div>
+              <h2 id="advertising-summary-title" className="text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Ключевые статусы</h2>
+              <p className="mt-1 text-sm" style={{ color: "var(--negis-muted)" }}>Только сохранённые результаты запусков, без прогнозных показателей.</p>
+            </div>
+            <button
+              type="button"
+              className="neu-icon-btn shrink-0"
+              aria-label="Обновить статусы рекламы"
+              title="Обновить"
+              disabled={loadState === "loading"}
+              onClick={refreshLaunches}
+            >
+              <RefreshCw size={17} />
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <MetricCard label="Кампаний создано" value={metricValue(summary.created)} icon={Megaphone} tone="primary" loading={loadState === "loading"} />
+            <MetricCard label="Создано выключенными" value={metricValue(summary.paused)} icon={CheckCircle2} tone="success" loading={loadState === "loading"} />
+            <MetricCard label="Требуют внимания" value={metricValue(summary.failed)} icon={AlertTriangle} tone={summary.failed > 0 ? "error" : "muted"} loading={loadState === "loading"} />
+            <MetricCard label="Проверок без запуска" value={metricValue(summary.dryRuns)} icon={FlaskConical} tone="muted" loading={loadState === "loading"} />
+          </div>
+        </section>
+
+        <section aria-labelledby="advertising-results-title">
+          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase" style={{ color: "var(--negis-primary)", letterSpacing: 0 }}>Отчёт владельца</p>
+              <h2 id="advertising-results-title" className="mt-1 text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Результаты рекламы</h2>
+              <p className="mt-1 max-w-2xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                Только фактические данные Meta по последним синхронизированным кампаниям.
+              </p>
+            </div>
+            <Link href="/ads-automation/history">
+              <span className="cursor-pointer text-sm font-semibold" style={{ color: "var(--negis-primary)" }}>Подробнее по кампаниям</span>
+            </Link>
+          </div>
+
+          {insightsAccess === "checking" ? (
+            <div className="negis-glass p-5 text-sm font-medium" style={{ color: "var(--negis-muted)" }}>Загружаем фактические результаты…</div>
+          ) : insightsAccess === "ready" && insights.campaignsWithData > 0 ? (
+            <>
+              <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+                <MetricCard
+                  label="Фактический расход Meta"
+                  value={insights.spendByCurrency.length === 1
+                    ? formatMinorAmount(
+                        insights.spendByCurrency[0].spendMinor,
+                        insights.spendByCurrency[0].currencyExponent,
+                        insights.spendByCurrency[0].currency,
+                      )
+                    : insights.spendByCurrency.length > 1
+                      ? "По валютам"
+                      : "Нет данных"}
+                  icon={WalletCards}
+                  tone="primary"
+                  delta={insights.spendByCurrency.length > 1
+                    ? insights.spendByCurrency
+                        .map((item) => formatMinorAmount(item.spendMinor, item.currencyExponent, item.currency))
+                        .join(" · ")
+                    : `Кампаний с данными: ${insights.campaignsWithData}`}
+                />
+                <MetricCard label="Показы" value={formatCount(insights.impressions)} icon={BarChart3} tone="info" />
+                <MetricCard
+                  label="Клики"
+                  value={formatCount(insights.clicks)}
+                  icon={MousePointerClick}
+                  tone="secondary"
+                  delta={`По ссылке: ${formatCount(insights.inlineLinkClicks)}`}
+                />
+                <MetricCard
+                  label="Лиды по данным Meta"
+                  value={insights.hasMetaLeads ? formatCount(insights.metaLeads) : "Нет данных"}
+                  icon={Target}
+                  tone="success"
+                />
+              </div>
+              <div className="mt-3 flex flex-col gap-2 border-l-4 px-4 py-3 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "var(--negis-primary)", background: "var(--negis-primary-soft)" }}>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                    {formatInsightsDateRange(insights.coveredDateStart, insights.coveredDateStop)}
+                  </p>
+                  <p className="mt-1 text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                    Фактический расход Meta показан отдельно от планового бюджета. Лиды Meta не равны заявкам CRM. Это ещё не оценка эффективности рекламы.
+                  </p>
+                  {insightsStates.stale > 0 || insightsStates.unknownFreshness > 0 ? (
+                    <p className="mt-1 text-xs font-semibold leading-relaxed" style={{ color: "var(--negis-warning)" }}>
+                      Устаревшие данные и данные с неподтверждённой свежестью не включены в эту сводку.
+                    </p>
+                  ) : null}
+                </div>
+                <span className="shrink-0 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>{formatInsightsUpdate(insights.latestFetchedAt)}</span>
+              </div>
+            </>
+          ) : (
+            <div className="negis-glass flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                  {insightsAccess === "ready"
+                    ? "Фактических данных пока нет"
+                    : insightsAccess === "idle"
+                      ? "Фактические данные ещё не подключены"
+                      : insightsAccess === "error"
+                        ? "Не удалось обновить результаты"
+                        : "Результаты доступны владельцу"}
+                </p>
+                <p className="mt-1 text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                  {insightsAccess === "ready"
+                    ? insightsEmptyMessage
+                    : insightsAccess === "idle"
+                      ? "В рабочем пространстве данные появятся после синхронизации Meta."
+                      : insightsMessage}
+                </p>
+              </div>
+              {insightsAccess === "ready" ? (
+                <Link href="/ads-automation/history">
+                  <span className="neu-btn inline-flex cursor-pointer items-center justify-center whitespace-nowrap text-sm">Открыть историю</span>
+                </Link>
+              ) : null}
+            </div>
+          )}
+        </section>
+
+        {insightsAccess === "ready" ? (
+          <section aria-labelledby="creative-evidence-title">
+            <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase" style={{ color: "var(--negis-primary)", letterSpacing: 0 }}>Контент и факты</p>
+                <h2 id="creative-evidence-title" className="mt-1 text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Тест креативов</h2>
+                <p className="mt-1 max-w-2xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                  Факты по согласованным вариантам одного контент-пакета. Medina OS не выбирает победителя и не меняет кампании автоматически.
+                </p>
+              </div>
+              <Link href="/content-studio">
+                <span className="cursor-pointer text-sm font-semibold" style={{ color: "var(--negis-primary)" }}>Подготовить варианты</span>
+              </Link>
+            </div>
+
+            {creativeExperiments.length === 0 ? (
+              <div className="negis-glass flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Пока нечего сравнивать</p>
+                  <p className="mt-1 text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                    Нужны минимум два неизменённых согласованных варианта из одного пакета и синхронизированные данные Meta.
+                  </p>
+                </div>
+                <Link href="/ads-automation/history">
+                  <span className="neu-btn inline-flex min-h-10 shrink-0 cursor-pointer items-center justify-center whitespace-nowrap text-sm">Открыть историю</span>
+                </Link>
+              </div>
+            ) : (
+              <div className="space-y-5">
+                {creativeExperiments.slice(0, 3).map((group) => (
+                  <div key={group.packageId}>
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <h3 className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                        Один контент-пакет · {group.items.length} варианта
+                      </h3>
+                      <span className="rounded-lg px-2.5 py-1 text-xs font-semibold" style={{ background: group.reviewState === "same_period" ? "var(--negis-primary-soft)" : "#FFFBEB", color: group.reviewState === "same_period" ? "var(--negis-primary)" : "var(--negis-warning)" }}>
+                        {group.reviewState === "same_period" ? "Данные за один период" : group.reviewState === "partial" ? "Данные могут быть неполными" : "Ожидаем данные Meta"}
+                      </span>
+                    </div>
+                    {group.reviewState !== "same_period" ? (
+                      <p className="mb-3 text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                        Периоды или доступность данных различаются. Значения нельзя трактовать как честное сравнение вариантов.
+                      </p>
+                    ) : (
+                      <p className="mb-3 text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                        Период данных: {formatInsightsDateRange(group.coveredDateStart, group.coveredDateStop)}. Это не оценка эффективности рекламы.
+                      </p>
+                    )}
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                      {group.items.map((item) => {
+                        const itemInsights = item.insights;
+                        const hasData = itemInsights?.availability === "available" && itemInsights.rowCount > 0;
+                        const hasFreshData = hasData && itemInsights?.freshness === "fresh";
+                        const dataMessage = !itemInsights || itemInsights.availability === "not_synced"
+                          ? "Insights ещё не синхронизированы"
+                          : itemInsights.availability === "empty"
+                            ? "Meta не вернула данные за период"
+                            : itemInsights.availability === "running"
+                              ? "Обновление выполняется"
+                              : itemInsights.availability === "failed"
+                                ? "Не удалось обновить Insights"
+                                : itemInsights.availability === "unavailable"
+                                  ? "Insights недоступны для запуска"
+                                  : hasFreshData
+                                    ? "Фактические данные Meta"
+                                    : hasData && itemInsights.freshness === "stale"
+                                      ? "Данные Meta устарели"
+                                      : hasData
+                                        ? "Свежесть данных Meta не подтверждена"
+                                    : "Данных Meta пока нет";
+                        return (
+                          <article key={item.metaCampaignLaunchId} className="neu-sm min-w-0 p-4">
+                            <div className="flex items-start gap-3">
+                              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg" style={{ background: "var(--negis-primary-soft)", color: "var(--negis-primary)" }}>
+                                <FlaskConical size={17} />
+                              </span>
+                              <div className="min-w-0">
+                                <p className="break-words text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                                  {item.approval.variantLabel || item.approval.variantAngle || "Выбранный вариант"}
+                                </p>
+                                <p className="mt-1 break-words text-xs" style={{ color: "var(--negis-muted)" }}>{item.campaignName}</p>
+                              </div>
+                            </div>
+                            <p className="mt-3 text-xs font-semibold" style={{ color: hasFreshData ? "var(--negis-primary)" : hasData ? "var(--negis-warning)" : "var(--negis-muted)" }}>{dataMessage}</p>
+                            {hasData && itemInsights ? (
+                              <>
+                                <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--negis-border)" }}>
+                                  <p className="text-xs" style={{ color: "var(--negis-muted)" }}>Фактический расход Meta</p>
+                                  {itemInsights.spendByCurrency.length > 0 ? itemInsights.spendByCurrency.map((spend) => (
+                                    <p key={`${spend.currency}:${spend.currencyExponent}`} className="mt-1 text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                                      {formatMinorAmount(readNonNegativeBigInt(spend.spendMinor), spend.currencyExponent, spend.currency)}
+                                    </p>
+                                  )) : <p className="mt-1 text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Нет данных</p>}
+                                </div>
+                                <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+                                  <div><dt style={{ color: "var(--negis-muted)" }}>Показы</dt><dd className="font-semibold" style={{ color: "var(--negis-text)" }}>{formatCount(readNonNegativeBigInt(itemInsights.impressions))}</dd></div>
+                                  <div><dt style={{ color: "var(--negis-muted)" }}>Клики</dt><dd className="font-semibold" style={{ color: "var(--negis-text)" }}>{formatCount(readNonNegativeBigInt(itemInsights.clicks))}</dd></div>
+                                  <div><dt style={{ color: "var(--negis-muted)" }}>По ссылке</dt><dd className="font-semibold" style={{ color: "var(--negis-text)" }}>{formatCount(readNonNegativeBigInt(itemInsights.inlineLinkClicks))}</dd></div>
+                                  <div><dt style={{ color: "var(--negis-muted)" }}>Лиды Meta</dt><dd className="font-semibold" style={{ color: "var(--negis-text)" }}>{itemInsights.metaLeads === null ? "Нет данных" : formatCount(readNonNegativeBigInt(itemInsights.metaLeads))}</dd></div>
+                                </dl>
+                                <p className="mt-3 text-xs" style={{ color: "var(--negis-muted)" }}>{formatInsightsUpdate(itemInsights.latestFetchedAt)}</p>
+                                {!hasFreshData ? (
+                                  <p className="mt-1 text-xs font-semibold leading-relaxed" style={{ color: "var(--negis-warning)" }}>
+                                    Эти значения показаны для проверки истории и не участвуют в сравнении креативов.
+                                  </p>
+                                ) : null}
+                              </>
+                            ) : null}
+                          </article>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+                <p className="text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                  Расходы по валютам остаются раздельными. Лиды Meta не равны заявкам CRM. Коэффициенты и автоматические выводы не рассчитываются.
+                </p>
+              </div>
+            )}
+          </section>
+        ) : null}
+
+        <section aria-labelledby="advertising-crm-results-title">
+          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase" style={{ color: "var(--negis-primary)", letterSpacing: 0 }}>Связь с CRM</p>
+              <h2 id="advertising-crm-results-title" className="mt-1 text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Результат в CRM</h2>
+              <p className="mt-1 max-w-2xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                Заявки, оплаченные продажи и точная связь продажи с записью. Рекламная атрибуция считается только по выбранной кампании.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-3 text-sm font-semibold">
+              <Link href="/leads"><span className="cursor-pointer" style={{ color: "var(--negis-primary)" }}>Открыть заявки</span></Link>
+              <Link href="/sales"><span className="cursor-pointer" style={{ color: "var(--negis-primary)" }}>Открыть продажи</span></Link>
+            </div>
+          </div>
+
+          {crmOutcomesAccess === "checking" ? (
+            <div className="negis-glass p-5 text-sm font-medium" style={{ color: "var(--negis-muted)" }}>Загружаем связанные заявки и продажи…</div>
+          ) : crmOutcomesAccess === "ready" ? (
+            <>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <MetricCard
+                  label="Заявки с рекламой"
+                  value={crmOutcomes.attributedLeads}
+                  icon={Target}
+                  tone="info"
+                  delta={`Без связи: ${crmOutcomes.unattributedLeads}`}
+                />
+                <MetricCard
+                  label="Оплаченные продажи с рекламой"
+                  value={crmOutcomes.paidAttributedDeals}
+                  icon={CheckCircle2}
+                  tone="success"
+                  delta={`Оплачены без связи: ${crmOutcomes.paidUnattributedDeals}`}
+                />
+                <MetricCard
+                  label="Оплаченные записи"
+                  value={crmOutcomes.paidAppointmentDeals}
+                  icon={CheckCircle2}
+                  tone="secondary"
+                  delta={`С рекламой: ${crmOutcomes.paidAttributedAppointmentDeals} · без записи: ${crmOutcomes.paidAttributedDeals + crmOutcomes.paidUnattributedDeals - crmOutcomes.paidAppointmentDeals}`}
+                />
+                <MetricCard
+                  label="Связанная выручка CRM"
+                  value={crmRevenueValue}
+                  icon={WalletCards}
+                  tone="primary"
+                  delta={crmRevenueByCurrency || `Ожидают оплаты в CRM: ${crmOutcomes.pendingDeals}`}
+                />
+              </div>
+              <div className="mt-3 flex flex-col gap-3 border-l-4 px-4 py-3 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "var(--negis-primary)", background: "var(--negis-primary-soft)" }}>
+                <p className="min-w-0 text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                  Связь продажи с записью считается только по сохранённому appointment ID. Связи с рекламой устанавливаются вручную. Выручка CRM показана отдельно от расходов Meta и не доказывает результат рекламы. {formatInsightsUpdate(crmOutcomes.generatedAt)}.
+                </p>
+                {crmOutcomes.unattributedLeads > 0 ? (
+                  <Link href="/leads"><span className="neu-btn inline-flex min-h-10 shrink-0 cursor-pointer items-center justify-center whitespace-nowrap text-sm">Связать заявки</span></Link>
+                ) : crmOutcomes.paidUnattributedDeals > 0 ? (
+                  <Link href="/sales"><span className="neu-btn inline-flex min-h-10 shrink-0 cursor-pointer items-center justify-center whitespace-nowrap text-sm">Связать продажи</span></Link>
+                ) : null}
+              </div>
+            </>
+          ) : (
+            <div className="negis-glass p-5">
+              <p className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                {crmOutcomesAccess === "idle" ? "Результат CRM доступен в рабочем пространстве" : "Не удалось показать результат CRM"}
+              </p>
+              <p className="mt-1 text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                {crmOutcomesAccess === "idle" ? "В пробном доступе фактические заявки и продажи не подменяются тестовыми данными." : crmOutcomesMessage}
+              </p>
+            </div>
+          )}
+        </section>
+
+        <section className="negis-glass p-5" aria-labelledby="advertising-assistant-title" aria-live="polite">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-start gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg" style={{ background: "var(--negis-primary-soft)", color: "var(--negis-primary)" }}>
+                <AssistantIcon size={19} />
+              </span>
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase" style={{ color: "var(--negis-primary)", letterSpacing: 0 }}>Рекламный помощник</p>
+                <h2 id="advertising-assistant-title" className="mt-1 text-base font-semibold" style={{ color: "var(--negis-text)" }}>{assistant.title}</h2>
+                <p className="mt-1 text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>{assistant.text}</p>
+              </div>
+            </div>
+            {assistant.href && assistant.actionLabel ? (
+              <Link href={assistant.href}>
+                <span className="neu-btn inline-flex min-h-10 cursor-pointer items-center justify-center whitespace-nowrap text-sm">{assistant.actionLabel}</span>
+              </Link>
+            ) : assistant.actionLabel ? (
+              <button type="button" className="neu-btn justify-center whitespace-nowrap text-sm" onClick={refreshLaunches}>
+                {assistant.actionLabel}
+              </button>
+            ) : null}
+          </div>
+        </section>
+
+        <section aria-labelledby="advertising-actions-title">
+          <h2 id="advertising-actions-title" className="text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Действия</h2>
+          <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+            {[
+              { href: "/ads-automation", icon: Rocket, title: "Запустить рекламу", text: "Загрузить креатив, проверить параметры и создать кампанию выключенной." },
+              { href: "/content-studio", icon: Clapperboard, title: "Подготовить креатив", text: "Создать текст, изображение или видео и передать его в рекламный запуск." },
+              { href: "/ads-automation/history", icon: History, title: "Посмотреть историю", text: "Проверить результат создания кампаний и последние сохранённые статусы." },
+            ].map(({ href, icon: Icon, title, text }) => (
+              <Link key={href} href={href}>
+                <div className="neu-sm h-full cursor-pointer p-4 transition-transform hover:-translate-y-0.5">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-lg" style={{ background: "var(--negis-primary-soft)", color: "var(--negis-primary)" }}>
+                    <Icon size={17} />
+                  </span>
+                  <h3 className="mt-3 text-sm font-semibold" style={{ color: "var(--negis-text)" }}>{title}</h3>
+                  <p className="mt-1 text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>{text}</p>
+                </div>
+              </Link>
+            ))}
+          </div>
+        </section>
+
+        <section aria-labelledby="recent-advertising-title">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h2 id="recent-advertising-title" className="text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Последние запуски</h2>
+              <p className="mt-1 text-sm" style={{ color: "var(--negis-muted)" }}>Плановый бюджет не является фактическим расходом Meta.</p>
+            </div>
+            <Link href="/ads-automation/history">
+              <span className="cursor-pointer text-sm font-semibold" style={{ color: "var(--negis-primary)" }}>Вся история</span>
+            </Link>
+          </div>
+
+          {loadState === "loading" ? (
+            <div className="mt-3 negis-glass p-5 text-sm font-medium" style={{ color: "var(--negis-muted)" }}>Загружаем рекламные запуски…</div>
+          ) : loadState === "error" ? (
+            <div className="mt-3 negis-glass p-5 text-sm font-medium" style={{ color: "var(--negis-muted)" }}>Не удалось загрузить историю запусков.</div>
+          ) : launches.length === 0 ? (
+            <div className="mt-3 negis-glass p-5 text-sm font-medium" style={{ color: "var(--negis-muted)" }}>Запусков пока нет.</div>
+          ) : (
+            <div className="mt-3 grid gap-3">
+              {launches.slice(0, 5).map((launch, index) => {
+                const state = launchState(launch);
+                const tone = launchTones[state];
+                return (
+                  <article key={launch.id || `${launch.campaignName}-${launch.createdAt}-${index}`} className="neu-sm flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <h3 className="break-words text-sm font-semibold" style={{ color: "var(--negis-text)" }}>{launch.campaignName}</h3>
+                      <p className="mt-1 text-xs font-medium" style={{ color: "var(--negis-muted)" }}>
+                        {formatLaunchDate(launch.createdAt)} · {formatPlannedBudget(launch.budgetDailyMinor, launch.currency)}
+                      </p>
+                      {launch.contentApproval ? (
+                        <p className="mt-1 break-words text-xs font-semibold" style={{ color: launch.contentApproval.copyMatchesLaunch === false ? "var(--negis-warning)" : "var(--negis-primary)" }}>
+                          Контент: {launch.contentApproval.variantLabel || launch.contentApproval.variantAngle || "выбранный вариант"}
+                          {launch.contentApproval.copyMatchesLaunch === false ? " · текст изменён перед запуском" : " · согласованная версия"}
+                        </p>
+                      ) : null}
+                    </div>
+                    <span className="w-fit shrink-0 rounded-lg px-2.5 py-1 text-xs font-semibold" style={tone}>{launchLabels[state]}</span>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        <p className="text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+          Безопасный режим: Medina OS создаёт новые кампании выключенными. Включение и расход бюджета остаются под контролем владельца рекламного кабинета.
+        </p>
+      </div>
+    </PageLayout>
+  );
+}

@@ -1,0 +1,739 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "./styles/fonts.css";
+@import "./styles/mint-workspace.css";
+@plugin "@tailwindcss/typography";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-card-border: hsl(var(--card-border));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-popover-border: hsl(var(--popover-border));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-chart-1: hsl(var(--chart-1));
+  --color-chart-2: hsl(var(--chart-2));
+  --color-chart-3: hsl(var(--chart-3));
+  --color-chart-4: hsl(var(--chart-4));
+  --color-chart-5: hsl(var(--chart-5));
+  --color-sidebar: hsl(var(--sidebar));
+  --color-sidebar-foreground: hsl(var(--sidebar-foreground));
+  --color-sidebar-border: hsl(var(--sidebar-border));
+  --color-sidebar-primary: hsl(var(--sidebar-primary));
+  --color-sidebar-primary-foreground: hsl(var(--sidebar-primary-foreground));
+  --color-sidebar-accent: hsl(var(--sidebar-accent));
+  --color-sidebar-accent-foreground: hsl(var(--sidebar-accent-foreground));
+  --color-sidebar-ring: hsl(var(--sidebar-ring));
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  /* Medina OS design tokens (UI-1). Restrained enterprise palette, opaque
+     surfaces, border-first elevation. One primary accent (deep teal); blue is
+     informational only.
+
+     One vocabulary, deliberately. Two prefixes used to carry the same palette:
+     --ng- and --negis- declared identical values for bg, surface, border, text,
+     muted, primary, success, warning and error, and pages picked whichever the
+     author reached for that day. Nothing looked broken — every screen was
+     correct on its own — but a colour could not be changed in one place, and
+     that is most of why the product read as unfinished. The --ng- block is gone
+     and its four unique tokens (surface-2, plate, text-2, accent) live here.
+
+     UI-4: --medina-* retired too. It described the dark navigation slab; the
+     slab is gone, and the dark surfaces that remain live in --negis-dark*.
+     Nothing referenced it any more, and six dead declarations are the same
+     sloppiness this whole clean-up is about. */
+
+  --negis-bg:            #F4F6F5;
+  --negis-surface:       #FFFFFF;
+  --negis-surface-glass: #FFFFFF;
+  --negis-border:        #E2E8E5;
+  /* UI-6. Бирюзовый и мятный — два разных зелёных, и вместе они мутят
+     картинку. Роль остаётся за именем, значение приходит из мятной семьи
+     ссылкой, а не копией литерала: ровно та дублирующая пара, которую мы
+     убирали в UI-2, иначе завелась бы заново. На белом #0C5E3D даёт 7.8:1
+     против прежних 5.5:1 — контраст вырос, а не просел. */
+  --negis-primary:       var(--negis-mint-deep);
+  --negis-primary-soft:  var(--negis-mint-soft);
+  --negis-secondary:     #2563EB;
+  /* Purple "AI" accent retired: operational UI uses the primary accent. */
+  --negis-ai:            var(--negis-mint-deep);
+  --negis-success:       #059669;
+  --negis-warning:       #D97706;
+  --negis-error:         #DC2626;
+  /* Опасное действие: имена были в разметке (ClientsPage), а объявлений не
+     было — токен молча падал в литерал, дописанный рядом, и экран уезжал на
+     полтона. Вскрылось, когда сюиты собрали в один прогон. */
+  --negis-danger:        #B91C1C;
+  --negis-danger-soft:   #FEE2E2;
+  --negis-text:          #111827;
+  --negis-muted:         #6B7280;
+  --negis-accent:        var(--negis-mint-ink);
+  --negis-text-2:        #374151;
+  --negis-plate:         #EDF1EF;
+  --negis-surface-2:     #F8FAF9;
+  --negis-radius-card:   10px;
+  --negis-shadow-card:   0 1px 2px rgba(17, 24, 39, 0.05);
+
+  /* UI-3 — приветственный экран. Тёплый светлый фон, мятная заливка на главной
+     цифре, чёрные пилюли активного состояния. Живёт в том же словаре: третьего
+     префикса не заводим, урок --ng- усвоен. */
+  --negis-ground:       #EEF0EA;
+  --negis-mint:         #A9E7C5;
+  --negis-mint-soft:    #CFF3DF;
+  --negis-mint-deep:    #0C5E3D;
+  --negis-mint-ink:     #07452C;
+  --negis-ink-strong:   #101410;
+  --negis-ink-2:        #39423B;
+  --negis-muted-2:      #7B857D;
+  --negis-faint:        #AEB6AF;
+  --negis-hair:         #F2F4F0;
+  --negis-black:        #121614;
+  --negis-shadow-soft:  0 6px 12px rgba(14, 26, 18, 0.07);
+  --negis-shadow-lift:  0 14px 26px rgba(14, 26, 18, 0.14);
+  /* Тёмная поверхность содержимого — не панель навигации. У --medina-* своя
+     роль, и подменять её маркетинговым блоком значит заводить второй словарь. */
+  --negis-dark:         #141A17;
+  --negis-dark-text:    #E8EDEA;
+  --negis-dark-muted:   #97A39C;
+  --negis-dark-line:    #232C27;
+
+
+  --background: 150 8% 96%;
+  --foreground: 220 39% 11%;
+  --border: 150 10% 90%;
+  --card: 0 0% 100%;
+  --card-foreground: 220 39% 11%;
+  --card-border: 150 10% 90%;
+  --sidebar: 220 39% 11%;
+  --sidebar-foreground: 220 14% 91%;
+  --sidebar-border: 217 33% 17%;
+  --sidebar-primary: 175 77% 26%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 217 33% 17%;
+  --sidebar-accent-foreground: 220 14% 91%;
+  --sidebar-ring: 175 77% 26%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 220 39% 11%;
+  --popover-border: 150 10% 90%;
+  --primary: 175 77% 26%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 150 10% 94%;
+  --secondary-foreground: 220 39% 11%;
+  --muted: 150 10% 94%;
+  --muted-foreground: 220 9% 46%;
+  --accent: 168 33% 92%;
+  --accent-foreground: 175 77% 22%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+  --input: 150 10% 88%;
+  --ring: 175 77% 26%;
+  --chart-1: 175 77% 26%;
+  --chart-2: 221 83% 53%;
+  --chart-3: 160 84% 30%;
+  --chart-4: 32 95% 44%;
+  --chart-5: 220 9% 46%;
+  --radius: 0.5rem;
+}
+
+/* The former `.dark` block set LIGHT values (background 96% lightness), so a
+   dark theme never actually existed. Removed until a real dark palette is
+   designed — an honest absence beats a broken toggle. */
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply font-sans antialiased;
+    background: var(--negis-bg);
+    color: var(--negis-text);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  /* Metrics and table figures align vertically. */
+  .tabular-nums,
+  [data-metric-value] {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Enterprise focus policy: keyboard focus is always visible. */
+  :focus-visible {
+    outline: 2px solid var(--negis-primary);
+    outline-offset: 2px;
+  }
+
+  /* ── NEGIS DESIGN SYSTEM UTILITIES ───────────────────────── */
+
+  /* Cards / Surfaces — непрозрачные, без рамки: границу держит тень. */
+  .neu {
+    background: var(--negis-surface);
+    border: none;
+    border-radius: 22px;
+    box-shadow: var(--negis-shadow-soft);
+    transition: box-shadow 0.15s ease;
+  }
+  .neu-sm {
+    background: var(--negis-surface);
+    border: none;
+    border-radius: 18px;
+    box-shadow: var(--negis-shadow-soft);
+    transition: box-shadow 0.15s ease;
+  }
+  .neu-pressed {
+    background: var(--negis-surface-2);
+    border: none;
+    border-radius: 14px;
+    box-shadow: none;
+  }
+  .neu-pressed-sm {
+    background: var(--negis-surface-2);
+    border: none;
+    border-radius: 12px;
+    box-shadow: none;
+  }
+
+  /* Former glass surfaces — now plain Medina surfaces (names kept for markup). */
+  /* UI-5. Карточки перестали быть обведёнными плитками: на тёплом фоне
+     определённость даёт тень, а не рамка, и скругление крупнее. Одно место —
+     и все экраны переезжают вместе, ради этого словарь и приводили в порядок. */
+  .negis-glass {
+    background: var(--negis-surface);
+    border: none;
+    border-radius: 22px;
+    box-shadow: var(--negis-shadow-soft);
+  }
+  .negis-glass-hero {
+    background: var(--negis-surface);
+    border: none;
+    border-radius: 26px;
+    box-shadow: var(--negis-shadow-lift);
+  }
+
+  /* Card container */
+  .neu-card {
+    background: var(--negis-surface);
+    border: none;
+    border-radius: 22px;
+    padding: 22px;
+    box-shadow: var(--negis-shadow-soft);
+  }
+
+  /* Input */
+  .neu-input {
+    background: var(--negis-surface);
+    border: 1px solid var(--negis-border);
+    border-radius: 14px;
+    outline: none;
+    padding: 9px 12px;
+    width: 100%;
+    font-size: 14px;
+    color: var(--negis-text);
+    font-family: 'Inter', sans-serif;
+    box-shadow: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+  }
+  .neu-input:focus {
+    border-color: var(--negis-primary);
+    box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.15);
+  }
+  .neu-input::placeholder { color: var(--negis-muted); }
+
+  select.neu-input,
+  textarea.neu-input,
+  input.neu-input {
+    min-height: 42px;
+  }
+
+  textarea.neu-input {
+    line-height: 1.5;
+  }
+
+  table {
+    color: var(--negis-text);
+  }
+
+  thead {
+    background: var(--negis-surface-2);
+  }
+
+  th {
+    color: var(--negis-muted);
+    font-weight: 600;
+  }
+
+  tbody tr {
+    transition: background 0.16s ease;
+  }
+
+  tbody tr:hover {
+    background: var(--negis-surface-2);
+  }
+
+  td,
+  th {
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::selection {
+    background: rgba(12, 94, 61, 0.18);
+  }
+
+  /* Buttons — flat enterprise controls. */
+  /* UI-6. Прямоугольник 8px с серой рамкой — самая заметная примета
+     наспех собранного интерфейса. Управляющие элементы переходят в пилюли:
+     первичное действие чёрное, вторичное — тёплое без рамки. */
+  /* Вторичная кнопка белая, а не цвета фона: фон страницы — тот же
+     --negis-ground, и на нём заливка фоном делает кнопку невидимой.
+     Отделяет её тень, поэтому она читается и на фоне, и внутри карточки. */
+  .neu-btn {
+    background: var(--negis-surface);
+    border: none;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 14px;
+    padding: 10px 18px;
+    cursor: pointer;
+    color: var(--negis-ink-2);
+    font-family: 'Inter', sans-serif;
+    box-shadow: var(--negis-shadow-soft);
+    transition: background 0.15s ease, color 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    white-space: nowrap;
+  }
+  .neu-btn:hover {
+    background: var(--negis-hair);
+    color: var(--negis-ink-strong);
+  }
+  .neu-btn:active {
+    background: var(--negis-plate);
+  }
+
+  .neu-btn-primary {
+    background: var(--negis-black);
+    color: white;
+    border: none;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 14px;
+    padding: 10px 18px;
+    cursor: pointer;
+    font-family: 'Inter', sans-serif;
+    box-shadow: var(--negis-shadow-soft);
+    transition: background 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    white-space: nowrap;
+  }
+  .neu-btn-primary:hover {
+    background: var(--negis-ink-strong);
+  }
+  .neu-btn-primary:active {
+    background: var(--negis-ink-2);
+  }
+  .neu-btn-primary:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .neu-btn-success {
+    background: var(--negis-success);
+    color: white;
+    border: none;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 13px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font-family: 'Inter', sans-serif;
+    transition: background 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+  }
+  .neu-btn-success:hover { background: #047857; }
+
+  .neu-btn-danger {
+    background: var(--negis-error);
+    color: white;
+    border: none;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 13px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font-family: 'Inter', sans-serif;
+    transition: background 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+  }
+  .neu-btn-danger:hover { background: #B91C1C; }
+
+  .neu-icon-btn {
+    background: var(--negis-surface);
+    border: none;
+    border-radius: 999px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    color: var(--negis-text-2);
+    height: 40px;
+    width: 40px;
+    box-shadow: var(--negis-shadow-soft);
+  }
+  .neu-icon-btn:hover {
+    background: var(--negis-hair);
+    color: var(--negis-primary);
+  }
+  .neu-icon-btn:active {
+    background: var(--negis-plate);
+  }
+
+  /* Badge — status pills keep the pill shape by design. */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+  }
+  .badge-success { color: #047857; background: #ECFDF5; }
+  .badge-blue    { color: #1D4ED8; background: #EFF6FF; }
+  .badge-warning { color: #B45309; background: #FFFBEB; }
+  .badge-error   { color: #B91C1C; background: #FEF2F2; }
+  .badge-muted   { color: var(--negis-muted); background: #F3F4F6; }
+
+  /* .soft-dock / .topnav-* / .soft-avatar / .soft-icon-btn removed together
+     with TopNav — the component was never visible at any viewport width. */
+
+  .soft-modal {
+    border-radius: 24px;
+    border: none;
+    background: #FFFFFF;
+    box-shadow: 0 20px 45px rgba(17, 24, 39, 0.18);
+  }
+
+  html,
+  body,
+  #root {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  body {
+    touch-action: manipulation;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  .negis-app-shell,
+  .negis-main,
+  .neu,
+  .neu-sm,
+  .neu-lg,
+  .neu-card,
+  table,
+  section,
+  article,
+  aside,
+  div {
+    min-width: 0;
+  }
+
+  .negis-main {
+    padding: 24px clamp(18px, 3vw, 40px) 40px;
+  }
+
+  /* Header renders at every width now — it hosts the notification bell. */
+  .negis-topbar {
+    min-height: 56px;
+  }
+
+  /* Compact on desktop, full touch target where touch is likely. */
+  .negis-bell {
+    width: 36px;
+    height: 36px;
+    min-height: 36px;
+  }
+
+  .neu-card,
+  .neu-sm,
+  .neu,
+  .soft-modal {
+    overflow-wrap: anywhere;
+  }
+
+  /* Touch-target sizing is applied only where touch is likely: forcing a
+     44px minimum on every <button> globally destroyed desktop density. */
+  @media (max-width: 767px), (pointer: coarse) {
+    .neu-btn,
+    .neu-btn-primary,
+    .neu-btn-success,
+    .neu-btn-danger,
+    .neu-icon-btn,
+    button {
+      min-height: 44px;
+    }
+
+    .negis-bell {
+      width: 44px;
+      height: 44px;
+      min-height: 44px;
+    }
+
+    .neu-btn,
+    .neu-btn-primary,
+    .neu-btn-success,
+    .neu-btn-danger {
+      white-space: normal;
+      text-align: center;
+    }
+  }
+
+  .mobile-bottom-nav {
+    position: fixed;
+    left: max(12px, env(safe-area-inset-left));
+    right: max(12px, env(safe-area-inset-right));
+    bottom: max(10px, env(safe-area-inset-bottom));
+    z-index: 70;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 4px;
+    padding: 6px;
+    border: 1px solid var(--negis-border);
+    border-radius: 14px;
+    background: #FFFFFF;
+    box-shadow: 0 8px 24px rgba(17, 24, 39, 0.12);
+  }
+
+  .mobile-bottom-nav-item {
+    min-width: 0;
+    min-height: 54px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--negis-muted);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1.1;
+    cursor: pointer;
+  }
+
+  .mobile-bottom-nav-item.is-active {
+    background: var(--negis-primary-soft);
+    color: var(--negis-primary);
+  }
+
+  .mobile-nav-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 69;
+    background: rgba(15, 23, 42, 0.24);
+    display: flex;
+    align-items: flex-end;
+    padding: 16px 12px calc(92px + env(safe-area-inset-bottom));
+  }
+
+  .mobile-nav-sheet {
+    width: 100%;
+    max-height: min(72dvh, 620px);
+    overflow-y: auto;
+    border: 1px solid var(--negis-border);
+    border-radius: 14px;
+    background: #FFFFFF;
+    box-shadow: 0 16px 48px rgba(17, 24, 39, 0.18);
+    padding: 18px;
+  }
+
+  .mobile-nav-drawer-item,
+  .mobile-nav-logout {
+    min-width: 0;
+    min-height: 52px;
+    border: 1px solid var(--negis-border);
+    border-radius: 10px;
+    background: var(--negis-surface-2);
+    color: var(--negis-text);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: left;
+    width: 100%;
+  }
+
+  .mobile-nav-drawer-item span,
+  .mobile-nav-logout span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .mobile-nav-logout {
+    margin-top: 12px;
+    justify-content: center;
+    color: #DC2626;
+    background: rgba(254, 242, 242, 0.92);
+    border-color: rgba(254, 202, 202, 0.95);
+  }
+
+  @media (max-width: 767px) {
+    body {
+      font-size: 14px;
+    }
+
+    .negis-main {
+      padding: 16px 14px calc(112px + env(safe-area-inset-bottom));
+    }
+
+    .negis-topbar {
+      min-height: 60px;
+      padding-left: 16px;
+      padding-right: 16px;
+      gap: 10px;
+    }
+
+    .negis-topbar-date {
+      display: none !important;
+    }
+
+    .negis-topbar-actions {
+      gap: 8px;
+    }
+
+    /* На узком экране карточка теснее по внутреннему отступу, но скругление
+       остаётся крупным — иначе телефон выглядит как другой продукт. */
+    .neu-card {
+      padding: 16px;
+      border-radius: 18px;
+    }
+
+    .neu-card.p-6,
+    .neu-card.p-5,
+    .neu-card.p-4 {
+      padding: 18px !important;
+    }
+
+    .grid.grid-cols-2,
+    .grid.grid-cols-3,
+    .grid.grid-cols-4 {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .mobile-nav-sheet .grid.grid-cols-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .neu,
+    .neu-sm {
+      border-radius: 10px;
+    }
+
+    .neu-input {
+      min-height: 46px;
+      font-size: 16px;
+    }
+
+    /* iOS Safari зумит страницу при фокусе поля с font-size < 16px и оставляет
+       её зумленной с горизонтальной прокруткой. Правило для .neu-input выше
+       закрывает классовые поля, но Реклама и Контент задают шрифт инлайновым
+       style, который класс не перекроет, — отсюда !important: это единственный
+       способ выиграть у инлайнового стиля. Внутри .negis-main, чтобы не трогать
+       лендинг и служебные страницы. */
+    .negis-main input:not([type="checkbox"]):not([type="radio"]),
+    .negis-main select,
+    .negis-main textarea {
+      font-size: 16px !important;
+    }
+
+    .soft-modal {
+      left: 12px !important;
+      right: 12px !important;
+      top: 72px !important;
+      width: auto !important;
+      max-height: calc(100dvh - 94px - env(safe-area-inset-bottom)) !important;
+    }
+
+    textarea {
+      max-width: 100%;
+    }
+  }
+
+  /* Keep tablet content clear of compact navigation, without collapsing
+     tablet grids into the phone's single column. */
+  @media (min-width: 768px) and (max-width: 1023px) {
+    .negis-main {
+      padding-bottom: calc(112px + env(safe-area-inset-bottom));
+    }
+  }
+
+  @media (max-width: 1023px), (pointer: coarse) {
+    .negis-main input:not([type="checkbox"]):not([type="radio"]),
+    .negis-main select,
+    .negis-main textarea {
+      font-size: 16px !important;
+    }
+  }
+
+  @media (min-width: 1024px) {
+    .mobile-bottom-nav,
+    .mobile-nav-backdrop {
+      display: none;
+    }
+  }
+}
+
+/* Unlayered on purpose: unlayered rules outrank @layer ones, so this wins over
+   Tailwind's animation utilities. The header's live-status dot animates
+   continuously and now renders at every viewport width, so honouring the
+   reduced-motion preference is no longer optional. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

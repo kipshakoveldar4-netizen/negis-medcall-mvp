@@ -1,0 +1,645 @@
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { assignedLeadRouteAllowed, isAssignedLeadRole } from "../../lib/crm/assigned-leads";
+import { handleSiteIntake } from "../../lib/crm/site-intake-handler";
+import { handleSiteBlog } from "../../lib/crm/site-blog";
+import { handleSiteInquiryDeletion, handleSiteInquiryDeletionPreview, handleSiteDeletionOperations } from "../../lib/crm/site-inquiry-deletion";
+import { handlePlatformOperators, handleOperatorAccount, handleOperatorInbox, handleClinicOperators } from "../../lib/crm/operators";
+import { handleContributorAccount, handlePlatformContributors } from "../../lib/crm/contributors";
+import { handlePartnerLedger } from "../../lib/crm/partner-ledger";
+import { handlePartnerHistory } from "../../lib/crm/partner-history";
+import { handlePartnerTerms } from "../../lib/crm/partner-terms";
+import { handlePartnerLink } from "../../lib/crm/partner-link";
+import { handlePartnerCompanyEntry, handlePartnerCompanyRecovery, handlePlatformPartnerCompanies } from "../../lib/crm/partner-companies";
+import { handlePartnerEntry } from "../../lib/crm/partner-entry";
+import { handleCreatorJobs, handleCreatorJobReads } from "../../lib/crm/creator-jobs";
+import { handleOperatorLeads, handleClinicOperatorLeads } from "../../lib/crm/operator-leads";
+import { handleOperatorWorkday } from "../../lib/crm/operator-workday";
+import { handleOperatorLeadSearch, operatorLeadSearchRouteSegments } from "../../lib/crm/operator-lead-search";
+import { handleOperatorServices } from "../../lib/crm/operator-services";
+import { handleOperatorBookings } from "../../lib/crm/operator-bookings";
+import { handleClinicOperatorArrivals, handleOperatorArrivals } from "../../lib/crm/operator-arrivals";
+import {
+  handleAdCreativeMetaUpload,
+  handleAdCreativeSignedUpload,
+  handleAdCreativeFinalizeUpload,
+  handleAdCreativeUpload,
+  handleAdsAiFill,
+  handleAdvertisingOutcomes,
+  handleCrmAuthContext,
+  handleCrmHealth,
+  handleCrmResource,
+  handleLeadAssignees,
+  handleMetaCityKey,
+  handleMetaCampaignInsights,
+  handleMetaInsightsBackgroundCycle,
+  handleMetaInsightsHistory,
+  handleMetaInsightsSync,
+  handleMetaInsightsSyncRuns,
+  handleMetaLaunch,
+  handleMetaStatus,
+  handleMetaValidate,
+  handleStorageHealth,
+  handleTikTokDryRun,
+  handleTikTokConnection,
+  handleTikTokSetup,
+  handleTikTokValidate,
+  handleVideoJobs,
+  handleVideoProcessingJobs,
+  attachWorkspaceContext,
+  type CrmResource,
+  readWorkspaceContext,
+} from "../../lib/crm/server";
+import { normalizeCrmSegments, resolveCrmRoute } from "../../lib/crm/authorization";
+import { lookupWorkspacePurposes, requirePurposeRoute, requireMortgagePayload } from '../../lib/crm/workspace-policy';
+import { handleMortgageWorkspace } from '../../lib/crm/mortgage-workspace';
+import { handleMortgageOutcomes } from '../../lib/crm/mortgage-outcomes';
+import { handleStaffInvitationAccept, handleStaffInvitations } from "../../lib/crm/staff-invitations";
+import { handleStaffCredentials } from "../../lib/crm/staff-credentials";
+import { handleJoinCode, handleJoinRequest, handleStaffJoinRequests } from "../../lib/crm/staff-join-requests";
+import { handlePlatformWhatsappNumber } from "../../lib/crm/platform-whatsapp";
+import { handleWhatsAppChannels } from "../../lib/crm/whatsapp-channels";
+import { handleCrmChangeLog } from "../../lib/crm/change-log";
+import { handleLeadTeamAnalytics } from "../../lib/crm/lead-team-analytics";
+import { handleMyClients } from "../../lib/crm/my-clients";
+import { handlePushSubscriptions } from "../../lib/crm/push-subscriptions";
+import { handleSalonStats } from "../../lib/crm/salon-stats";
+import { handleTikTokVideos } from "../../lib/crm/tiktok-videos";
+import { handleTikTokLaunch } from "../../lib/crm/tiktok-launch";
+import {
+  MetaAccountBoundaryError,
+  MetaWorkspaceBoundaryError,
+  requireMetaProvisionedAdAccount,
+  requireMetaProvisionedWorkspace,
+} from "../../lib/meta/workspace";
+import {
+  requireTikTokProvisionedWorkspace,
+  TikTokConnectionError,
+} from "../../lib/tiktok/connections";
+import {
+  requireAuthenticatedUser,
+  requireWorkspaceAccess,
+  WorkspaceAdminAuthError,
+} from "../../lib/auth/server";
+import { attachPlatformOwner, PlatformAuthError, requirePlatformOwner } from "../../lib/auth/platform";
+import { handlePlatformRecommendations, handleWorkspaceRecommendations } from "../../lib/crm/recommendations";
+import { applyControlCors } from "../../lib/auth/cors";
+import { handlePlatformClinic, handlePlatformOverview, handlePlatformSubscriptions, handleWorkspaceSubscription } from "../../lib/crm/platform";
+import { handlePlatformInvitationReissue, handlePlatformOnboarding } from "../../lib/crm/platform-onboarding";
+import { handlePlatformOnboardingCredentials } from "../../lib/crm/platform-onboarding-credentials";
+
+// Security-2B — deny-by-default tenant authorization for /api/crm/*.
+//
+// Handlers below run on a service-role Supabase client, which bypasses RLS. The
+// router therefore resolves a verified workspace context *before* dispatching,
+// and the handlers read the tenant from that context instead of from the
+// request. A path that is not registered in lib/crm/authorization.ts is a 404;
+// there is no permissive fallback and no environment-controlled bypass.
+
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
+const resources: CrmResource[] = [
+  "clients",
+  "leads",
+  "lead-stages",
+  "lead-sources",
+  "clinic-services",
+  "clinic-doctors",
+  "doctor-schedule",
+  "deals",
+  "appointments",
+  "calls",
+  "tasks",
+  "chat",
+  "staff",
+  "content-videos",
+  "admin-settings",
+  "integration-statuses",
+  "ai-providers",
+  "meta-accounts",
+  "meta-launches",
+  "ad-creatives",
+  "release-checks",
+];
+
+const META_ACCOUNT_BOUND_ROUTES = new Set([
+  "meta-accounts",
+  "meta-launch",
+  "meta-status",
+  "meta-validate",
+  "meta-city-key",
+  "meta-insights-sync",
+  "ad-creative-meta-upload",
+]);
+
+const TIKTOK_ACCOUNT_BOUND_ROUTES = new Set([
+  "tiktok-validate",
+  "tiktok-connection",
+  "tiktok-dry-run",
+  "tiktok-setup",
+  "tiktok-videos",
+  "tiktok-launch",
+]);
+
+function readMetaAccountId(body: unknown): string {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return "";
+  const record = body as Record<string, unknown>;
+  const updates = record.updates && typeof record.updates === "object" && !Array.isArray(record.updates)
+    ? record.updates as Record<string, unknown>
+    : {};
+  for (const value of [updates.adAccountId, updates.ad_account_id, record.adAccountId, record.ad_account_id]) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "";
+}
+
+function sendJson(res: VercelResponse, status: number, payload: unknown) {
+  if (status >= 400) res.setHeader("Cache-Control", "no-store");
+  res.status(status).setHeader("Content-Type", "application/json; charset=utf-8");
+  return res.json(payload);
+}
+
+function sendAuthError(res: VercelResponse, error: WorkspaceAdminAuthError) {
+  // The message and code are already generic; nothing about the workspace, the
+  // membership or the underlying Supabase failure reaches the caller.
+  return sendJson(res, error.statusCode, {
+    success: false,
+    error: error.message,
+    code: error.code,
+  });
+}
+
+function notFound(res: VercelResponse) {
+  return sendJson(res, 404, {
+    success: false,
+    error: "Resource not found",
+    code: "resource_not_found",
+  });
+}
+
+function methodNotAllowed(res: VercelResponse) {
+  return sendJson(res, 405, {
+    success: false,
+    error: "Method not allowed",
+    code: "method_not_allowed",
+  });
+}
+
+// Media uses the separately bounded multipart/signed-upload path, not JSON.
+const MAX_CRM_BODY_BYTES = 1024 * 1024;
+
+class CrmBodyTooLargeError extends Error {}
+
+function checkBodyLengthHeader(req: VercelRequest) {
+  const length = req.headers["content-length"];
+  if (length === undefined) return;
+  if (typeof length !== "string" || !/^\d+$/.test(length)) throw new SyntaxError("Invalid content length");
+  const digits = length.replace(/^0+/, "") || "0";
+  const limit = String(MAX_CRM_BODY_BYTES);
+  if (digits.length > limit.length || (digits.length === limit.length && digits > limit)) throw new CrmBodyTooLargeError();
+}
+
+async function readRawBody(req: VercelRequest): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  // Returning the default IncomingMessage iterator destroys its socket, losing
+  // the 413 response. Stop reading without destroying it before responding.
+  const source = typeof req.iterator === "function"
+    ? req.iterator({ destroyOnReturn: false })
+    : req as AsyncIterable<Buffer | string>;
+  for await (const chunk of source) {
+    bytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk);
+    if (bytes > MAX_CRM_BODY_BYTES) throw new CrmBodyTooLargeError();
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks, bytes);
+}
+
+async function ensureParsedBody(req: VercelRequest) {
+  if (req.method === "GET" || req.method === "HEAD") return;
+
+  const rawContentType = Array.isArray(req.headers["content-type"])
+    ? req.headers["content-type"][0]
+    : req.headers["content-type"] || "";
+  const contentType = (rawContentType || "").toLowerCase();
+  if (contentType.includes("multipart/form-data")) return;
+
+  checkBodyLengthHeader(req);
+  // Some adapters preparse requests despite bodyParser:false. They must not
+  // bypass the budget; keep an existing exact rawBody intact for HMAC checks.
+  const existingRaw = (req as VercelRequest & { rawBody?: Buffer | string | Uint8Array }).rawBody;
+  const existingBytes = typeof existingRaw === "string" ? Buffer.byteLength(existingRaw)
+    : ArrayBuffer.isView(existingRaw) ? existingRaw.byteLength : 0;
+  if (existingBytes > MAX_CRM_BODY_BYTES) throw new CrmBodyTooLargeError();
+  if (req.body !== undefined) {
+    const serialized = Buffer.isBuffer(req.body) || typeof req.body === "string" ? req.body : JSON.stringify(req.body);
+    if (serialized === undefined) throw new SyntaxError("Invalid request body");
+    if (Buffer.byteLength(serialized) > MAX_CRM_BODY_BYTES) throw new CrmBodyTooLargeError();
+    return;
+  }
+
+  const rawBody = Buffer.isBuffer(existingRaw) ? existingRaw
+    : typeof existingRaw === "string" ? Buffer.from(existingRaw)
+    : ArrayBuffer.isView(existingRaw) ? Buffer.from(existingRaw.buffer, existingRaw.byteOffset, existingRaw.byteLength)
+    : await readRawBody(req);
+  // Preserve the exact bytes so signed worker requests can recompute SHA256(body).
+  (req as VercelRequest & { rawBody?: Buffer }).rawBody = rawBody;
+  if (rawBody.length === 0) return;
+
+  if (contentType.includes("application/json")) {
+    req.body = JSON.parse(rawBody.toString("utf8"));
+    return;
+  }
+
+  if (contentType.includes("application/x-www-form-urlencoded")) {
+    const params = new URLSearchParams(rawBody.toString("utf8"));
+    const body: Record<string, string> = {};
+    params.forEach((value, key) => {
+      body[key] = value;
+    });
+    req.body = body;
+  }
+}
+
+async function parseRequestBody(req: VercelRequest, res: VercelResponse): Promise<boolean> {
+  try {
+    await ensureParsedBody(req);
+    return true;
+  } catch (error) {
+    const tooLarge = error instanceof CrmBodyTooLargeError;
+    res.setHeader("Cache-Control", "no-store");
+    sendJson(res, tooLarge ? 413 : 400, {
+      success: false,
+      error: tooLarge ? "Request body too large" : "Invalid request body",
+      code: tooLarge ? "request_body_too_large" : "invalid_request_body",
+    });
+    return false;
+  }
+}
+
+function readPathSegments(req: VercelRequest): string[] {
+  const pathParam = req.query.path;
+  if (Array.isArray(pathParam)) {
+    return pathParam.map((segment) => segment.trim()).filter(Boolean);
+  }
+
+  const querySegment = pathParam;
+
+  if (typeof querySegment === "string" && querySegment.trim()) {
+    return querySegment.split("/").map((segment) => segment.trim()).filter(Boolean);
+  }
+
+  const pathname = new URL(req.url || "/", "http://localhost").pathname;
+  const [, segment] = pathname.split("/api/crm/");
+  return (segment || "").split("/").filter(Boolean);
+}
+
+function isCrmResource(value: string): value is CrmResource {
+  return resources.includes(value as CrmResource);
+}
+
+/** Dispatch runs only after the route has been authorized. */
+async function dispatch(
+  routeKey: string,
+  resource: string | undefined,
+  segments: string[],
+  req: VercelRequest,
+  res: VercelResponse,
+) {
+  switch (routeKey) {
+    case "lead-team-analytics": return segments.length === 1 ? handleLeadTeamAnalytics(req, res) : notFound(res);
+    case "mortgage-workspace": return segments.length === 1 ? handleMortgageWorkspace(req, res) : notFound(res);
+    case "mortgage-contracts": return segments.length === 1 ? handleMortgageOutcomes(req, res, "contracts") : notFound(res);
+    case "mortgage-results": return segments.length === 1 ? handleMortgageOutcomes(req, res, "results") : notFound(res);
+    case "site-blog": return handleSiteBlog(req, res);
+    case "site-inquiry-deletion-preview":
+      return segments.length === 1 ? handleSiteInquiryDeletionPreview(req, res) : notFound(res);
+    case "site-inquiry-deletion":
+      return segments.length === 1 ? handleSiteInquiryDeletion(req, res) : notFound(res);
+    case "site-inquiry-deletion-operations":
+      return segments.length === 1 ? handleSiteDeletionOperations(req, res) : notFound(res);
+    case "contributor-account": return segments.length === 1 ? handleContributorAccount(req, res) : notFound(res);
+    case "platform-contributors": return segments.length === 1 ? handlePlatformContributors(req, res) : notFound(res);
+    case "partner-ledger": return segments.length === 1 ? handlePartnerLedger(req, res) : notFound(res);
+    case "partner-history": return segments.length === 1 ? handlePartnerHistory(req, res) : notFound(res);
+    case "partner-terms": return segments.length === 1 ? handlePartnerTerms(req, res) : notFound(res);
+    case "partner-link": return segments.length === 1 ? handlePartnerLink(req, res) : notFound(res);
+    case "partner-company": return segments.length === 1 ? handlePartnerCompanyRecovery(req, res) : notFound(res);
+    case "platform-partner-companies": return segments.length === 1 ? handlePlatformPartnerCompanies(req, res) : notFound(res);
+    case "platform-partner-terms": return segments.length === 1 ? handlePartnerTerms(req, res, true) : notFound(res);
+    case "creator-jobs": return segments.length === 1 ? handleCreatorJobs(req, res) : notFound(res);
+    case "creator-job-command": return segments.length === 1 ? handleCreatorJobs(req, res, false, true) : notFound(res);
+    case "clinic-creator-jobs": return segments.length === 1 ? handleCreatorJobs(req, res, true) : notFound(res);
+    case "clinic-creator-job-command": return segments.length === 1 ? handleCreatorJobs(req, res, true, true) : notFound(res);
+    case "creator-job-detail": return segments.length === 1 ? handleCreatorJobReads(req, res, false) : notFound(res);
+    case "clinic-creator-job-detail": return segments.length === 1 ? handleCreatorJobReads(req, res, true) : notFound(res);
+    case "creator-directory": return segments.length === 1 ? handleCreatorJobReads(req, res, true, true) : notFound(res);
+    case "platform-operators": return handlePlatformOperators(req, res);
+    case "operator-account": return handleOperatorAccount(req, res);
+    case "operator-inbox": return handleOperatorInbox(req, res);
+    case "operator-leads": return handleOperatorLeads(req, res);
+    case "operator-workday": return segments.length === 1 ? handleOperatorWorkday(req, res) : notFound(res);
+    case "operator-lead-search": return segments.length === 1 ? handleOperatorLeadSearch(req, res) : notFound(res);
+    case "operator-services": return handleOperatorServices(req, res);
+    case "operator-bookings": return handleOperatorBookings(req, res);
+    case "operator-arrivals": return handleOperatorArrivals(req, res);
+    case "clinic-operator-leads": return handleClinicOperatorLeads(req, res);
+    case "clinic-operator-arrivals": return handleClinicOperatorArrivals(req, res);
+    case "operator-directory": return handleClinicOperators(req, res, true);
+    case "clinic-operator-requests": return handleClinicOperators(req, res);
+    case "auth-context":
+      return handleCrmAuthContext(req, res);
+    case "subscription": {
+      // Арендатор из проверенного контекста: тот же источник, что и у любого
+      // другого браузерного маршрута.
+      const context = readWorkspaceContext(req);
+      return handleWorkspaceSubscription(context ? context.workspaceId : "", res);
+    }
+    case "platform-overview":
+      return handlePlatformOverview(req, res);
+    case "platform-subscriptions":
+      return handlePlatformSubscriptions(req, res);
+    case "platform-clinic":
+      return handlePlatformClinic(req, res);
+    case "platform-onboarding":
+      return handlePlatformOnboarding(req, res);
+    case "platform-onboarding-credentials":
+      return handlePlatformOnboardingCredentials(req, res);
+    case "platform-whatsapp-number":
+      return handlePlatformWhatsappNumber(req, res);
+    case "platform-invitation-reissue":
+      return handlePlatformInvitationReissue(req, res);
+    case "platform-recommendations":
+      return handlePlatformRecommendations(req, res);
+    case "recommendations": {
+      // Арендатор — из проверенного контекста, как у subscription.
+      const context = readWorkspaceContext(req);
+      return handleWorkspaceRecommendations(context ? context.workspaceId : "", req, res);
+    }
+    case "staff-invitations":
+      return handleStaffInvitations(req, res);
+    case "staff-credentials":
+      return handleStaffCredentials(req, res);
+    case "join-request":
+      return handleJoinRequest(req, res);
+    case "staff-join-requests":
+      return handleStaffJoinRequests(req, res);
+    case "join-code":
+      return handleJoinCode(req, res);
+    case "staff-invitations/accept":
+      return handleStaffInvitationAccept(req, res);
+    case "health":
+      return handleCrmHealth(req, res);
+    case "storage-health":
+      return handleStorageHealth(req, res);
+    case "meta-launch":
+      return handleMetaLaunch(req, res);
+    case "lead-assignees":
+      return handleLeadAssignees(req, res);
+    case "meta-status":
+      return handleMetaStatus(req, res);
+    case "meta-validate":
+      return handleMetaValidate(req, res);
+    case "meta-city-key":
+      return handleMetaCityKey(req, res);
+    case "tiktok-validate":
+      return handleTikTokValidate(req, res);
+    case "tiktok-connection":
+      return handleTikTokConnection(req, res);
+    case "tiktok-dry-run":
+      return handleTikTokDryRun(req, res);
+    case "tiktok-setup":
+      return handleTikTokSetup(req, res);
+    case "tiktok-videos":
+      return handleTikTokVideos(req, res);
+    case "tiktok-launch":
+      return handleTikTokLaunch(req, res);
+    case "meta-insights-sync":
+      return handleMetaInsightsSync(req, res);
+    case "meta-insights-background-cycle":
+      return handleMetaInsightsBackgroundCycle(req, res);
+    case "meta-campaign-insights":
+      return handleMetaCampaignInsights(req, res);
+    case "meta-insights-history":
+      return handleMetaInsightsHistory(req, res);
+    case "advertising-outcomes":
+      return handleAdvertisingOutcomes(req, res);
+    case "meta-insights-sync-runs":
+      return handleMetaInsightsSyncRuns(req, res);
+    case "ad-creatives/signed-upload":
+      return handleAdCreativeSignedUpload(req, res);
+    case "ad-creatives/finalize-upload":
+      return handleAdCreativeFinalizeUpload(req, res);
+    case "ad-creative-upload":
+      return handleAdCreativeUpload(req, res);
+    case "ad-creative-meta-upload":
+      return handleAdCreativeMetaUpload(req, res);
+    case "ads-ai-fill":
+      return handleAdsAiFill(req, res);
+    case "change-log":
+      return handleCrmChangeLog(req, res);
+    case "my-clients":
+      return handleMyClients(req, res);
+    case "push-subscriptions":
+      return handlePushSubscriptions(req, res);
+    case "salon-stats":
+      return handleSalonStats(req, res);
+    case "whatsapp-channels":
+      return handleWhatsAppChannels(req, res);
+    case "video-jobs":
+      return handleVideoJobs(req, res);
+    case "video-processing-jobs":
+      return handleVideoProcessingJobs(req, res, segments.slice(1));
+    default:
+      break;
+  }
+
+  if (resource && isCrmResource(resource)) {
+    return handleCrmResource(resource, req, res);
+  }
+
+  // Unreachable for a registered route; kept as a closed default.
+  return notFound(res);
+}
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  // Портал Medina Control живёт на другом домене; его источники перечислены в
+  // переменной окружения, пустой список оставляет поведение прежним. Preflight
+  // завершается до авторизации: предзапрос браузера токена не несёт.
+  if (applyControlCors(req, res) === "preflight") {
+    return res.status(204).end();
+  }
+
+  // Do not let a second path value retarget a lead-search request.
+  const rawSegments = operatorLeadSearchRouteSegments(req.url) ?? readPathSegments(req);
+  const segments = normalizeCrmSegments(rawSegments);
+  if (!segments) {
+    return notFound(res);
+  }
+
+  const route = resolveCrmRoute(segments);
+  if (!route) {
+    return notFound(res);
+  }
+
+  if (route.key === "operator-lead-search") {
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+  }
+
+  // Creator denials can happen in this router before the private handler runs.
+  if (["partner-link", "partner-company", "platform-partner-companies", "creator-jobs", "creator-job-command", "clinic-creator-jobs", "clinic-creator-job-command",
+    "creator-job-detail", "clinic-creator-job-detail", "creator-directory"].includes(route.key)) {
+    res.setHeader("Cache-Control", "no-store");
+  }
+
+  // This one write-only intake has its own bounded parser and bot verification.
+  // Never dispatch it through generic CRM resources or resolve a visitor tenant.
+  if (route.authorization.kind === "site_public") {
+    if (route.key !== "site-page" || segments.length !== 1) return notFound(res);
+    // The optional renderer must not prevent staff authentication or CRM boot.
+    try {
+      const { handleSitePage } = await import("../../lib/crm/site-page.js");
+      return await handleSitePage(req, res);
+    } catch {
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("X-Robots-Tag", "noindex, nofollow");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      return res.status(503).end(req.method === "HEAD" ? undefined : "Сайт временно недоступен. Попробуйте позже.");
+    }
+  }
+  if (route.authorization.kind === "site_intake") {
+    if (route.key !== "site-inquiry" || segments.length !== 1) return notFound(res);
+    return handleSiteIntake(req, res);
+  }
+  if (route.authorization.kind === "partner_entry") {
+    res.setHeader("Cache-Control", "no-store");
+    if (route.key !== "partner-entry" || (segments.length !== 1 && !(segments.length === 2 && segments[1] === "company"))) return notFound(res);
+    try { return await (segments.length === 2 ? handlePartnerCompanyEntry(req, res) : handlePartnerEntry(req, res)); }
+    catch (error) { if (error instanceof WorkspaceAdminAuthError) return sendAuthError(res, error); throw error; }
+  }
+
+  const method = (req.method || "GET").toUpperCase();
+  const isDisabledMethod = Boolean(route.authorization.disabledMethods?.includes(method));
+
+  // Платформенные маршруты гейтятся ДО проверки метода. Обратный порядок
+  // выдавал оракул существования: POST на платформенный путь отвечал 405, на
+  // несуществующий — 404, и панель со списком всех клиник была различима без
+  // единого токена. По той же причине ниже любой авторизационный отказ на
+  // платформенном маршруте превращается в тот же 404, что у неизвестного пути.
+  if (route.authorization.kind === "platform") {
+    try {
+      attachPlatformOwner(req, await requirePlatformOwner(req));
+      if (!route.authorization.methods.includes(method)) {
+        return methodNotAllowed(res);
+      }
+      if (!await parseRequestBody(req, res)) return;
+      return await dispatch(route.key, route.resource, segments, req, res);
+    } catch (error) {
+      if (error instanceof PlatformAuthError || error instanceof WorkspaceAdminAuthError) {
+        return notFound(res);
+      }
+      throw error;
+    }
+  }
+
+  if (!isDisabledMethod && !route.authorization.methods.includes(method)) {
+    return methodNotAllowed(res);
+  }
+
+  try {
+    if (route.authorization.kind === "internal_hmac") {
+      // The handler performs its own HMAC verification; a browser JWT can never
+      // satisfy it. Read bounded exact bytes, not a reserialized signature body.
+      if (!await parseRequestBody(req, res)) return;
+      return await dispatch(route.key, route.resource, segments, req, res);
+    }
+
+    if (route.authorization.kind === "bootstrap") {
+      // Identity only: the user may not have selected a workspace yet.
+      await requireAuthenticatedUser(req);
+      if (!await parseRequestBody(req, res)) return;
+      return await dispatch(route.key, route.resource, segments, req, res);
+    }
+
+    const permission = route.authorization.permissions?.[method];
+    const context = await requireWorkspaceAccess(req, undefined, {
+      ...(route.authorization.roles ? { roles: route.authorization.roles } : {}),
+      ...(permission ? { permission } : {}),
+    });
+
+    const purposeScopedActivity = (route.key === "mortgage-workspace" && ["GET", "POST", "PATCH"].includes(method))
+      || (route.key === "mortgage-contracts" && ["GET", "POST"].includes(method));
+    if (isAssignedLeadRole(context.role) && !assignedLeadRouteAllowed(route.key, method) && !purposeScopedActivity) {
+      return sendJson(res, 403, { success: false, error: "Недостаточно прав", code: "insufficient_permission" });
+    }
+    context.purpose = (await lookupWorkspacePurposes([context.workspaceId]))[context.workspaceId];
+    // New activity access is purpose-scoped; the generic clinic resources stay closed.
+    if (isAssignedLeadRole(context.role) && !assignedLeadRouteAllowed(route.key, method, context.purpose)) {
+      return sendJson(res, 403, { success: false, error: "Недостаточно прав", code: "insufficient_permission" });
+    }
+    requirePurposeRoute(context.purpose, context.role, route.key, method);
+
+    if (META_ACCOUNT_BOUND_ROUTES.has(route.key)) {
+      requireMetaProvisionedWorkspace(context.workspaceId);
+    }
+    if (TIKTOK_ACCOUNT_BOUND_ROUTES.has(route.key)) {
+      requireTikTokProvisionedWorkspace(context.workspaceId);
+    }
+    if (isDisabledMethod) {
+      // Registered but intentionally refused, and only revealed to a caller who
+      // was already authorized for it. Direct staff creation stays closed: it
+      // would take an auth_user_id from the browser, which is how a caller could
+      // mint privileged membership for any account. Commercial-3B added the
+      // verified path — /api/crm/staff-invitations — where the workspace names
+      // the address and the person proves they control it.
+      return sendJson(res, 409, {
+        success: false,
+        error: "Staff are added by invitation",
+        code: "staff_invitation_required",
+        details: ["Use POST /api/crm/staff-invitations"],
+      });
+    }
+
+    // Authority, purpose and disabled capabilities never depend on the body.
+    // Deletion retains its own stricter parser after verified context attachment.
+    if (route.key !== "site-inquiry-deletion" && route.key !== "site-inquiry-deletion-operations"
+      && !await parseRequestBody(req, res)) return;
+    if (context.purpose === 'mortgage_leads') requireMortgagePayload(route.key, method, req.body);
+    if (route.key === "meta-accounts" && method !== "GET") {
+      requireMetaProvisionedAdAccount(readMetaAccountId(req.body));
+    }
+
+    // From here on the verified workspace is the only tenant authority; the
+    // selector in the query or body has no further effect.
+    attachWorkspaceContext(req, context);
+    return await dispatch(route.key, route.resource, segments, req, res);
+  } catch (error) {
+    if (error instanceof PlatformAuthError) {
+      // 404, а не 403: существование панели — тоже сведения.
+      return notFound(res);
+    }
+    if (error instanceof WorkspaceAdminAuthError) {
+      return sendAuthError(res, error);
+    }
+    if (error instanceof MetaWorkspaceBoundaryError || error instanceof MetaAccountBoundaryError) {
+      return sendJson(res, error.statusCode, {
+        success: false,
+        error: error.message,
+        code: error.code,
+      });
+    }
+    if (error instanceof TikTokConnectionError) {
+      return sendJson(res, error.status, {
+        success: false,
+        error: error.message,
+        code: error.code,
+      });
+    }
+    throw error;
+  }
+}

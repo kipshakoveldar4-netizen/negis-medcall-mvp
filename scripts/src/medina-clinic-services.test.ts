@@ -1,0 +1,877 @@
+import assert from "node:assert/strict";
+import { withAppointmentCreateRpcSpy, appointmentSpyRows, appointmentSpyBody } from "./appointment-create-rpc-spy.js";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// CS — справочник услуг клиники.
+//
+// «Услуга» жила в этом продукте несколькими несвязанными свободными строками:
+// её набирали руками на каждой записи, поэтому «Ботокс», «ботокс» и «Ботокс
+// лба» были тремя разными услугами в любом подсчёте; прайса, который клиника
+// могла бы править, не было вовсе; а выручку по услуге нельзя было вычислить —
+// сумма продажи висела на свободном заголовке.
+//
+// Что здесь закрепляется:
+//
+//   * право читать и право править разные. Форма записи без прайса
+//     бесполезна, поэтому читают все, кто записывает; правит тот, кто отвечает
+//     за цены. Ни один другой набор этого разделения не проверяет;
+//   * NULL и 0 у цены — разные факты. «Цена не указана» и «бесплатно» обязаны
+//     доходить до базы каждый своим значением;
+//   * дубль названия — четырёхсотка с человеческим текстом, а отказ базы по
+//     любой другой причине остаётся сбоем. Обе половины, иначе ветка слишком
+//     широка и наборы про честность отказов перестают что-либо значить;
+//   * отсутствие таблицы до применения 032 — это «справочник не включён», а не
+//     «услуг нет» и не «не удалось загрузить»;
+//   * связь записи с услугой требует активной услуги при СОЗДАНИИ и не требует
+//     при правке: карточка продажи шлёт объект целиком на каждом сохранении.
+//
+// Ничего здесь не обращается к production: клиент базы — заглушка.
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const { appointmentPriceFromInput, normalizeAppointmentServices, summarizeAppointmentServices } = await import(pathToFileURL(path.join(repoRoot, "lib/crm/appointment-services.ts")).href);
+const routerPath = path.join(repoRoot, "api", "crm", "[...path].ts");
+const serverPath = path.join(repoRoot, "lib", "crm", "server.ts");
+const journalPath = path.join(repoRoot, "lib", "crm", "change-journal.ts");
+const authorizationPath = path.join(repoRoot, "lib", "crm", "authorization.ts");
+const migrationPath = path.join(repoRoot, "migrations", "032_clinic_services_directory.sql");
+
+const WORKSPACE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const WORKSPACE_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const USER_A = "11111111-1111-4111-8111-111111111111";
+const STAFF_A = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const SERVICE_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const HIDDEN_SERVICE_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const FOREIGN_SERVICE_ID = "99999999-9999-4999-8999-999999999999";
+const APPOINTMENT_ID = "abababab-abab-4bab-8bab-abababababab";
+const CLIENT_ID = "12121212-1212-4121-8121-121212121212";
+const TOKEN = "header.payload.signature";
+
+type QueryLog = { table: string; op: string; filters: Record<string, unknown> };
+type Filter = { column: string; op: "eq"; value: unknown };
+type InjectedError = { table: string; op: "select" | "insert" | "update"; code: string; message: string };
+
+function spyClient(
+  rows: Record<string, unknown[]>,
+  log: QueryLog[],
+  injected: InjectedError[],
+  missingColumns: Set<string>,
+) {
+  return {
+    from(table: string) {
+      const entry: QueryLog = { table, op: "select", filters: {} };
+      log.push(entry);
+      const applied: Filter[] = [];
+      const builder: Record<string, unknown> = {};
+      const chain = () => builder;
+      let single = false;
+      let maybe = false;
+
+      const matching = () =>
+        (rows[table] ?? [])
+          .map((row) => row as Record<string, unknown>)
+          .filter((row) => applied.every((filter) => row[filter.column] === filter.value));
+
+      const missingInRow = (row: unknown) =>
+        Object.keys(row && typeof row === "object" ? (row as Record<string, unknown>) : {})
+          .find((column) => missingColumns.has(column));
+
+      const failure = () => injected.find((item) => item.table === table && item.op === entry.op) ?? null;
+
+      const settle = (resolve: (value: { data: unknown; error: unknown }) => void) => {
+        const missing = entry.filters.__missing;
+        if (typeof missing === "string") {
+          resolve({ data: null, error: { message: `column ${table}.${missing} does not exist`, code: "42703" } });
+          return;
+        }
+        const fail = failure();
+        if (fail) {
+          resolve({ data: null, error: { message: fail.message, code: fail.code } });
+          return;
+        }
+        const found = matching();
+        if (single) {
+          const written = entry.filters.__row;
+          resolve({
+            data: written && typeof written === "object"
+              ? { id: SERVICE_ID, ...(written as Record<string, unknown>) }
+              : found[0] ?? null,
+            error: null,
+          });
+          return;
+        }
+        if (maybe) {
+          resolve({ data: found[0] ?? null, error: null });
+          return;
+        }
+        resolve({ data: found, error: null });
+      };
+
+      Object.assign(builder, {
+        select: (fields: string) => { if (missingColumns.has(fields)) entry.filters.__missing = fields; return chain(); },
+        insert: (row: unknown) => {
+          entry.op = "insert";
+          entry.filters.__row = row;
+          entry.filters.__missing = missingInRow(row);
+          return chain();
+        },
+        update: (row: unknown) => {
+          entry.op = "update";
+          entry.filters.__row = row;
+          entry.filters.__missing = missingInRow(row);
+          return chain();
+        },
+        upsert: (row: unknown) => { entry.op = "upsert"; entry.filters.__row = row; return chain(); },
+        order: () => chain(),
+        limit: () => chain(),
+        single: () => { single = true; return chain(); },
+        maybeSingle: () => new Promise((resolve) => { maybe = true; settle(resolve as never); }),
+        eq(column: string, value: unknown) {
+          if (missingColumns.has(column)) entry.filters.__missing = column;
+          applied.push({ column, op: "eq", value });
+          entry.filters[column] = value;
+          return chain();
+        },
+        lt(column: string, value: unknown) { entry.filters[`${column}__lt`] = value; return chain(); },
+        gte(column: string, value: unknown) { entry.filters[`${column}__gte`] = value; return chain(); },
+        in(column: string, value: unknown) { entry.filters[column] = value; return chain(); },
+        then(resolve: (value: { data: unknown; error: unknown }) => void) { settle(resolve); },
+      });
+      return builder;
+    },
+  };
+}
+
+type MockResponse = {
+  statusCode: number;
+  body: Record<string, unknown>;
+  status: (code: number) => MockResponse;
+  setHeader: () => MockResponse;
+  json: (payload: unknown) => MockResponse;
+};
+
+function mockResponse(): MockResponse {
+  const res: MockResponse = {
+    statusCode: 0,
+    body: {},
+    status(code) { res.statusCode = code; return res; },
+    setHeader() { return res; },
+    json(payload) { res.body = (payload ?? {}) as Record<string, unknown>; return res; },
+  };
+  return res;
+}
+
+const warnings: string[] = [];
+const originalWarn = console.warn;
+
+async function loadRouter(options: {
+  rows?: Record<string, unknown[]>;
+  role?: string;
+  injected?: InjectedError[];
+  missingColumns?: string[];
+} = {}) {
+  const log: QueryLog[] = [];
+  process.env.SUPABASE_URL = "https://project.example.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+
+  globalThis.fetch = (async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ id: USER_A, email: "a@example.test" }),
+  })) as unknown as typeof globalThis.fetch;
+
+  const supabaseModule = (await import(
+    pathToFileURL(path.join(repoRoot, "lib", "supabase", "server.ts")).href
+  )) as { setSupabaseServerClientFactoryForTests: (factory: (() => unknown) | null) => void };
+
+  const clientRows: Record<string, unknown[]> = {
+    staff_users: [
+      {
+        id: STAFF_A,
+        auth_user_id: USER_A,
+        workspace_id: WORKSPACE_A,
+        role: options.role ?? "owner",
+        status: "active",
+        full_name: "Айгерим",
+      },
+    ],
+    ...(options.rows ?? {}),
+  };
+
+  supabaseModule.setSupabaseServerClientFactoryForTests(() =>
+    withAppointmentCreateRpcSpy(spyClient(appointmentSpyRows(clientRows), log, options.injected ?? [], new Set(options.missingColumns ?? []))));
+
+  const routerModule = (await import(pathToFileURL(routerPath).href)) as {
+    default: (req: unknown, res: MockResponse) => Promise<unknown>;
+  };
+
+  return async (input: {
+    resource?: string;
+    method?: string;
+    body?: unknown;
+    query?: Record<string, unknown>;
+  }) => {
+    log.length = 0;
+    warnings.length = 0;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+    const res = mockResponse();
+    try {
+      await routerModule.default(
+        {
+          method: input.method ?? "POST",
+          headers: { authorization: `Bearer ${TOKEN}` },
+          query: {
+            path: [input.resource ?? "clinic-services"],
+            workspaceId: WORKSPACE_A,
+            ...(input.query ?? {}),
+          },
+          body: appointmentSpyBody(input.resource ?? "clinic-services", input.method, input.body),
+        },
+        res,
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+    return { res, log: [...log], warnings: [...warnings] };
+  };
+}
+
+const writtenTo = (log: QueryLog[], table: string) =>
+  (log.find((entry) => entry.table === table && (entry.op === "insert" || entry.op === "update"))?.filters.__row ?? null) as
+    | Record<string, unknown>
+    | null;
+
+const activeService = {
+  id: SERVICE_ID,
+  workspace_id: WORKSPACE_A,
+  name: "Консультация",
+  duration_minutes: 45,
+  is_active: true,
+};
+
+const hiddenService = {
+  id: HIDDEN_SERVICE_ID,
+  workspace_id: WORKSPACE_A,
+  name: "Старая процедура",
+  duration_minutes: null,
+  is_active: false,
+};
+
+const bundle = [
+  { serviceId: SERVICE_ID, name: "Первая услуга", priceMinor: 500050, durationMinutes: 45 },
+  { serviceId: "", name: "Услуга вручную", priceMinor: 200000, durationMinutes: 30 },
+];
+
+test("MS1 цены суммируются в тиынах, длительности складываются, неизвестная цена не равна нулю", () => {
+  assert.deepEqual(summarizeAppointmentServices(normalizeAppointmentServices(bundle)), {
+    service: "Первая услуга + Услуга вручную", serviceId: "", priceMinor: 700050, durationMinutes: 75,
+  });
+  assert.equal(summarizeAppointmentServices([{...bundle[0], priceMinor: null}, bundle[1]]).priceMinor, null);
+  assert.equal(summarizeAppointmentServices([{...bundle[0], priceMinor: 0}]).priceMinor, 0);
+  assert.equal(appointmentPriceFromInput("5000,50"), 500050);
+  assert.equal(appointmentPriceFromInput(""), null);
+  assert.throws(() => appointmentPriceFromInput("-1"));
+});
+
+test("MS2 мусор, повтор, неполные услуги и слишком длинный визит отклоняются", () => {
+  for (const value of [null, [], [bundle[0], bundle[0]], [{...bundle[0], name: ""}],
+    [{...bundle[0], serviceId: []}], [{...bundle[0], priceMinor: -1}], [{...bundle[0], priceMinor: NaN}],
+    [{...bundle[0], priceMinor: 1.5}], [{...bundle[0], durationMinutes: 0}],
+    [{...bundle[0], durationMinutes: 600}, bundle[1]], Array(21).fill(bundle[1])]) {
+    assert.throws(() => normalizeAppointmentServices(value));
+  }
+});
+
+test("MS3 создание сохраняет весь список и серверный итог, не подставленный клиентом", async () => {
+  const call = await loadRouter({rows: {clinic_services: [activeService]}});
+  const {res,log} = await call({resource: "appointments", method: "POST", body: {
+    client: "Тест", serviceItems: bundle, priceMinor: 1, durationMinutes: 1,
+    service: "Подмена", serviceId: FOREIGN_SERVICE_ID, startsAt: "2026-09-27T09:00:00.000Z",
+  }});
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  const row = writtenTo(log, "appointments")!;
+  assert.deepEqual(row.service_items, bundle);
+  assert.equal(row.price_minor, 700050); assert.equal(row.duration_minutes, 75);
+  assert.equal(row.service_id, null);
+  const item = (res.body.data as {item: Record<string,unknown>}).item;
+  assert.deepEqual(item.serviceItems, bundle);
+  assert.equal(item.priceMinor, 700050);
+});
+
+test("MS4 услуга чужой клиники или мастера не создаёт ни запись, ни клиента", async () => {
+  for (const service of [{...activeService, workspace_id: WORKSPACE_B}, {...activeService, doctor_id: FOREIGN_SERVICE_ID}]) {
+    const call = await loadRouter({rows:{clinic_services:[service]}});
+    const {res,log} = await call({resource:"appointments",method:"POST",body:{client:"Тест",phone:"+70000000000",serviceItems:bundle}});
+    assert.equal(res.statusCode,400,JSON.stringify(res.body));
+    assert.equal(writtenTo(log,"appointments"),null);
+    assert.equal(writtenTo(log,"clients"),null);
+  }
+});
+
+test("MS5 отсутствие 055 — понятный отказ до записи клиента, не потеря списка", async () => {
+  const call = await loadRouter({missingColumns:["service_items"],rows:{clinic_services:[activeService]}});
+  const {res,log} = await call({resource:"appointments",method:"POST",body:{client:"Тест",phone:"+70000000000",serviceItems:bundle}});
+  assert.equal(res.statusCode,503,JSON.stringify(res.body));
+  assert.match(JSON.stringify(res.body),/055/);
+  assert.equal(writtenTo(log,"appointments"),null); assert.equal(writtenTo(log,"clients"),null);
+});
+
+test("MS6 изменение списка пересчитывает итог; архив прайса не меняет прошлый визит", async () => {
+  const before = {id:APPOINTMENT_ID,workspace_id:WORKSPACE_A,service_items:bundle,doctor_id:null,status:"arrived"};
+  const call = await loadRouter({rows:{appointments:[before],clinic_services:[]}});
+  const changed = [bundle[0],{...bundle[1],priceMinor:300000}];
+  const {res,log} = await call({resource:"appointments",method:"PATCH",body:{id:APPOINTMENT_ID,updates:{serviceItems:changed,notes:"Проверено"}}});
+  assert.equal(res.statusCode,200,JSON.stringify(res.body));
+  assert.deepEqual(writtenTo(log,"appointments")?.service_items,changed);
+  assert.equal(writtenTo(log,"appointments")?.price_minor,800050);
+  assert.equal(writtenTo(log,"appointments")?.duration_minutes,75);
+});
+
+test("MS7 старый клиент может изменить заметку, но не стереть многосоставную запись", async () => {
+  const call = await loadRouter({rows:{appointments:[{id:APPOINTMENT_ID,workspace_id:WORKSPACE_A,service_items:bundle,service:"Первая услуга + Услуга вручную",price_minor:700050,duration_minutes:75,status:"arrived"}]}});
+  const safe = await call({resource:"appointments",method:"PATCH",body:{id:APPOINTMENT_ID,updates:{notes:"Заметка"}}});
+  assert.equal(safe.res.statusCode,200,JSON.stringify(safe.res.body));
+  assert.equal(writtenTo(safe.log,"appointments")?.service_items,undefined);
+  const refused = await call({resource:"appointments",method:"PATCH",body:{id:APPOINTMENT_ID,updates:{service:"Одна услуга"}}});
+  assert.equal(refused.res.statusCode,400);
+  assert.equal(writtenTo(refused.log,"appointments"),null);
+});
+
+test("MS8 невалидный список даёт 400, а новая архивная услуга запрещена", async () => {
+  const call = await loadRouter({rows:{clinic_services:[{...activeService,is_active:false}]}});
+  for (const serviceItems of [[bundle[0],bundle[0]], [{...bundle[0],name:""}], bundle]) {
+    const result = await call({resource:"appointments",method:"POST",body:{client:"Тест",serviceItems}});
+    assert.equal(result.res.statusCode,400,JSON.stringify(result.res.body));
+  }
+});
+
+test("MS11 старая запись с архивной услугой редактируется; новая чужая ссылка в PATCH запрещена", async () => {
+  const before = {id:APPOINTMENT_ID,workspace_id:WORKSPACE_A,service_id:SERVICE_ID,doctor_id:null,status:"arrived"};
+  const call = await loadRouter({rows:{appointments:[before],clinic_services:[{...activeService,is_active:false}]}});
+  const kept = await call({resource:"appointments",method:"PATCH",body:{id:APPOINTMENT_ID,updates:{serviceItems:bundle}}});
+  assert.equal(kept.res.statusCode,200,JSON.stringify(kept.res.body));
+  const added = [...bundle,{...bundle[0],serviceId:FOREIGN_SERVICE_ID}];
+  const refused = await call({resource:"appointments",method:"PATCH",body:{id:APPOINTMENT_ID,updates:{serviceItems:added}}});
+  assert.equal(refused.res.statusCode,400,JSON.stringify(refused.res.body));
+  assert.equal(writtenTo(refused.log,"appointments"),null);
+});
+
+test("MS9 миграция 055 повторяема и сохраняет прежнюю цену и услугу", async () => {
+  const {PGlite} = await import("@electric-sql/pglite");
+  const db = new PGlite();
+  try {
+    await db.exec("create table appointments(id integer primary key, service text, price_minor bigint); insert into appointments values(1,'Legacy',700000);");
+    const sql = await readFile(path.join(repoRoot,"migrations/055_appointment_service_items.sql"),"utf8");
+    await db.exec(sql); await db.exec(sql);
+    const rows = await db.query("select service, price_minor::text, service_items from appointments");
+    assert.deepEqual(rows.rows,[{service:"Legacy",price_minor:"700000",service_items:[]}]);
+    await assert.rejects(db.exec("update appointments set service_items = '{}'::jsonb"));
+  } finally { await db.close(); }
+});
+
+test("MS10 форма перечитывает услуги и слоты по общему времени, продажа получает общий итог", async () => {
+  const source = await readFile(path.join(repoRoot,"artifacts/negis/src/pages/AppointmentsPage.tsx"),"utf8");
+  assert.match(source,/AppointmentExtraServices/);
+  assert.match(source,/appointment\.serviceItems\?\.slice\(1\)/);
+  assert.match(source,/durationMinutes: totalDurationMinutes/);
+  assert.match(source,/priceMinor: appointment\.priceMinor/);
+  assert.match(source,/serviceItems: appointment\.serviceItems/);
+});
+
+/* ── Права ── */
+
+test("CS1 список услуг читается в пределах проверенного рабочего пространства", async () => {
+  const call = await loadRouter({
+    role: "receptionist",
+    rows: { clinic_services: [activeService] },
+  });
+  const { res, log } = await call({ method: "GET" });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const read = log.find((entry) => entry.table === "clinic_services");
+  assert.equal(read?.filters.workspace_id, WORKSPACE_A, "чтение обязано быть сужено рабочим пространством");
+});
+
+test("CS2 регистратор правит прайс, врач и маркетолог — нет", async () => {
+  // Политика изменена сознательно: прайс и справочники правит тот, кто ведёт
+  // запись каждый день, — в салоне это администратор, в клинике старший
+  // регистратор. Право отдельное (manage_directory), а не view_admin: право на
+  // прайс не должно тянуть за собой ключи интеграций и список сотрудников.
+  const reception = await loadRouter({ role: "receptionist" });
+  const allowed = await reception({ method: "POST", body: { name: "Новая услуга" } });
+  assert.equal(allowed.res.statusCode, 201, JSON.stringify(allowed.res.body));
+
+  const owner = await loadRouter();
+  const ownerToo = await owner({ method: "POST", body: { name: "Новая услуга" } });
+  assert.equal(ownerToo.res.statusCode, 201, JSON.stringify(ownerToo.res.body));
+
+  // А у ролей, которые записью не занимаются, права нет по-прежнему.
+  const marketer = await loadRouter({ role: "marketer" });
+  const refused = await marketer({ method: "POST", body: { name: "Новая услуга" } });
+  assert.equal(refused.res.statusCode, 403, JSON.stringify(refused.res.body));
+});
+
+test("CS3 врач не правит прайс, администратор клиники правит", async () => {
+  const doctor = await loadRouter({ role: "doctor", rows: { clinic_services: [activeService] } });
+  const refused = await doctor({ method: "PATCH", body: { id: SERVICE_ID, updates: { name: "Другое" } } });
+  assert.equal(refused.res.statusCode, 403, JSON.stringify(refused.res.body));
+
+  const manager = await loadRouter({ role: "manager", rows: { clinic_services: [activeService] } });
+  const allowed = await manager({ method: "PATCH", body: { id: SERVICE_ID, updates: { name: "Другое" } } });
+  assert.equal(allowed.res.statusCode, 200, JSON.stringify(allowed.res.body));
+});
+
+/* ── Запись ── */
+
+test("CS4 правка услуги действительно доходит до базы", async () => {
+  const call = await loadRouter({ rows: { clinic_services: [activeService] } });
+
+  // Пустой патч не пишет ничего — и не должен: иначе updated_at двигался бы
+  // на каждом открытии карточки.
+  const untouched = await call({ method: "PATCH", body: { id: SERVICE_ID, updates: {} } });
+  assert.equal(untouched.res.statusCode, 200, JSON.stringify(untouched.res.body));
+  assert.equal(writtenTo(untouched.log, "clinic_services"), null, "пустой патч не должен писать");
+
+  // А непустой обязан. Без блока в buildPatchRow ресурс отвечал бы 200 и
+  // молча ничего не менял — самый дорогой вид тишины.
+  const changed = await call({ method: "PATCH", body: { id: SERVICE_ID, updates: { name: "Первичная консультация" } } });
+  assert.equal(changed.res.statusCode, 200, JSON.stringify(changed.res.body));
+  const row = writtenTo(changed.log, "clinic_services");
+  assert.equal(row?.name, "Первичная консультация");
+  assert.ok(row?.updated_at, "правка обязана двигать updated_at");
+});
+
+test("CS5 пустое название и невозможная длительность отвергаются на обоих путях", async () => {
+  const call = await loadRouter({ rows: { clinic_services: [activeService] } });
+
+  const noName = await call({ method: "POST", body: { name: "   " } });
+  assert.equal(noName.res.statusCode, 400, JSON.stringify(noName.res.body));
+  assert.ok(
+    (noName.res.body.details as string[] | undefined)?.includes("name is required"),
+    "оператор должен узнать, какое поле не так",
+  );
+
+  const longCreate = await call({ method: "POST", body: { name: "Марафон", durationMinutes: 900 } });
+  assert.equal(longCreate.res.statusCode, 400, JSON.stringify(longCreate.res.body));
+
+  // Правка обязана отвергать то же самое. Молчаливая 200 здесь означала бы
+  // длительность, которая шире окна поиска пересечений, — и проверка занятости
+  // слота начала бы пропускать наложения.
+  const longPatch = await call({ method: "PATCH", body: { id: SERVICE_ID, updates: { durationMinutes: 900 } } });
+  assert.equal(longPatch.res.statusCode, 400, JSON.stringify(longPatch.res.body));
+});
+
+test("CS6 «бесплатно» и «цена не указана» доходят до базы разными значениями", async () => {
+  const call = await loadRouter();
+
+  const free = await call({ method: "POST", body: { name: "Первичная консультация", basePriceMinor: 0 } });
+  assert.equal(free.res.statusCode, 201, JSON.stringify(free.res.body));
+  assert.equal(writtenTo(free.log, "clinic_services")?.base_price_minor, 0, "ноль — это цена, а не отсутствие цены");
+
+  const unpriced = await call({ method: "POST", body: { name: "Комплекс" } });
+  assert.equal(unpriced.res.statusCode, 201, JSON.stringify(unpriced.res.body));
+  assert.equal(
+    writtenTo(unpriced.log, "clinic_services")?.base_price_minor,
+    null,
+    "неуказанная цена не имеет права превратиться в 0 ₸ на экране",
+  );
+});
+
+/* ── Отказы ── */
+
+test("CS7 дубль названия — четырёхсотка, отказ прав — по-прежнему сбой", async () => {
+  const duplicate = await loadRouter({
+    injected: [{ table: "clinic_services", op: "insert", code: "23505", message: "duplicate key value violates unique constraint" }],
+  });
+  const conflict = await duplicate({ method: "POST", body: { name: "Консультация" } });
+  assert.equal(conflict.res.statusCode, 400, JSON.stringify(conflict.res.body));
+  const text = JSON.stringify(conflict.res.body);
+  assert.ok(text.includes("Услуга с таким названием уже есть"));
+  assert.ok(!text.includes("constraint"), "текста Postgres в ответе быть не должно");
+  assert.ok(!text.includes("23505"));
+
+  const denied = await loadRouter({
+    injected: [{ table: "clinic_services", op: "insert", code: "42501", message: "permission denied for table clinic_services" }],
+  });
+  const failed = await denied({ method: "POST", body: { name: "Консультация" } });
+  assert.equal(failed.res.statusCode, 502, "ветка обязана быть узкой по коду, иначе любой отказ станет 400");
+  assert.ok(!JSON.stringify(failed.res.body).includes("permission denied"), "текст Postgres наружу не идёт");
+});
+
+test("CS8 «справочник не включён» отличается от «не удалось прочитать»", async () => {
+  const notMigrated = await loadRouter({
+    injected: [{ table: "clinic_services", op: "select", code: "PGRST205", message: "Could not find the table in the schema cache" }],
+  });
+  const unavailable = await notMigrated({ method: "GET" });
+  assert.equal(unavailable.res.statusCode, 200, JSON.stringify(unavailable.res.body));
+  const data = unavailable.res.body.data as Record<string, unknown>;
+  assert.equal(data.catalogAvailable, false, "экран обязан отличить «ещё не включён» от «услуг нет»");
+  assert.deepEqual(data.services, []);
+
+  const broken = await loadRouter({
+    injected: [{ table: "clinic_services", op: "select", code: "42501", message: "permission denied for table clinic_services" }],
+  });
+  const failure = await broken({ method: "GET" });
+  assert.equal(failure.res.statusCode, 502, "отозванный грант — это сбой, а не пустой справочник");
+});
+
+/* ── Связь записи и продажи с услугой ── */
+
+test("CS9 услуга чужой клиники не становится связью", async () => {
+  // Чужая строка обязана существовать в заглушке. Без неё отказ приходил бы из
+  // «такой строки нет», и проверка на принадлежность клинике не выполнялась бы
+  // вовсе — тест был бы зелёным, ничего не проверив.
+  const call = await loadRouter({
+    rows: {
+      clinic_services: [
+        activeService,
+        { id: FOREIGN_SERVICE_ID, workspace_id: WORKSPACE_B, name: "Чужая услуга", duration_minutes: 30, is_active: true },
+      ],
+      appointments: [],
+    },
+  });
+  const { res, log } = await call({
+    resource: "appointments",
+    method: "POST",
+    body: { client: "Пациент", serviceId: FOREIGN_SERVICE_ID, startsAt: "2026-09-01T09:00:00.000Z" },
+  });
+
+  assert.equal(res.statusCode, 400, JSON.stringify(res.body));
+  assert.equal(writtenTo(log, "appointments"), null, "чужой идентификатор не имеет права дойти до записи");
+});
+
+test("CS10 скрытая услуга не попадает в новую запись, но правку прошлой не ломает", async () => {
+  const create = await loadRouter({ rows: { clinic_services: [activeService, hiddenService] } });
+  const refused = await create({
+    resource: "appointments",
+    method: "POST",
+    body: { client: "Пациент", serviceId: HIDDEN_SERVICE_ID, startsAt: "2026-09-01T09:00:00.000Z" },
+  });
+  assert.equal(refused.res.statusCode, 400, "иначе «Скрыть» не значит ничего");
+
+  const patch = await loadRouter({
+    rows: {
+      clinic_services: [activeService, hiddenService],
+      appointments: [{ id: APPOINTMENT_ID, workspace_id: WORKSPACE_A, client_name: "Пациент", service: "Старая процедура" }],
+    },
+  });
+  const allowed = await patch({
+    resource: "appointments",
+    method: "PATCH",
+    body: { id: APPOINTMENT_ID, updates: { serviceId: HIDDEN_SERVICE_ID, notes: "перенос" } },
+  });
+  assert.equal(allowed.res.statusCode, 200, JSON.stringify(allowed.res.body));
+  assert.equal(
+    writtenTo(allowed.log, "appointments")?.service_id,
+    HIDDEN_SERVICE_ID,
+    "карточка шлёт объект целиком: отказ на правке был бы четырёхсоткой без причины",
+  );
+});
+
+test("CS11 длительность берётся из услуги, но введённая руками её перебивает", async () => {
+  const call = await loadRouter({ rows: { clinic_services: [activeService] } });
+
+  const fromCatalog = await call({
+    resource: "appointments",
+    method: "POST",
+    body: { client: "Пациент", serviceId: SERVICE_ID, startsAt: "2026-09-01T09:00:00.000Z" },
+  });
+  assert.equal(fromCatalog.res.statusCode, 201, JSON.stringify(fromCatalog.res.body));
+  assert.equal(writtenTo(fromCatalog.log, "appointments")?.duration_minutes, 45);
+
+  const explicit = await call({
+    resource: "appointments",
+    method: "POST",
+    body: { client: "Пациент", serviceId: SERVICE_ID, durationMinutes: 90, startsAt: "2026-09-01T11:00:00.000Z" },
+  });
+  assert.equal(explicit.res.statusCode, 201, JSON.stringify(explicit.res.body));
+  assert.equal(writtenTo(explicit.log, "appointments")?.duration_minutes, 90, "тело всегда сильнее каталога");
+});
+
+test("CS12 атомарная запись отказывает без колонки, не отбрасывая связь услуги", async () => {
+  const call = await loadRouter({
+    rows: { clinic_services: [activeService], clients: [{ id: CLIENT_ID, workspace_id: WORKSPACE_A }] },
+    missingColumns: ["service_id"],
+  });
+  const { res, log } = await call({
+    resource: "appointments",
+    method: "POST",
+    body: { client: "Пациент", clientId: CLIENT_ID, serviceId: SERVICE_ID, startsAt: "2026-09-01T09:00:00.000Z" },
+  });
+
+  assert.equal(res.statusCode, 503, JSON.stringify(res.body));
+  assert.equal(res.body.code, "appointment_create_unavailable");
+  const rows = log.filter((entry) => entry.table === "appointments" && entry.op === "insert");
+  assert.equal(rows.length, 1, "No separate retry after the atomic writer refuses");
+  assert.equal((rows[0].filters.__row as Record<string, unknown>).service_id, SERVICE_ID);
+});
+
+/* ── Журнал ── */
+
+test("CS13 правка услуги попадает в журнал изменений", async () => {
+  const call = await loadRouter({
+    rows: { clinic_services: [{ ...activeService, name: "Консультация" }] },
+  });
+  const { res, log } = await call({
+    method: "PATCH",
+    body: { id: SERVICE_ID, updates: { name: "Первичная консультация" } },
+  });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const journal = log.find((entry) => entry.table === "audit_logs" && entry.op === "insert");
+  assert.ok(journal, "справочник цен без истории — это «кто поднял цену» без ответа");
+  assert.equal((journal?.filters.__row as Record<string, unknown>).entity_type, "service");
+});
+
+test("CS18 связь возвращается наружу, а не только записывается", async () => {
+  // Браузер отправляет объект целиком на каждом сохранении. Колонка, которую
+  // он не может прочитать, приходит назад пустой строкой — и следующая правка
+  // затирает связь в null. Проверялась только запись, поэтому дефект и дожил.
+  const call = await loadRouter({ rows: { clinic_services: [activeService] } });
+
+  const created = await call({
+    resource: "appointments",
+    method: "POST",
+    body: { client: "Пациент", serviceId: SERVICE_ID, startsAt: "2026-09-01T09:00:00.000Z" },
+  });
+  assert.equal(created.res.statusCode, 201, JSON.stringify(created.res.body));
+  const item = (created.res.body.data as Record<string, Record<string, unknown>>).item;
+  assert.equal(item.serviceId, SERVICE_ID, "запись обязана вернуть связь, иначе браузеру нечего эхом отправить назад");
+
+  const deal = await call({
+    resource: "deals",
+    method: "POST",
+    body: { title: "Ботокс", amountMinor: 1000, serviceId: SERVICE_ID },
+  });
+  assert.equal(deal.res.statusCode, 201, JSON.stringify(deal.res.body));
+  assert.equal((deal.res.body.data as Record<string, Record<string, unknown>>).item.serviceId, SERVICE_ID);
+});
+
+test("CS19 продажа связывается с услугой и на правке, а не только при создании", async () => {
+  const call = await loadRouter({
+    rows: {
+      clinic_services: [activeService],
+      deals: [{ id: APPOINTMENT_ID, workspace_id: WORKSPACE_A, title: "Ботокс", amount_minor: 1000 }],
+    },
+  });
+  const { res, log } = await call({
+    resource: "deals",
+    method: "PATCH",
+    body: { id: APPOINTMENT_ID, updates: { serviceId: SERVICE_ID } },
+  });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(
+    writtenTo(log, "deals")?.service_id,
+    SERVICE_ID,
+    "иначе выбор услуги в карточке продажи отвечает «обновлено» и не делает ничего",
+  );
+});
+
+test("CS20 атомарная запись отказывает при PGRST204 без потери связи услуги", async () => {
+  // Schema-cache lag cannot authorize a separate insert with missing fields.
+  const call = await loadRouter({
+    rows: { clinic_services: [activeService], clients: [{ id: CLIENT_ID, workspace_id: WORKSPACE_A }] },
+    injected: [{
+      table: "appointments",
+      op: "insert",
+      code: "PGRST204",
+      message: "Could not find the 'service_id' column of 'appointments' in the schema cache",
+    }],
+  });
+  const { res, log } = await call({
+    resource: "appointments",
+    method: "POST",
+    body: { client: "Пациент", clientId: CLIENT_ID, serviceId: SERVICE_ID, startsAt: "2026-09-01T09:00:00.000Z" },
+  });
+
+  assert.equal(res.statusCode, 503, "Schema-cache lag cannot authorize a lossy fallback");
+  assert.equal(res.body.code, "appointment_create_unavailable");
+  const writes = log.filter(entry => entry.table === "appointments" && entry.op === "insert");
+  assert.equal(writes.length, 1);assert.equal((writes[0].filters.__row as Record<string, unknown>).service_id, SERVICE_ID);
+});
+
+test("CS21 «Скрыть услугу» действительно скрывает", async () => {
+  // Единственная форма удаления, которая есть у платформы. Без этой проверки
+  // можно было удалить строку setBoolean и остаться зелёным: экран сказал бы
+  // «Услуга скрыта», а услуга продолжила бы предлагаться в форме записи.
+  const call = await loadRouter({ rows: { clinic_services: [activeService] } });
+  const { res, log } = await call({ method: "PATCH", body: { id: SERVICE_ID, isActive: false } });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(writtenTo(log, "clinic_services")?.is_active, false);
+});
+
+test("CS22 нечисло в цене, длительности и порядке отвергается, а не превращается в «не задано»", async () => {
+  const call = await loadRouter({ rows: { clinic_services: [activeService] } });
+
+  for (const body of [
+    { name: "Ботокс", basePriceMinor: "15 000 тг" },
+    { name: "Ботокс", durationMinutes: "час" },
+    { name: "Ботокс", sortOrder: "первый" },
+  ]) {
+    const { res } = await call({ method: "POST", body });
+    assert.equal(res.statusCode, 400, `${JSON.stringify(body)} → ${JSON.stringify(res.body)}`);
+  }
+
+  // Правка обязана отвергать то же самое: расхождение POST и PATCH в этом
+  // файле уже случалось и жило молча.
+  const patched = await call({ method: "PATCH", body: { id: SERVICE_ID, updates: { basePriceMinor: "дорого" } } });
+  assert.equal(patched.res.statusCode, 400, JSON.stringify(patched.res.body));
+});
+
+test("CS23 неуказанная цена возвращается пустой, а не нулём", async () => {
+  // Обратная половина CS6: там проверялось, что уходит в базу, здесь — что
+  // приходит обратно. Подмена readNullableNumber на readNumber прошла бы
+  // мимо всех остальных проверок, а на экране каждая неоценённая услуга
+  // показала бы «0 ₸» — цифру, которой владелец не писал.
+  const call = await loadRouter();
+  const { res } = await call({ method: "POST", body: { name: "Комплекс" } });
+
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  const item = (res.body.data as Record<string, Record<string, unknown>>).item;
+  assert.equal(item.basePriceMinor, null);
+  assert.equal(item.durationMinutes, null);
+});
+
+/* ── Пять реестров, которые компилятор не связывает ── */
+
+test("CS14 ресурс зарегистрирован во всех реестрах сразу", async () => {
+  const server = await readFile(serverPath, "utf8");
+  const router = await readFile(routerPath, "utf8");
+  const authorization = await readFile(authorizationPath, "utf8");
+  const journal = await readFile(journalPath, "utf8");
+
+  assert.ok(server.includes('| "clinic-services"'), "тип ресурса");
+  assert.ok(server.includes('"clinic-services": {'), "конфигурация ресурса");
+  assert.ok(router.includes('"clinic-services",'), "список маршрутов");
+  assert.ok(authorization.includes('"clinic-services": {'), "реестр прав");
+  // Ресурс, которого нет в этой карте, не журналируется вообще и молча, а
+  // задним числом историю не восстановить.
+  assert.ok(journal.includes('"clinic-services": "service"'), "карта ресурс → сущность журнала");
+});
+
+test("CS15 миграция создаёт ровно то, на что рассчитывает сервер", async () => {
+  const sql = await readFile(migrationPath, "utf8");
+
+  for (const required of [
+    "create table if not exists public.clinic_services",
+    "clinic_services_workspace_active_name_idx",
+    "where is_active",
+    "duration_minutes <= 600",
+    "alter table public.clinic_services enable row level security",
+    "alter table public.appointments enable row level security",
+    "alter table public.deals enable row level security",
+    "on table public.appointments",
+    "on table public.deals",
+  ]) {
+    assert.ok(sql.includes(required), `миграция обязана содержать: ${required}`);
+  }
+
+  // Ветка не переписывает ни одного значения и ничего не сносит.
+  for (const forbidden of ["drop column", "drop table", "delete from", "alter column", "update public.appointments", "update public.deals"]) {
+    assert.ok(!sql.toLowerCase().includes(forbidden), `миграция не имеет права содержать: ${forbidden}`);
+  }
+});
+
+test("CS16 комментарии миграции не содержат ключевых слов, которые читает набор цепочки", async () => {
+  // Ловушка без другого сторожа: readChain в test:migration-chain применяет свои
+  // регулярные выражения к СЫРОМУ тексту и комментарии не вырезает. Прозаическая
+  // фраза «create table …» в шапке завела бы в граф таблицу-призрак.
+  const sql = await readFile(migrationPath, "utf8");
+  const comments = sql
+    .split("\n")
+    .filter((line) => line.trim().startsWith("--"))
+    .join("\n")
+    .toLowerCase();
+
+  for (const phrase of ["create table", "alter table", "references "]) {
+    assert.ok(!comments.includes(phrase), `фраза «${phrase}» в комментарии ломает разбор цепочки`);
+  }
+});
+
+test("CS17 журнал знает колонки услуги и не дублирует связь записи", async () => {
+  const journal = await readFile(journalPath, "utf8");
+  const block = journal.slice(journal.indexOf("const SERVICE_FIELDS"), journal.indexOf("const ENTITY_POLICY"));
+
+  // Ключи — имена колонок базы. Браузерное имя здесь не журналируется вообще
+  // и молча: эта ошибка в проекте уже случалась.
+  for (const column of ["name", "category", "base_price_minor", "duration_minutes", "is_active", "description"]) {
+    assert.ok(block.includes(`${column}:`), `в политике полей услуги нет колонки ${column}`);
+  }
+  assert.ok(!block.includes("basePriceMinor"), "ключи политики — имена колонок, не полей браузера");
+
+  // Название услуги уже журналируется словами. Добавить рядом uuid значит
+  // показать одно событие дважды, причём первой строкой — нечитаемой.
+  const appointmentFields = journal.slice(journal.indexOf("const APPOINTMENT_FIELDS"), journal.indexOf("const TASK_FIELDS"));
+  assert.ok(!appointmentFields.includes("service_id"), "uuid связи не место в ленте истории");
+});
+
+test("CS12 мастер вписывает длительность своей услуги — и только её", async () => {
+  // Владелец: «длительность пусть вписывают сами». Право manage_directory
+  // мастеру не выдаётся — обработчик пускает его по трём сужениям сразу:
+  // роль, принадлежность услуги, единственное поле. Каждое проверяется
+  // отдельно, потому что каждое ломается отдельно.
+  const DOCTOR_CARD = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const myCard = { id: DOCTOR_CARD, workspace_id: WORKSPACE_A, staff_user_id: STAFF_A, full_name: "Айгерим", is_active: true };
+  const mine = { ...activeService, doctor_id: DOCTOR_CARD };
+  const doctor = await loadRouter({
+    role: "doctor",
+    rows: { clinic_services: [mine], clinic_doctors: [myCard] },
+  });
+
+  // Своя услуга, только длительность — проходит.
+  const allowed = await doctor({ method: "PATCH", body: { id: SERVICE_ID, updates: { durationMinutes: 45 } } });
+  assert.equal(allowed.res.statusCode, 200, JSON.stringify(allowed.res.body));
+
+  // Длительность плюс цена — отказ целиком, а не молчаливое сужение.
+  const priced = await doctor({
+    method: "PATCH",
+    body: { id: SERVICE_ID, updates: { durationMinutes: 45, basePriceMinor: 100 } },
+  });
+  assert.equal(priced.res.statusCode, 403, "цены остаются за администратором");
+
+  // Чужая услуга — отказ, даже если поле то же.
+  const foreign = { ...activeService, doctor_id: "00000000-0000-4000-8000-00000000dddd" };
+  const stranger = await loadRouter({
+    role: "doctor",
+    rows: { clinic_services: [foreign], clinic_doctors: [myCard] },
+  });
+  const refused = await stranger({ method: "PATCH", body: { id: SERVICE_ID, updates: { durationMinutes: 45 } } });
+  assert.equal(refused.res.statusCode, 403, "чужая длительность закрыта");
+});
+
+test("CS13 условия оплаты мастера: правит только админ, список мастеру их не отдаёт", async () => {
+  const DOCTOR_CARD2 = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const card = {
+    id: DOCTOR_CARD2, workspace_id: WORKSPACE_A, staff_user_id: STAFF_A,
+    full_name: "Айгерим", is_active: true, salary_fixed_minor: 20000000, salary_percent: 40,
+  };
+
+  // Мастеру список справочника нужен для формы — но зарплатные поля срезаны:
+  // чужие условия оплаты не читаются через плечо с его телефона.
+  const doctor = await loadRouter({ role: "doctor", rows: { clinic_doctors: [card] } });
+  const listed = await doctor({ resource: "clinic-doctors", method: "GET" });
+  assert.equal(listed.res.statusCode, 200, JSON.stringify(listed.res.body));
+  const doctors = (listed.res.body as { data?: { doctors?: Array<Record<string, unknown>> } }).data?.doctors ?? [];
+  assert.ok(doctors.length > 0, "список не пуст");
+  for (const row of doctors) {
+    assert.ok(!("salaryFixedMinor" in row), "фикс не уходит мастеру");
+    assert.ok(!("salaryPercent" in row), "процент не уходит мастеру");
+  }
+
+  // PATCH карточки мастеру закрыт реестром целиком — заодно и зарплата.
+  const refused = await doctor({ resource: "clinic-doctors", method: "PATCH", body: { id: DOCTOR_CARD2, updates: { salaryPercent: 90 } } });
+  assert.equal(refused.res.statusCode, 403, "мастер не назначает себе процент");
+
+  // Админ клиники правит: значения проходят и возвращаются.
+  const manager = await loadRouter({ role: "manager", rows: { clinic_doctors: [card] } });
+  const allowed = await manager({ resource: "clinic-doctors", method: "PATCH", body: { id: DOCTOR_CARD2, updates: { salaryPercent: 45, salaryFixedMinor: 15000000 } } });
+  assert.equal(allowed.res.statusCode, 200, JSON.stringify(allowed.res.body));
+
+  // Мусор отклоняется валидацией, а не 502 от CHECK базы.
+  const junk = await manager({ resource: "clinic-doctors", method: "PATCH", body: { id: DOCTOR_CARD2, updates: { salaryPercent: 146 } } });
+  assert.equal(junk.res.statusCode, 400, JSON.stringify(junk.res.body));
+});

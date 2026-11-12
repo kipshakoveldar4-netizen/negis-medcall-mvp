@@ -1,0 +1,60 @@
+Исправь вход в CRM по ссылке из Negis Control.
+
+Проблема:
+Когда я нажимаю “Войти” под клиникой в суперадминке, CRM открывается, но показывает:
+“Доступ по ссылке истёк. Войдите снова из Negis Control.”
+
+Причина:
+В основном CRM сейчас проверка impersonate_token идёт не туда. В коде зашит адрес:
+https://www.negis.online/api/impersonation/verify
+
+Это неправильно, потому что endpoint проверки токена находится на сайте суперадминки:
+https://admin.negis.online/api/impersonation/verify
+
+Что нужно сделать:
+1. Найди код обработки query-параметра impersonate_token.
+2. Замени URL проверки токена с:
+   https://www.negis.online/api/impersonation/verify
+
+   на:
+   https://admin.negis.online/api/impersonation/verify
+
+3. Лучше сделать через env:
+   VITE_NEGIS_CONTROL_API_URL=https://admin.negis.online
+
+4. В коде должно быть примерно так:
+
+const controlApiUrl =
+  import.meta.env.VITE_NEGIS_CONTROL_API_URL || "https://admin.negis.online";
+
+const response = await fetch(`${controlApiUrl}/api/impersonation/verify`, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({ token }),
+});
+
+if (!response.ok) {
+  throw new Error("invalid_token");
+}
+
+const data = await response.json();
+
+5. После успешной проверки нужно сохранить данные impersonation-сессии:
+   - clinicId: data.clinicId
+   - clinicName: data.clinicName
+   - ownerEmail: data.ownerEmail
+   - issuedBy: data.issuedBy
+
+6. После этого CRM должна переходить на /dashboard без запроса логина и пароля.
+
+7. Текст ошибки “Доступ по ссылке истёк” показывать только если endpoint реально вернул 401/expired token. Если endpoint недоступен или URL неправильный, показывать другую ошибку:
+   “Не удалось проверить доступ через Negis Control”.
+
+8. После изменения пересобери и задеплой CRM.
+
+Важно:
+Negis Control уже выдаёт свежий валидный токен. Проверка через:
+https://admin.negis.online/api/impersonation/verify
+работает. Исправлять нужно именно основной CRM.

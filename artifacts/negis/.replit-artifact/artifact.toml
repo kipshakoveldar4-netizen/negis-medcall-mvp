@@ -1,0 +1,55 @@
+kind = "web"
+previewPath = "/"
+title = "Negis — Операционная экосистема для клиник"
+version = "1.0.0"
+id = "artifacts/negis"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21370
+
+[services.development]
+run = "pnpm --filter @workspace/negis run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/negis", "run", "build" ]
+publicDir = "artifacts/negis/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/privacy"
+to = "/privacy/index.html"
+
+[[services.production.rewrites]]
+from = "/privacy/"
+to = "/privacy/index.html"
+
+[[services.production.rewrites]]
+from = "/terms"
+to = "/terms/index.html"
+
+[[services.production.rewrites]]
+from = "/terms/"
+to = "/terms/index.html"
+
+[[services.production.rewrites]]
+from = "/data-deletion"
+to = "/data-deletion/index.html"
+
+[[services.production.rewrites]]
+from = "/data-deletion/"
+to = "/data-deletion/index.html"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21370"
+BASE_PATH = "/"

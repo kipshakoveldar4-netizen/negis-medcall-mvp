@@ -1,0 +1,31 @@
+{
+  "framework": null,
+  "installCommand": "node operator-preview/check.mjs && pnpm install --frozen-lockfile --ignore-scripts",
+  "buildCommand": "node operator-preview/build.mjs",
+  "outputDirectory": "artifacts/negis/dist/public",
+  "functions": {
+    "api/crm/[...path].ts": {
+      "maxDuration": 60
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/crm/([a-z-]+)",
+      "dest": "/api/crm/[...path].ts?path=$1"
+    },
+    {
+      "src": "/(?:api|ru|medina-control|staff-push-pilot)(?:/.*)?",
+      "status": 404
+    },
+    {
+      "handle": "filesystem"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html",
+      "headers": {
+        "X-Robots-Tag": "noindex, nofollow"
+      }
+    }
+  ]
+}

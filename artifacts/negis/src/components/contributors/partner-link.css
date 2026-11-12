@@ -1,0 +1,33 @@
+.partner-link {
+  min-width: 0;
+  padding: 4px 0 0;
+  color: var(--portal-ink, var(--ink, #18231d));
+  letter-spacing: 0;
+}
+.partner-link h2 { margin: 0 0 16px; font-size: 18px; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+.partner-link-row { display: grid; grid-template-columns: minmax(0, 1fr) 44px 44px; align-items: start; gap: 10px; }
+.partner-link-value { display: flex; align-items: flex-start; gap: 12px; min-width: 0; min-height: 44px; padding: 11px 12px; border: 1px solid var(--portal-line, var(--line, #dfe7e2)); border-radius: 6px; font-size: 14px; line-height: 20px; }
+.partner-link-value svg { flex: 0 0 20px; }
+.partner-link-value output, .partner-link-value span { min-width: 0; overflow-wrap: anywhere; }
+.partner-link-value output { user-select: text; }
+.partner-link-icon { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 1px solid var(--portal-line, var(--line, #dfe7e2)); border-radius: 6px; background: var(--negis-surface, #fff); color: inherit; cursor: pointer; }
+.partner-link-icon:hover:not(:disabled) { border-color: #78b695; background: #e8f7ef; }
+.partner-link-icon:active:not(:disabled) { background: #a9e7c5; }
+.partner-link-icon:focus-visible { outline: 2px solid #28734e; outline-offset: 3px; }
+.partner-link-icon:disabled { opacity: .45; cursor: not-allowed; }
+.partner-link-note { display: flex; align-items: flex-start; gap: 8px; margin: 10px 0 0; color: var(--portal-muted, var(--ink-2, #66736c)); font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
+.partner-link-note svg { flex: 0 0 16px; margin-top: 2px; }
+.partner-link-feedback { min-height: 20px; margin: 6px 0 0; color: #28734e; font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
+.partner-link-feedback:empty { display: none; }
+.partner-link-error { color: var(--danger, #b4232a); }
+.partner-link + .partner-ledger { border-top: 0; padding-top: 0; margin-top: 16px; }
+.partner-link + .partner-ledger .pl-header { margin-bottom: 12px; }
+.partner-link + .partner-ledger .pl-header p { display: none; }
+.partner-link + .partner-ledger .pl-currency:only-of-type h4 { display: none; }
+.partner-link + .partner-ledger .pl-rates { display: flex; flex-wrap: wrap; gap: 8px 24px; padding: 8px 0; }
+.partner-link + .partner-ledger .pl-rates > div { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.partner-link + .partner-ledger .pl-rates dd { margin-top: 0; }
+@media (max-width: 480px) {
+  .partner-link-row { gap: 8px; }
+  .partner-link-value { gap: 8px; padding-inline: 8px; }
+}

@@ -1,0 +1,16 @@
+Inter, normal variable font (100-900), Google Fonts v20.
+Unmodified WOFF2 subsets downloaded on 2026-10-20.
+License: SIL Open Font License 1.1; see OFL.txt.
+
+CSS source:
+https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap
+
+inter-cyrillic-ext.woff2:
+https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2JL7SUc.woff2
+inter-cyrillic.woff2:
+https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa0ZL7SUc.woff2
+inter-latin.woff2:
+https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7.woff2
+
+License source:
+https://github.com/google/fonts/blob/main/ofl/inter/OFL.txt

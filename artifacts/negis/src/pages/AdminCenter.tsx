@@ -1,0 +1,4728 @@
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation } from "wouter";
+import { PlanCalculator } from "@/components/admin/PlanCalculator";
+import { ClinicOperators } from "@/components/admin/ClinicOperators";
+import { CreatorJobs } from "@/components/contributors/CreatorJobs";
+import { VerticalSwitch } from "@/components/admin/VerticalSwitch";
+import { TikTokSetupCheck } from "@/components/admin/TikTokSetupCheck";
+import { TikTokConnection } from "@/components/admin/TikTokConnection";
+import { TikTokVideoUpload } from "@/components/admin/TikTokVideoUpload";
+import type { TikTokVideoList, TikTokVideoSummary } from "../../../../lib/tiktok/videoAssets";
+import type { TikTokConnectionSummary } from "../../../../lib/tiktok/connections";
+import type { TikTokSetupSummary } from "../../../../lib/tiktok/setup";
+import {
+  AlertTriangle,
+  Bot,
+  BrainCircuit,
+  Building2,
+  CheckCircle2,
+  ClipboardCheck,
+  Copy,
+  Database,
+  Facebook,
+  FileCheck2,
+  Gauge,
+  Loader2,
+  Megaphone,
+  MessageCircle,
+  Music2,
+  Power,
+  RefreshCw,
+  Rocket,
+  Save,
+  ShieldCheck,
+  Sparkles,
+  Stethoscope,
+  UserPlus,
+  Users,
+  type LucideIcon,
+} from "lucide-react";
+import { toast } from "sonner";
+import { PageLayout } from "@/components/layout/PageLayout";
+import { MetricCard } from "@/components/ui/metric-card";
+import { WhatsAppChannels } from "@/components/admin/WhatsAppChannels";
+import { DoctorSchedule } from "@/components/admin/DoctorSchedule";
+import { useAuth } from "@/contexts/AuthContext";
+import { apiUrl, crmFetch as sendCrmFetch, CrmApiError, crmErrorMessage } from "@/lib/api";
+import { formatJoinCode } from "../../../../lib/crm/join-codes";
+import { loginFromEmail, loginFromFullName, normalizeLogin } from "../../../../lib/auth/staff-logins";
+import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
+import { getSupabaseAccessToken } from "@/lib/serverAuth";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
+import {
+  canAssignRole,
+  permissionLabels,
+  permissionsForRole,
+  staffRoles,
+  type CrmPermission,
+  type StaffRole,
+} from "@/lib/permissions";
+import { KZ_META_CITY_OPTIONS, getKzMetaCityOption, type MetaCitySearchCandidate } from "../../../../lib/meta/cities";
+import { capitalize, staffRoleLabels, termsFor } from "../../../../lib/vertical/terms";
+
+type StaffInvitation = {
+  id: string;
+  email: string;
+  role: string;
+  status: "pending" | "accepted" | "revoked" | "expired";
+  expiresAt: string;
+  createdAt: string;
+};
+
+/** Заявка на вступление: человек пришёл по коду клиники и ждёт решения. */
+type JoinRequestRow = {
+  id: string;
+  status: "pending" | "approved" | "rejected";
+  email: string;
+  fullName: string;
+  phone: string;
+  positionNote: string;
+  createdAt: string;
+  decidedAt: string | null;
+  decisionNote: string;
+  grantedRole: string | null;
+  /** Пришла по коду, который потом отозвали: «код утёк — отклоняю всё старое». */
+  viaRevokedCode?: boolean;
+};
+
+/**
+ * Строка результата пачки. kind различает три исхода, и «занята» — не ошибка:
+ * у человека уже есть аккаунт, ему выписывается приглашение.
+ */
+type BatchStaffResult = {
+  /** Что вставил администратор: имя или почта. По нему он узнаёт человека. */
+  source: string;
+  /** Что реально выдал СЕРВЕР: при столкновении логин получил хвост. */
+  login: string;
+  kind: "created" | "invited" | "failed";
+  password?: string;
+  acceptUrl?: string;
+  error?: string;
+};
+
+type AdminTab =
+  | "overview"
+  | "operators"
+  | "creators"
+  | "staff"
+  | "doctors"
+  | "roles"
+  | "clinic"
+  | "whatsapp"
+  | "integrations"
+  | "ai"
+  | "meta"
+  | "release"
+  | "diagnostics";
+
+type Status = "configured" | "connected" | "not_configured" | "partial" | "error" | "checking" | "demo" | "draft";
+type ReleaseStatus = "pending" | "passed" | "failed" | "skipped";
+
+type ApiResponse<T> = {
+  success?: boolean;
+  mode?: string;
+  data?: T;
+  error?: string;
+  warning?: string;
+  details?: string[];
+  telegramDescription?: string;
+  hint?: string;
+};
+
+type AdminAuthContextData = {
+  workspaceId: string | null;
+  role: string | null;
+  staffUserId: string | null;
+  isAdmin: boolean;
+};
+
+type ServerAdminAuthState = {
+  status: "checking" | "confirmed" | "reauth" | "forbidden" | "unavailable";
+  role?: "owner" | "admin";
+  // Своя строка в таблице: на ней не показываются «Пауза» и смена роли —
+  // сервер такие запросы всё равно отклоняет (self-promotion, last owner).
+  staffUserId?: string;
+};
+
+/**
+ * Английский body.error сервера посреди русского интерфейса — диагностика на
+ * языке, которого продукт нигде больше не показывает. Коды переводятся здесь,
+ * остальное отдаётся общему словарю статусов.
+ */
+const STAFF_ERROR_TEXTS: Record<string, string> = {
+  invitation_already_pending: "Приглашение этой почте уже выслано. Перевыпустите ссылку кнопкой в списке ниже.",
+  already_member: "Этот человек уже в команде. Роль меняется в таблице сотрудников.",
+  permission_denied: "Недостаточно прав: назначать можно только роли ниже вашей, и не себе.",
+  invalid_role: "Такой роли нет — выберите из списка.",
+  last_owner_protected: "Это единственный владелец клиники: без него в кабинет никто не войдёт. Сначала назначьте второго.",
+  invalid_invitation: "Приглашение не найдено или уже недействительно.",
+  email_already_registered:
+    "У этой почты уже есть аккаунт — задать ему пароль отсюда нельзя. Пригласите этого человека ссылкой: он войдёт со своим паролем.",
+  invalid_staff_credentials: "Проверьте почту, роль и пароль: пароль от 8 символов, без пробелов по краям.",
+  password_rejected: "Такой пароль не принят — задайте длиннее или с другими символами.",
+  staff_credentials_unreadable:
+    "Аккаунт создан, но подтверждение не прочитано. Пароль ниже действует — передайте его и пригласите человека ссылкой.",
+  partial_staff_credentials:
+    "Аккаунт создан, а доступ к клинике — нет. Пригласите этого человека ссылкой: он войдёт с заданным паролем.",
+  staff_not_found: "Такого сотрудника нет в вашей клинике — обновите страницу.",
+  staff_not_linked:
+    "У сотрудника ещё нет входа. Заведите ему логин и пароль в карточке слева — существующая строка достроится.",
+  auth_account_missing:
+    "Аккаунт входа этого сотрудника удалён из системы. Заведите ему вход заново через «Логин и пароль».",
+  staff_user_required: "Не удалось понять, какому сотруднику менять пароль — обновите страницу.",
+  staff_paused: "Сотрудник на паузе — сначала «Активировать», иначе новый пароль не пустит его в кабинет.",
+  join_request_not_found: "Заявку уже обработали — возможно, коллега. Список обновлён.",
+  join_request_stuck:
+    "Заявка отмечена одобренной, но сотрудник не создан. Сообщите владельцу платформы — строку нужно поправить руками.",
+  staff_email_taken:
+    "В клинике уже есть сотрудник с такой почтой. Заявитель назвал этот адрес сам, и подтверждения ему нет — зачислите его ссылкой-приглашением: она и доказывает, что почта его.",
+  join_code_owner_only: "Сменить код клиники может только владелец.",
+  login_unavailable: "Такой логин занят вместе с ближайшими вариантами. Задайте другой — например с инициалом: aigul.b.",
+  synthetic_email_refused: "Адреса на служебном домене выдаёт система — укажите логин без «собаки» или настоящую почту.",
+  not_provisioned: "Заявки по коду ещё не активированы: владелец платформы применяет обновление базы. Пока зачисляйте сотрудников паролем или приглашением.",
+  join_queue_full: "Очередь заявок переполнена — разберите её и попробуйте снова.",
+  role_required: "Выберите роль — без неё нельзя одобрить.",
+  account_shared_with_other_clinic:
+    "Этим логином человек заходит и в другую клинику, поэтому пароль отсюда не меняется — он открыл бы и её. Пусть задаст пароль сам через «Забыли пароль?».",
+};
+
+/** Пароль для передачи голосом: без 0/O/1/l/I, которые путают на слух и на бумаге. */
+function generateStaffPassword(): string {
+  const alphabet = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  const bytes = new Uint32Array(12);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (n) => alphabet[n % alphabet.length]).join("");
+}
+
+function staffErrorText(error: unknown, fallback: string): string {
+  if (error instanceof CrmApiError) {
+    return STAFF_ERROR_TEXTS[error.code] || crmErrorMessage(error);
+  }
+  return fallback;
+}
+
+type ProviderPresence = {
+  status: Status;
+  configured: number;
+  total: number;
+};
+
+type CrmHealthData = {
+  status: string;
+  service: string;
+  generatedAt: string;
+  providers: Record<string, ProviderPresence | { status: Status; env: ProviderPresence }>;
+  meta?: SafeMetaSummary;
+};
+
+type SafeMetaSummary = {
+  configured: boolean;
+  businessIdConfigured: boolean;
+  adAccountConfigured: boolean;
+  pageConfigured: boolean;
+  instagramActorConfigured: boolean;
+  astanaCityKeyConfigured?: boolean;
+  cityResolver?: {
+    staticCities?: string[];
+    cache?: string;
+    targetingSearchFallback?: boolean;
+    targetingSearch?: boolean;
+  };
+  hasAccessToken: boolean;
+  hasAppSecret: boolean;
+};
+
+type TikTokAdsDiagnostic = {
+  configured: boolean;
+  connected: boolean;
+  readOnly: true;
+  launchEnabled: false;
+  advertiserIdConfigured: boolean;
+  hasAccessToken: boolean;
+  hasAppId: boolean;
+  hasAppSecret: boolean;
+  oauthReady: boolean;
+  checkedAt: string;
+  advertiser?: {
+    maskedId: string;
+    name: string;
+    currency: string;
+    timezone: string;
+    status: string;
+    accountType: string;
+  };
+  errorCode?: string;
+  message?: string;
+  hint?: string;
+};
+
+type TikTokDryRunIssue = {
+  code: string;
+  message: string;
+};
+
+type TikTokDryRunResult = {
+  platform: "tiktok";
+  dryRun: true;
+  launchEnabled: boolean;
+  targetOperationStatus: "DISABLE";
+  readiness: {
+    briefReady: boolean;
+    providerReady: boolean;
+    blockers: TikTokDryRunIssue[];
+    providerDependencies: TikTokDryRunIssue[];
+  };
+  summary: {
+    campaignName: string;
+    service: string;
+    city: string;
+    creativeType: "video" | "image" | "unknown";
+    placement: "TikTok";
+    objective: string;
+    dailyBudget: string;
+    currency: "KZT" | "USD" | "";
+    destinationConfigured: boolean;
+    scheduleStartTime: string;
+    status: string;
+  };
+  payloadTemplate: {
+    campaign: Record<string, unknown>;
+    adGroup: Record<string, unknown>;
+    ad: Record<string, unknown>;
+  };
+  safety: {
+    providerCallsMade: false;
+    createsCampaign: false;
+    credentialsIncluded: false;
+    rawCreativeUrlIncluded: false;
+  };
+};
+
+type TikTokDisabledLaunchResult = {
+  platform: "tiktok";
+  targetOperationStatus: "DISABLE";
+  status: "creating" | "campaign_created" | "adgroup_created" | "created_disabled" | "failed" | "unknown";
+  message: string;
+  campaignName: string;
+  city: string;
+  dailyBudgetMinor: string;
+  currency: string;
+  providerObjects: {
+    campaignCreated: boolean;
+    adGroupCreated: boolean;
+    adCreated: boolean;
+  };
+  automaticRetryAllowed: false;
+  startedAt: string;
+  finishedAt: string | null;
+};
+
+type TikTokDryRunForm = {
+  campaignName: string;
+  service: string;
+  city: string;
+  primaryText: string;
+  dailyBudget: string;
+  currency: "KZT" | "USD";
+  destinationUrl: string;
+  scheduleStartTime: string;
+};
+
+type MetaCityKeyResult = {
+  city?: string;
+  cityId?: string;
+  labelRu?: string;
+  canonicalName?: string;
+  key?: string | null;
+  name?: string;
+  country_code?: string;
+  countryCode?: string;
+  region?: string;
+  source?: string;
+  selected?: MetaCitySearchCandidate | null;
+  candidates?: MetaCitySearchCandidate[];
+  rejectedCandidates?: MetaCitySearchCandidate[];
+  warning?: string;
+  geoMode?: string;
+  fallbackCountry?: boolean;
+};
+
+type StorageHealth = {
+  bucket?: string;
+  exists?: boolean;
+  publicAccess?: boolean;
+  canUpload?: boolean;
+  publicUrlWorks?: boolean;
+  hint?: string;
+};
+
+type StaffMember = {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  role: StaffRole;
+  status: string;
+};
+
+type ClinicSettings = {
+  clinicName: string;
+  city: string;
+  phone: string;
+  whatsapp: string;
+  address: string;
+  defaultServices: string;
+  brandTone: string;
+  legalDisclaimer: string;
+  timezone: string;
+};
+
+type IntegrationCard = {
+  key: string;
+  title: string;
+  description: string;
+  status: Status;
+  icon: LucideIcon;
+  details?: string;
+  hint?: string;
+};
+
+type AiProviderSetting = {
+  id: string;
+  purpose: string;
+  label: string;
+  provider: string;
+  modelName: string;
+  enabled: boolean;
+  status: Status;
+  module: string;
+};
+
+type MetaAccount = {
+  metaBusinessId: string;
+  adAccountId: string;
+  pageId: string;
+  instagramActorId: string;
+  accountName: string;
+  currency: string;
+  timezoneName: string;
+  status: Status;
+  permissions: Record<string, boolean>;
+};
+
+type MetaInsightsLaunchOption = {
+  id: string;
+  campaignName: string;
+  status: string;
+  metaStatus: string;
+  metaCampaignId: string;
+  createdAt?: string;
+};
+
+type MetaInsightsSyncRun = {
+  id: string;
+  metaCampaignLaunchId: string | null;
+  status: "pending" | "running" | "succeeded" | "failed";
+  dateStart: string | null;
+  dateStop: string | null;
+  rowsUpserted: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  finishedAt: string | null;
+  createdAt: string | null;
+};
+
+type MetaInsightsSyncResult = {
+  run: MetaInsightsSyncRun;
+  rowsUpserted: number;
+  empty: boolean;
+  pagesFetched: number;
+  dateStart: string;
+  dateStop: string;
+};
+
+type MetaCampaignInsight = {
+  id: string;
+  metaCampaignLaunchId: string;
+  metaCampaignId: string;
+  dateStart: string;
+  dateStop: string;
+  spendMinor: string;
+  currency: string;
+  impressions: string;
+  reach: string;
+  clicks: string;
+  inlineLinkClicks: string;
+  metaLeads: string | null;
+  actionCounts: Record<string, string>;
+  fetchedAt: string;
+};
+
+type MetaInsightsDiagnosticsSummary = {
+  totalRows: number;
+  latestFetchedAt: string | null;
+  spendByCurrency: Array<{ currency: string; spendMinor: bigint }>;
+};
+
+type ReleaseCheck = {
+  checkKey: string;
+  title: string;
+  critical: boolean;
+  status: ReleaseStatus;
+  notes: string;
+  automated?: boolean;
+};
+
+const tabs: Array<{ id: AdminTab; label: string; icon: LucideIcon }> = [
+  { id: "overview", label: "Обзор", icon: Gauge },
+  { id: "staff", label: "Сотрудники", icon: Users },
+  { id: "operators", label: "Операторы", icon: Users },
+  { id: "creators", label: "Авторы контента", icon: Sparkles },
+  { id: "doctors", label: "Врачи", icon: Stethoscope },
+  { id: "roles", label: "Роли и доступы", icon: ShieldCheck },
+  { id: "clinic", label: "Клиника", icon: Building2 },
+  { id: "whatsapp", label: "WhatsApp", icon: MessageCircle },
+  { id: "integrations", label: "Интеграции", icon: Database },
+  { id: "ai", label: "Нейросети", icon: Sparkles },
+  { id: "meta", label: "Meta/Facebook Ads", icon: Facebook },
+  { id: "release", label: "Release checklist", icon: ClipboardCheck },
+  { id: "diagnostics", label: "Диагностика", icon: FileCheck2 },
+];
+
+const clinicDefaults: ClinicSettings = {
+  clinicName: "",
+  city: "Astana",
+  phone: "+7 700 000 00 00",
+  whatsapp: "+7 700 000 00 00",
+  address: "Astana, Kazakhstan",
+  defaultServices: "Консультация, диагностика, первичный прием",
+  brandTone: "Спокойный, экспертный, заботливый",
+  legalDisclaimer: "Информация не является медицинской рекомендацией. Перед процедурой нужна консультация специалиста.",
+  timezone: "Asia/Almaty",
+};
+
+const aiDefaults: AiProviderSetting[] = [
+  {
+    id: "content-text-openai",
+    purpose: "content_text",
+    label: "Content text generation",
+    provider: "openai",
+    modelName: "gpt-4.1-mini",
+    enabled: true,
+    status: "demo",
+    module: "Content Studio",
+  },
+  {
+    id: "targeting-anthropic",
+    purpose: "targeting_analysis",
+    label: "Targeting Agent analysis",
+    provider: "anthropic",
+    modelName: "claude-sonnet",
+    enabled: true,
+    status: "demo",
+    module: "Targeting Agent",
+  },
+  {
+    id: "image-prompt-gemini",
+    purpose: "image_prompt",
+    label: "Image prompt generation",
+    provider: "gemini",
+    modelName: "gemini-pro",
+    enabled: false,
+    status: "demo",
+    module: "Content Studio",
+  },
+  {
+    id: "voice-elevenlabs",
+    purpose: "voice_generation",
+    label: "Voice generation",
+    provider: "elevenlabs",
+    modelName: "manual-fallback",
+    enabled: false,
+    status: "demo",
+    module: "Content Studio",
+  },
+  {
+    id: "avatar-heygen",
+    purpose: "avatar_video",
+    label: "Avatar/video",
+    provider: "heygen",
+    modelName: "manual-fallback",
+    enabled: false,
+    status: "demo",
+    module: "Content Studio",
+  },
+  {
+    id: "reports-openai",
+    purpose: "reports_summary",
+    label: "Reports summary",
+    provider: "openai",
+    modelName: "demo-fallback",
+    enabled: false,
+    status: "demo",
+    module: "Reports",
+  },
+];
+
+const metaDefaults: MetaAccount = {
+  metaBusinessId: "",
+  adAccountId: "",
+  pageId: "",
+  instagramActorId: "",
+  accountName: "Medina OS Meta Ads",
+  currency: "USD",
+  timezoneName: "Asia/Almaty",
+  status: "draft",
+  permissions: {
+    appCreated: false,
+    marketingApi: false,
+    adsRead: false,
+    adsManagement: false,
+    adAccountConnected: false,
+    pageConnected: false,
+    instagramConnected: false,
+    manualApproval: true,
+  },
+};
+
+const permissionChecklist: Array<{ key: keyof MetaAccount["permissions"]; label: string }> = [
+  { key: "appCreated", label: "Meta Business app created" },
+  { key: "marketingApi", label: "Marketing API access enabled" },
+  { key: "adsRead", label: "ads_read available" },
+  { key: "adsManagement", label: "ads_management available" },
+  { key: "adAccountConnected", label: "Ad account connected" },
+  { key: "pageConnected", label: "Facebook Page connected" },
+  { key: "instagramConnected", label: "Instagram account connected" },
+  { key: "manualApproval", label: "Manual approval enabled" },
+];
+
+const releaseDefaults: ReleaseCheck[] = [
+  { checkKey: "supabase_configured", title: "Supabase configured", critical: true, status: "pending", notes: "", automated: true },
+  { checkKey: "migrations_009_013", title: "Supabase migrations 009/010/011/012/013 applied", critical: false, status: "pending", notes: "" },
+  { checkKey: "vercel_env", title: "Vercel env basic configured", critical: true, status: "pending", notes: "", automated: true },
+  { checkKey: "staff_auth_env", title: "Staff auth env configured", critical: true, status: "pending", notes: "", automated: true },
+  { checkKey: "staff_login", title: "Supabase Auth staff login tested", critical: true, status: "pending", notes: "" },
+  { checkKey: "staff_users", title: "Staff users created", critical: false, status: "pending", notes: "" },
+  { checkKey: "roles_checked", title: "Roles checked", critical: false, status: "pending", notes: "" },
+  { checkKey: "telegram_test", title: "Telegram test passed", critical: true, status: "pending", notes: "", automated: true },
+  { checkKey: "targeting_health", title: "Targeting Agent health passed", critical: true, status: "pending", notes: "", automated: true },
+  { checkKey: "openai_env", title: "OpenAI configured", critical: false, status: "pending", notes: "", automated: true },
+  { checkKey: "meta_env", title: "Meta env configured", critical: false, status: "pending", notes: "", automated: true },
+  { checkKey: "content_script", title: "Content Studio generate script passed", critical: false, status: "pending", notes: "" },
+  { checkKey: "appointments_tested", title: "Appointments create/edit tested", critical: true, status: "pending", notes: "" },
+  { checkKey: "mobile_test", title: "Mobile test passed", critical: false, status: "pending", notes: "" },
+  { checkKey: "backup_export", title: "Backup/export strategy ready", critical: false, status: "pending", notes: "" },
+  { checkKey: "owner_account", title: "Admin owner account ready", critical: false, status: "pending", notes: "" },
+  { checkKey: "employee_day", title: "Test employee day completed", critical: false, status: "pending", notes: "" },
+];
+
+const criticalBlockerKeys = new Set([
+  "supabase_configured",
+  "vercel_env",
+  "staff_auth_env",
+  "staff_login",
+  "telegram_test",
+  "targeting_health",
+  "appointments_tested",
+]);
+
+const envList = [
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "GEMINI_API_KEY",
+  "ELEVENLABS_API_KEY",
+  "ELEVENLABS_VOICE_ID",
+  "HEYGEN_API_KEY",
+  "TAPNOW_API_KEY",
+];
+
+// Selection-2: every key these two touch holds one clinic's data — its
+// settings, its Meta ad account and page ids, its release checklist, its AI
+// providers — so the scope belongs here rather than at fourteen call sites.
+// Unscoped, switching clinics showed the previous clinic's Meta ids on the new
+// clinic's admin screen, and saving the form wrote them to the new clinic.
+function readStored<T>(key: string, fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = window.localStorage.getItem(workspaceScopedKey(key));
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStored<T>(key: string, value: T) {
+  window.localStorage.setItem(workspaceScopedKey(key), JSON.stringify(value));
+}
+
+function mergeReleaseChecks(stored: ReleaseCheck[]): ReleaseCheck[] {
+  const storedByKey = new Map(stored.map((check) => [check.checkKey, check]));
+  const defaults = releaseDefaults.map((defaultCheck) => ({
+    ...defaultCheck,
+    ...storedByKey.get(defaultCheck.checkKey),
+    title: defaultCheck.title,
+    critical: criticalBlockerKeys.has(defaultCheck.checkKey),
+    automated: defaultCheck.automated,
+  }));
+  const custom = stored.filter((check) => !releaseDefaults.some((defaultCheck) => defaultCheck.checkKey === check.checkKey));
+  return [...defaults, ...custom.map((check) => ({ ...check, critical: criticalBlockerKeys.has(check.checkKey) }))];
+}
+
+function hasMetaFormValues(account: MetaAccount): boolean {
+  return Boolean(
+    account.metaBusinessId.trim() ||
+      account.adAccountId.trim() ||
+      account.pageId.trim() ||
+      account.instagramActorId.trim(),
+  );
+}
+
+async function parseApiResponse<T>(response: globalThis.Response): Promise<ApiResponse<T>> {
+  const text = await response.text();
+  if (!text.trim()) return {};
+  try {
+    return JSON.parse(text) as ApiResponse<T>;
+  } catch {
+    return {
+      success: false,
+      error: "Invalid JSON response",
+      details: [text.slice(0, 160)],
+    };
+  }
+}
+
+// Security-2D: Content Studio is authenticated now, and the workspace travels as
+// a query selector the server verifies against the caller's membership — never
+// as a field in the body.
+function withWorkspace(path: string, workspaceId: string): string {
+  return `${path}${path.includes("?") ? "&" : "?"}workspaceId=${encodeURIComponent(workspaceId)}`;
+}
+
+function localIsoDateOffset(days: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function localDateTimeOffset(hours: number): string {
+  const date = new Date(Date.now() + hours * 60 * 60 * 1000);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day}T${hour}:${minute}`;
+}
+
+function summarizeMetaInsightRows(rows: MetaCampaignInsight[]): MetaInsightsDiagnosticsSummary {
+  const spendByCurrency = new Map<string, bigint>();
+  let latestFetchedAt: string | null = null;
+  let latestFetchedTimestamp = Number.NEGATIVE_INFINITY;
+
+  for (const row of rows) {
+    const currency = row.currency.trim().toUpperCase();
+    if (currency && /^\d+$/.test(row.spendMinor)) {
+      spendByCurrency.set(currency, (spendByCurrency.get(currency) || 0n) + BigInt(row.spendMinor));
+    }
+
+    const fetchedTimestamp = Date.parse(row.fetchedAt);
+    if (Number.isFinite(fetchedTimestamp) && fetchedTimestamp > latestFetchedTimestamp) {
+      latestFetchedTimestamp = fetchedTimestamp;
+      latestFetchedAt = row.fetchedAt;
+    }
+  }
+
+  return {
+    totalRows: rows.length,
+    latestFetchedAt,
+    spendByCurrency: [...spendByCurrency.entries()]
+      .map(([currency, spendMinor]) => ({ currency, spendMinor }))
+      .sort((left, right) => left.currency.localeCompare(right.currency)),
+  };
+}
+
+function formatMetaSpendMinor(spendMinor: bigint, currency: string): string {
+  const major = spendMinor / 100n;
+  const minor = (spendMinor % 100n).toString().padStart(2, "0");
+  const majorLabel = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(major);
+  const currencyLabel = currency === "KZT" ? "₸" : currency === "USD" ? "$" : currency;
+  return `${majorLabel},${minor} ${currencyLabel}`;
+}
+
+function formatAdminDateTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("ru-RU", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
+
+function statusLabel(status: Status | ReleaseStatus) {
+  const labels: Record<string, string> = {
+    configured: "Настроено",
+    connected: "Подключено",
+    not_configured: "Не настроено",
+    partial: "Частично",
+    error: "Ошибка",
+    checking: "Проверяется",
+    demo: "Без подключения",
+    draft: "Draft",
+    pending: "Ожидает",
+    passed: "Пройдено",
+    failed: "Проблема",
+    skipped: "Пропущено",
+  };
+  return labels[status] || status;
+}
+
+function statusClass(status: Status | ReleaseStatus) {
+  if (status === "configured" || status === "connected" || status === "passed") return "bg-emerald-50 text-emerald-700 border-emerald-200";
+  if (status === "partial" || status === "draft" || status === "demo" || status === "skipped") return "bg-amber-50 text-amber-700 border-amber-200";
+  if (status === "error" || status === "failed") return "bg-red-50 text-red-700 border-red-200";
+  return "bg-slate-50 text-slate-600 border-slate-200";
+}
+
+function localStorageCount(key: string) {
+  const value = readStored<unknown[]>(key, []);
+  return Array.isArray(value) ? value.length : 0;
+}
+
+function providerStatus(health: CrmHealthData | null, key: string): Status {
+  const item = health?.providers?.[key];
+  if (!item) return "not_configured";
+  if ("env" in item) return item.status;
+  return item.status;
+}
+
+function providerDetails(health: CrmHealthData | null, key: string): string {
+  const item = health?.providers?.[key];
+  if (!item) return "Env не проверен";
+  const presence = "env" in item ? item.env : item;
+  return `${presence.configured}/${presence.total} env configured`;
+}
+
+function isProviderConfigured(health: CrmHealthData | null, key: string): boolean {
+  return providerStatus(health, key) === "configured";
+}
+
+function permissionSummary(permissions: CrmPermission[]) {
+  return permissions.map((permission) => permissionLabels[permission]).join(", ");
+}
+
+export default function AdminCenter() {
+  const { clinicId, user, userRole, isDemoMode, workspacePurpose } = useAuth();
+  const actorId = user?.id || "";
+  const workspaceId = clinicId || readWorkspaceId();
+  const observedActorRef = useRef(actorId);
+  const [authEpoch, setAuthEpoch] = useState(0);
+  useLayoutEffect(() => {
+    if (!hasSupabaseFrontendEnv) return;
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((_event, nextSession) => {
+      const nextActorId = nextSession?.user.id || "";
+      if (observedActorRef.current === nextActorId) return;
+      observedActorRef.current = nextActorId;
+      // Raw transitions must invalidate even when React batches A -> B -> A.
+      setAuthEpoch((epoch) => epoch + 1);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+  return <AdminCenterSession key={JSON.stringify([actorId, workspaceId, userRole, isDemoMode, workspacePurpose, authEpoch])}
+    actorId={actorId} workspaceId={workspaceId} userRole={userRole} isDemoMode={isDemoMode} workspacePurpose={workspacePurpose} />;
+}
+
+type AdminSessionAccess = {
+  actorId: string;
+  workspaceId: string;
+  isCurrent: () => boolean;
+  assertCurrent: () => void;
+  request: typeof sendCrmFetch;
+  releaseResponse: (response: globalThis.Response) => void;
+};
+
+type MortgageWhatsAppChannel = {
+  id: string;
+  provider: "wazzup" | "whatsapp_cloud";
+  keyMasked: string;
+  enabled: boolean;
+  leadsFiled: number;
+  repeatsSeen: number;
+  lastInboundAt: string | null;
+};
+
+type MortgageWhatsAppScope = { controller: AbortController; loadTicket: number; busy: boolean };
+
+function mortgageWhatsAppChannelsFrom(value: unknown): MortgageWhatsAppChannel[] {
+  if (!Array.isArray(value)) throw new Error("Не удалось прочитать состояние каналов WhatsApp.");
+  return value.map((channel) => {
+    if (!channel || typeof channel.id !== "string" || !channel.id
+      || (channel.provider !== "wazzup" && channel.provider !== "whatsapp_cloud")
+      || typeof channel.keyMasked !== "string" || typeof channel.enabled !== "boolean"
+      || !Number.isSafeInteger(channel.leadsFiled) || channel.leadsFiled < 0
+      || !Number.isSafeInteger(channel.repeatsSeen) || channel.repeatsSeen < 0
+      || (channel.lastInboundAt !== null && typeof channel.lastInboundAt !== "string")) {
+      throw new Error("Не удалось прочитать состояние каналов WhatsApp.");
+    }
+    return { id: channel.id, provider: channel.provider, keyMasked: channel.keyMasked, enabled: channel.enabled,
+      leadsFiled: channel.leadsFiled, repeatsSeen: channel.repeatsSeen, lastInboundAt: channel.lastInboundAt };
+  });
+}
+
+function AdminCenterSession({ actorId, workspaceId, userRole, isDemoMode, workspacePurpose }: {
+  actorId: string;
+  workspaceId: string;
+  userRole: ReturnType<typeof useAuth>["userRole"];
+  isDemoMode: boolean;
+  workspacePurpose: ReturnType<typeof useAuth>["workspacePurpose"];
+}) {
+  const auth = useAuth();
+  const sessionRef = useRef<AbortController | null>(null);
+  const liveScopeRef = useRef({ actorId, workspaceId, userRole, isDemoMode, workspacePurpose });
+  liveScopeRef.current = {
+    actorId: auth.user?.id || "",
+    workspaceId: auth.clinicId || readWorkspaceId(),
+    userRole: auth.userRole,
+    isDemoMode: auth.isDemoMode,
+    workspacePurpose: auth.workspacePurpose,
+  };
+  const [lifetime, setLifetime] = useState<{ controller: AbortController; epoch: number } | null>(null);
+  useLayoutEffect(() => {
+    const controller = new AbortController();
+    sessionRef.current = controller;
+    // Content captures one controller, including across StrictMode setup replay.
+    setLifetime((current) => ({ controller, epoch: (current?.epoch ?? 0) + 1 }));
+    const subscription = hasSupabaseFrontendEnv && !isDemoMode
+      ? sessionAuth.onAuthStateChange((_event, nextSession) => {
+          if ((nextSession?.user.id || "") !== actorId) controller.abort();
+        }).data.subscription
+      : null;
+    return () => {
+      controller.abort();
+      subscription?.unsubscribe();
+      if (sessionRef.current === controller) sessionRef.current = null;
+    };
+  }, []);
+
+  if (!lifetime) return null;
+  const { controller } = lifetime;
+  // Rendering local/demo fixtures does not require a real SDK actor or env.
+  const isCurrent = () => liveScopeRef.current.actorId === actorId
+    && liveScopeRef.current.workspaceId === workspaceId && liveScopeRef.current.userRole === userRole
+    && liveScopeRef.current.isDemoMode === isDemoMode
+    && liveScopeRef.current.workspacePurpose === workspacePurpose
+    && sessionRef.current === controller && !controller.signal.aborted;
+  const assertCurrent = () => {
+    if (!isCurrent()) throw new DOMException("Admin session ended", "AbortError");
+  };
+  const responseCleanups = new WeakMap<globalThis.Response, () => void>();
+  const releaseResponse = (response: globalThis.Response) => {
+    responseCleanups.get(response)?.();
+    responseCleanups.delete(response);
+  };
+  const request: typeof sendCrmFetch = async (path, init = {}) => {
+    assertCurrent();
+    if (!actorId) throw new CrmApiError(401, "authentication_required", "Authentication required");
+    const callerSignal = init.signal;
+    const requestController = callerSignal ? new AbortController() : controller;
+    const signal = requestController.signal;
+    const cleanup = () => {
+      controller.signal.removeEventListener("abort", abort);
+      callerSignal?.removeEventListener("abort", abort);
+    };
+    const abort = () => {
+      requestController.abort();
+      cleanup();
+    };
+    if (callerSignal) {
+      controller.signal.addEventListener("abort", abort, { once: true });
+      callerSignal.addEventListener("abort", abort, { once: true });
+      if (controller.signal.aborted || callerSignal.aborted) abort();
+    }
+    try {
+      if (signal.aborted) throw new DOMException("Admin request cancelled", "AbortError");
+      const response = await sendCrmFetch(path, { ...init, cache: "no-store", expectedUserId: actorId, signal });
+      assertCurrent();
+      if (signal.aborted) throw new DOMException("Admin request cancelled", "AbortError");
+      // Keep both cancellations attached until safeJson consumes the body.
+      if (callerSignal) responseCleanups.set(response, cleanup);
+      return response;
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+  };
+  return <AdminCenterContent key={lifetime.epoch} access={{ actorId, workspaceId, isCurrent, assertCurrent, request, releaseResponse }} />;
+}
+
+function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
+  const [, setLocation] = useLocation();
+  const { user, userRole, vertical, workspacePurpose } = useAuth();
+  const isMortgage = workspacePurpose === "mortgage_leads";
+  const mortgageChannelRole = userRole === "owner" || userRole === "admin";
+  const visibleTabs = isMortgage ? tabs.filter((tab) => tab.id === "staff" || (tab.id === "whatsapp" && mortgageChannelRole)) : tabs;
+  const workspaceStaffRoles: readonly StaffRole[] = isMortgage ? ["lead_manager", "admin"] : staffRoles;
+  const defaultStaffRole: StaffRole = isMortgage ? "lead_manager" : "receptionist";
+  const workspaceId = access.workspaceId;
+  const crmFetch = access.request;
+
+  async function safeJson<T>(response: globalThis.Response): Promise<ApiResponse<T>> {
+    try {
+      access.assertCurrent();
+      const body = await parseApiResponse<T>(response);
+      access.assertCurrent();
+      return body;
+    } finally {
+      access.releaseResponse(response);
+    }
+  }
+
+  async function sessionAccessToken() {
+    access.assertCurrent();
+    if (!access.actorId) return "";
+    const token = await getSupabaseAccessToken(access.actorId);
+    access.assertCurrent();
+    return token;
+  }
+
+  async function crmRequest<T>(path: string, init?: globalThis.RequestInit): Promise<ApiResponse<T>> {
+    access.assertCurrent();
+    const response = await crmFetch(path, init);
+    access.assertCurrent();
+    const body = await safeJson<T>(response);
+    access.assertCurrent();
+    if (init?.signal?.aborted) throw new DOMException("Admin request cancelled", "AbortError");
+    if (!response.ok || body.success === false) {
+      const code = typeof (body as { code?: unknown }).code === "string" ? (body as { code: string }).code : "request_failed";
+      throw new CrmApiError(response.status, code, body.error || body.details?.join(", ") || `HTTP ${response.status}`);
+    }
+    return body;
+  }
+
+  async function adminCrmRequest<T>(path: string, init?: globalThis.RequestInit): Promise<ApiResponse<T>> {
+    access.assertCurrent();
+    const accessToken = await sessionAccessToken();
+    access.assertCurrent();
+    if (!accessToken) throw new Error("Нужно войти заново для защищённой синхронизации.");
+    const response = await crmFetch(path, { ...init, accessToken });
+    access.assertCurrent();
+    const body = await safeJson<T>(response);
+    access.assertCurrent();
+    if (init?.signal?.aborted) throw new DOMException("Admin request cancelled", "AbortError");
+    if (!response.ok || body.success !== true) {
+      throw new Error(body.details?.[0] || body.error || `HTTP ${response.status}`);
+    }
+    return body;
+  }
+  // Подпись вкладки исполнителей зависит от ниши: у клиники «Врачи», у салона
+  // «Мастера». Ключ вкладки остаётся doctors — переименовывать его значило бы
+  // трогать реестры, а не слово на кнопке.
+  const tabLabel = (tab: { id: AdminTab; label: string }) =>
+    isMortgage && tab.id === "staff" ? "Команда" : tab.id === "doctors" ? capitalize(termsFor(vertical).specialistPlural) : tab.label;
+  // «Врач» в клинике и «Мастер» в салоне: роль в базе одна, слово на экране —
+  // из словаря ниши. Владелец салона: «нет должности мастеров».
+  const roleTitles = staffRoleLabels(vertical);
+  const [activeTab, setRequestedTab] = useState<AdminTab>(isMortgage ? "staff" : "overview");
+  const setActiveTab = (tab: AdminTab) => setRequestedTab(isMortgage && !(tab === "whatsapp" && mortgageChannelRole) ? "staff" : tab);
+  const [clinic, setClinic] = useState<ClinicSettings>(() => readStored("negis_clinic_settings", clinicDefaults));
+  // Commercial-3B: the team is whatever the server says it is. This list used
+  // to be seeded from localStorage demo data and written back there, so an
+  // administrator saw people who were not members and suspended people who
+  // still had access.
+  const [staff, setStaff] = useState<StaffMember[]>([]);
+  const [releaseChecks, setReleaseChecks] = useState<ReleaseCheck[]>(() => mergeReleaseChecks(readStored("negis_release_checks", releaseDefaults)));
+  const [aiProviders, setAiProviders] = useState<AiProviderSetting[]>(() => readStored("negis_ai_provider_settings", aiDefaults));
+  const [metaAccount, setMetaAccount] = useState<MetaAccount>(() => readStored("negis_meta_account", metaDefaults));
+  const [metaLiveLaunchEnabled, setMetaLiveLaunchEnabled] = useState(() => readStored("negis_meta_live_launch_enabled", false));
+  const [metaConfigMode, setMetaConfigMode] = useState<"none" | "local" | "supabase">(() => {
+    const storedMode = readStored<"none" | "local" | "supabase">("negis_meta_config_save_mode", "none");
+    if (storedMode !== "none") return storedMode;
+    return hasMetaFormValues(readStored("negis_meta_account", metaDefaults)) ? "local" : "none";
+  });
+  const [health, setHealth] = useState<CrmHealthData | null>(null);
+  const [serverAdminAuth, setServerAdminAuth] = useState<ServerAdminAuthState>({ status: "checking" });
+  const hasStaffManagementAccess = serverAdminAuth.status === "confirmed"
+    && (serverAdminAuth.role === "owner" || serverAdminAuth.role === "admin");
+  const hasMortgageChannelAccess = isMortgage && mortgageChannelRole && hasStaffManagementAccess;
+  const [mortgageChannels, setMortgageChannels] = useState<MortgageWhatsAppChannel[] | null>(null);
+  const [mortgageChannelsLoading, setMortgageChannelsLoading] = useState(false);
+  const [mortgageChannelsError, setMortgageChannelsError] = useState("");
+  const [mortgageChannelBusy, setMortgageChannelBusy] = useState<string | null>(null);
+  const mortgageChannelScope = useRef<MortgageWhatsAppScope | null>(null);
+  const mortgageChannelAllowed = useRef(false);
+  mortgageChannelAllowed.current = hasMortgageChannelAccess && activeTab === "whatsapp";
+  const [integrationCards, setIntegrationCards] = useState<IntegrationCard[]>(() => buildIntegrationCards(null));
+  const [tiktokDryRunForm, setTikTokDryRunForm] = useState<TikTokDryRunForm>(() => ({
+    campaignName: "",
+    service: "",
+    city: clinic.city || "Астана",
+    primaryText: "",
+    dailyBudget: "5000",
+    currency: "KZT",
+    destinationUrl: "",
+    scheduleStartTime: localDateTimeOffset(24),
+  }));
+  const [tiktokDryRun, setTikTokDryRun] = useState<TikTokDryRunResult | null>(null);
+  const [tiktokDryRunMessage, setTikTokDryRunMessage] = useState("");
+  const [tiktokVideoSelection, setTikTokVideoSelection] = useState<{ workspaceId: string; assetId: string } | null>(null);
+  const [tiktokLaunchConfirmation, setTikTokLaunchConfirmation] = useState("");
+  const [tiktokLaunchRequestKey, setTikTokLaunchRequestKey] = useState("");
+  const [tiktokLaunchResult, setTikTokLaunchResult] = useState<TikTokDisabledLaunchResult | null>(null);
+  const [tiktokLaunchMessage, setTikTokLaunchMessage] = useState("");
+  const [loading, setLoading] = useState<Record<string, boolean>>({});
+  const [metaCityKeyInput, setMetaCityKeyInput] = useState("almaty");
+  const [metaCityKeyResult, setMetaCityKeyResult] = useState<MetaCityKeyResult | null>(null);
+  const [metaInsightsLaunches, setMetaInsightsLaunches] = useState<MetaInsightsLaunchOption[]>([]);
+  const [metaInsightsLaunchId, setMetaInsightsLaunchId] = useState("");
+  const [metaInsightsDateStart, setMetaInsightsDateStart] = useState(() => localIsoDateOffset(-6));
+  const [metaInsightsDateStop, setMetaInsightsDateStop] = useState(() => localIsoDateOffset(0));
+  const [metaInsightsLastRun, setMetaInsightsLastRun] = useState<MetaInsightsSyncRun | null>(null);
+  const [metaInsightsRows, setMetaInsightsRows] = useState<MetaCampaignInsight[]>([]);
+  const [metaInsightsMessage, setMetaInsightsMessage] = useState("");
+  // Commercial-3B: staff are added by invitation. The clinic names an address
+  // and a role; the person proves control of that address through Supabase Auth
+  // and redeems the token. Nothing here mints a password or a membership.
+  const [inviteForm, setInviteForm] = useState<{ email: string; role: StaffRole }>({ email: "", role: defaultStaffRole });
+  const [invitations, setInvitations] = useState<StaffInvitation[]>([]);
+  const [issuedInvite, setIssuedInvite] = useState<{ email: string; acceptUrl: string; emailSent: boolean; emailStatus?: string } | null>(null);
+  // Два пути зачисления. Умолчание — пароль: письма-приглашения до клиник
+  // доходят плохо, и сотрудник неделями оставался без входа.
+  const [staffMode, setStaffMode] = useState<"password" | "invite">("password");
+  const [staffPassword, setStaffPassword] = useState("");
+  const [staffFullName, setStaffFullName] = useState("");
+  // Пароль живёт здесь и нигде больше: сервер его не возвращает. kind
+  // различает заведение и смену — «Сотрудник добавлен» при смене пароля было
+  // бы неправдой.
+  const [createdStaff, setCreatedStaff] = useState<{ email: string; password: string; kind: "created" | "reset" } | null>(null);
+  // Третий путь: человек просится сам по коду клиники. null — «прочитать не
+  // удалось», это не то же самое, что «заявок нет».
+  // Три разных состояния, и они не должны сливаться: "loading" — ещё не
+  // читали (иначе экран обвиняет сеть, пока сам грузится), "failed" —
+  // прочитать не удалось, "denied" — нет права (обновление страницы не
+  // поможет никогда, а именно это советовал прежний текст управляющей).
+  type ReadState<T> = { state: "loading" } | { state: "failed" } | { state: "denied" } | { state: "ready"; value: T };
+  const [joinRequests, setJoinRequests] = useState<ReadState<JoinRequestRow[]>>({ state: "loading" });
+  const [joinCode, setJoinCode] = useState<ReadState<string | null>>({ state: "loading" });
+  // Миграция 038 может быть ещё не применена: между выкладкой и её применением
+  // раздел существует, а таблиц нет — и это не сбой чтения.
+  const [joinNotProvisioned, setJoinNotProvisioned] = useState(false);
+  const [decidingRequestId, setDecidingRequestId] = useState<string | null>(null);
+  const [decisionRole, setDecisionRole] = useState<StaffRole | "">("");
+  // Пачка: столбец почт и одна роль на всех. Пароли живут только здесь — их
+  // показывают один раз и раздают из рук в руки.
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchEmails, setBatchEmails] = useState("");
+  const [batchRole, setBatchRole] = useState<StaffRole>(defaultStaffRole);
+  const [batchResults, setBatchResults] = useState<BatchStaffResult[] | null>(null);
+
+  // Ждущие решения. null («прочитать не удалось») даёт пустой список: рисовать
+  // счётчик по неизвестности значило бы обещать, что заявок нет.
+  const pendingJoinRequests = useMemo(
+    () => (joinRequests.state === "ready" ? joinRequests.value.filter((request) => request.status === "pending") : []),
+    [joinRequests],
+  );
+
+  const readiness = useMemo(() => {
+    const total = releaseChecks.length || 1;
+    const passed = releaseChecks.filter((check) => check.status === "passed" || check.status === "skipped").length;
+    const blockers = releaseChecks.filter((check) => criticalBlockerKeys.has(check.checkKey) && check.status !== "passed" && check.status !== "skipped").length;
+    return {
+      score: Math.round((passed / total) * 100),
+      blockers,
+      complete: blockers === 0,
+    };
+  }, [releaseChecks]);
+
+  const metaInsightsDiagnostics = useMemo(
+    () => summarizeMetaInsightRows(metaInsightsRows),
+    [metaInsightsRows],
+  );
+
+  const setBusy = (key: string, value: boolean) => {
+    if (access.isCurrent()) setLoading((current) => ({ ...current, [key]: value }));
+  };
+
+  function isMortgageChannelCurrent(scope: MortgageWhatsAppScope) {
+    return access.isCurrent() && mortgageChannelAllowed.current && mortgageChannelScope.current === scope
+      && !scope.controller.signal.aborted;
+  }
+
+  function reportMortgageChannelError(error: unknown) {
+    const message = error instanceof CrmApiError ? crmErrorMessage(error)
+      : error instanceof Error ? error.message : "Не удалось обновить канал WhatsApp.";
+    setMortgageChannelsError(message);
+    if (error instanceof CrmApiError && (error.status === 401 || error.status === 403)) {
+      setMortgageChannels(null);
+      setServerAdminAuth({ status: error.status === 401 ? "reauth" : "forbidden" });
+      mortgageChannelScope.current?.controller.abort();
+    }
+    return message;
+  }
+
+  async function loadMortgageChannels(scope = mortgageChannelScope.current) {
+    if (!scope || !isMortgageChannelCurrent(scope) || scope.busy) return;
+    const ticket = ++scope.loadTicket;
+    setMortgageChannelsLoading(true);
+    setMortgageChannelsError("");
+    try {
+      const body = await crmRequest<{ channels?: unknown }>(
+        `/api/crm/whatsapp-channels?workspaceId=${encodeURIComponent(workspaceId)}`,
+        { signal: scope.controller.signal },
+      );
+      if (!isMortgageChannelCurrent(scope) || ticket !== scope.loadTicket) return;
+      if (body.success !== true || body.mode !== "supabase") throw new Error("Не удалось подтвердить состояние каналов WhatsApp.");
+      setMortgageChannels(mortgageWhatsAppChannelsFrom(body.data?.channels));
+    } catch (error) {
+      if (!isMortgageChannelCurrent(scope)) return;
+      if (ticket !== scope.loadTicket && !(error instanceof CrmApiError && (error.status === 401 || error.status === 403))) return;
+      setMortgageChannels(null);
+      const message = reportMortgageChannelError(error);
+      if (error instanceof CrmApiError && (error.status === 401 || error.status === 403)) toast.error(message);
+    } finally {
+      if (isMortgageChannelCurrent(scope) && ticket === scope.loadTicket) setMortgageChannelsLoading(false);
+    }
+  }
+
+  async function disableMortgageChannel(channel: MortgageWhatsAppChannel) {
+    const scope = mortgageChannelScope.current;
+    if (!scope || !isMortgageChannelCurrent(scope) || scope.busy || channel.enabled !== true
+      || !mortgageChannels?.some((entry) => entry.id === channel.id && entry.provider === channel.provider && entry.enabled)) return;
+    scope.busy = true;
+    // A read begun before this mutation cannot restore the previous enabled state.
+    scope.loadTicket += 1;
+    setMortgageChannelsLoading(false);
+    setMortgageChannelBusy(`${channel.provider}:${channel.id}`);
+    setMortgageChannelsError("");
+    try {
+      const body = await crmRequest<{ item?: { id?: string; enabled?: boolean } }>(
+        `/api/crm/whatsapp-channels?workspaceId=${encodeURIComponent(workspaceId)}`,
+        { method: "PATCH", signal: scope.controller.signal, headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: channel.id, provider: channel.provider, enabled: false }) },
+      );
+      if (!isMortgageChannelCurrent(scope)) return;
+      if (body.success !== true || body.mode !== "supabase" || body.data?.item?.id !== channel.id || body.data.item.enabled !== false) {
+        throw new Error("Сервер не подтвердил выключение канала. Обновите состояние перед повторной попыткой.");
+      }
+      setMortgageChannels((current) => current?.map((entry) => entry.id === channel.id && entry.provider === channel.provider
+        ? { ...entry, enabled: false } : entry) ?? null);
+      toast.success("Канал выключен — новые заявки не создаются.");
+    } catch (error) {
+      if (!isMortgageChannelCurrent(scope)) return;
+      toast.error(reportMortgageChannelError(error));
+    } finally {
+      if (isMortgageChannelCurrent(scope)) {
+        scope.busy = false;
+        setMortgageChannelBusy(null);
+      }
+    }
+  }
+
+  useLayoutEffect(() => {
+    if (!hasMortgageChannelAccess || activeTab !== "whatsapp" || !access.isCurrent()) return;
+    const scope: MortgageWhatsAppScope = { controller: new AbortController(), loadTicket: 0, busy: false };
+    mortgageChannelScope.current = scope;
+    setMortgageChannels(null);
+    setMortgageChannelBusy(null);
+    void loadMortgageChannels(scope);
+    return () => {
+      scope.controller.abort();
+      if (mortgageChannelScope.current === scope) mortgageChannelScope.current = null;
+    };
+  }, [activeTab, hasMortgageChannelAccess, serverAdminAuth, workspaceId]);
+
+  async function checkServerAdminAccess() {
+    if (!access.isCurrent()) return;
+    mortgageChannelScope.current?.controller.abort();
+    setServerAdminAuth({ status: "checking" });
+
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(workspaceId)) {
+      setServerAdminAuth({ status: "reauth" });
+      return;
+    }
+
+    try {
+      const accessToken = await sessionAccessToken();
+      if (!access.isCurrent()) return;
+      if (!accessToken) {
+        setServerAdminAuth({ status: "reauth" });
+        return;
+      }
+
+      const response = await crmFetch(`/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const body = await safeJson<AdminAuthContextData>(response);
+      if (!access.isCurrent()) return;
+
+      if (response.status === 401) {
+        setServerAdminAuth({ status: "reauth" });
+        return;
+      }
+      if (response.status === 403) {
+        setServerAdminAuth({ status: "forbidden" });
+        return;
+      }
+      const data = body.data;
+      const selected = data && data.workspaceId === workspaceId
+        && typeof data.role === "string" && Boolean(data.role)
+        && typeof data.staffUserId === "string" && Boolean(data.staffUserId);
+      const unselected = data && data.workspaceId === null && data.role === null && data.staffUserId === null;
+      if (!response.ok || body.success !== true || !data || typeof data.isAdmin !== "boolean"
+        || (!selected && !unselected)) {
+        setServerAdminAuth({ status: "unavailable" });
+        return;
+      }
+      if (data.isAdmin === false) {
+        setServerAdminAuth({ status: "forbidden" });
+        return;
+      }
+      if (!selected || (data.role !== "owner" && data.role !== "admin") || !data.staffUserId) {
+        setServerAdminAuth({ status: "unavailable" });
+        return;
+      }
+      setServerAdminAuth({ status: "confirmed", role: data.role, staffUserId: data.staffUserId });
+    } catch {
+      if (!access.isCurrent()) return;
+      setServerAdminAuth({ status: "unavailable" });
+    }
+  }
+
+  useEffect(() => {
+    void checkServerAdminAccess();
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (serverAdminAuth.status === "confirmed") return;
+    setTikTokDryRun(null);
+    setTikTokDryRunMessage("");
+    setTikTokVideoSelection(null);
+    setTikTokLaunchConfirmation("");
+    setTikTokLaunchRequestKey("");
+    setTikTokLaunchResult(null);
+    setTikTokLaunchMessage("");
+  }, [serverAdminAuth.status, workspaceId]);
+
+  function isEligibleInsightsLaunch(launch: MetaInsightsLaunchOption): boolean {
+    const status = launch.status.trim().toLowerCase();
+    const metaStatus = launch.metaStatus.trim().toLowerCase();
+    return (
+      /^\d+$/.test(launch.metaCampaignId.trim()) &&
+      ![status, metaStatus].some((value) => ["failed", "video_processing", "dry_run"].includes(value))
+    );
+  }
+
+  async function loadMetaInsightsDiagnostics() {
+    if (!access.isCurrent() || isMortgage) return;
+    if (serverAdminAuth.status !== "confirmed") return;
+    setBusy("meta-insights-load", true);
+    setMetaInsightsMessage("");
+    try {
+      const [launchesBody, runsBody, insightsBody] = await Promise.all([
+        adminCrmRequest<{ launches?: MetaInsightsLaunchOption[] }>(
+          `/api/crm/meta-launches?workspaceId=${encodeURIComponent(workspaceId)}`,
+        ),
+        adminCrmRequest<{ runs?: MetaInsightsSyncRun[] }>(
+          `/api/crm/meta-insights-sync-runs?workspaceId=${encodeURIComponent(workspaceId)}`,
+        ),
+        adminCrmRequest<{ insights?: MetaCampaignInsight[] }>(
+          `/api/crm/meta-campaign-insights?workspaceId=${encodeURIComponent(workspaceId)}`,
+        ),
+      ]);
+      if (!access.isCurrent()) return;
+      if (
+        launchesBody.mode !== "supabase" ||
+        runsBody.mode !== "supabase" ||
+        insightsBody.mode !== "supabase"
+      ) {
+        throw new Error("Meta Insights доступны только для рабочего Supabase workspace.");
+      }
+
+      const launches = (launchesBody.data?.launches || []).filter(isEligibleInsightsLaunch);
+      setMetaInsightsLaunches(launches);
+      setMetaInsightsLaunchId((current) =>
+        current && launches.some((launch) => launch.id === current) ? current : launches[0]?.id || "",
+      );
+      setMetaInsightsLastRun(runsBody.data?.runs?.[0] || null);
+      setMetaInsightsRows(insightsBody.data?.insights || []);
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      setMetaInsightsMessage(error instanceof Error ? error.message : "Не удалось загрузить диагностику Insights.");
+    } finally {
+      setBusy("meta-insights-load", false);
+    }
+  }
+
+  async function synchronizeMetaInsights() {
+    if (!access.isCurrent()) return;
+    if (serverAdminAuth.status !== "confirmed") {
+      setMetaInsightsMessage("Сначала подтвердите админ-доступ.");
+      return;
+    }
+    if (!metaInsightsLaunchId) {
+      setMetaInsightsMessage("Выберите реальный запуск Meta.");
+      return;
+    }
+
+    setBusy("meta-insights-sync", true);
+    setMetaInsightsMessage("");
+    try {
+      const body = await adminCrmRequest<MetaInsightsSyncResult>("/api/crm/meta-insights-sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          metaCampaignLaunchId: metaInsightsLaunchId,
+          dateStart: metaInsightsDateStart,
+          dateStop: metaInsightsDateStop,
+        }),
+      });
+      if (!access.isCurrent()) return;
+      if (body.mode !== "supabase" || !body.data?.run) {
+        throw new Error("Синхронизация не вернула подтверждённый Supabase run.");
+      }
+      const successMessage =
+        body.data.empty
+          ? "Синхронизация завершена: Meta не вернула дневные строки за выбранный период."
+          : `Синхронизация завершена. Сохранено строк: ${body.data.rowsUpserted}.`;
+      await loadMetaInsightsDiagnostics();
+      if (!access.isCurrent()) return;
+      setMetaInsightsMessage(successMessage);
+      toast.success("Meta Insights синхронизированы");
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      const message = error instanceof Error ? error.message : "Не удалось синхронизировать Meta Insights.";
+      toast.error(message);
+      await loadMetaInsightsDiagnostics();
+      if (!access.isCurrent()) return;
+      setMetaInsightsMessage(message);
+    } finally {
+      setBusy("meta-insights-sync", false);
+    }
+  }
+
+  useEffect(() => {
+    if (!isMortgage && serverAdminAuth.status === "confirmed") {
+      void loadMetaInsightsDiagnostics();
+    } else {
+      setMetaInsightsLaunches([]);
+      setMetaInsightsLaunchId("");
+      setMetaInsightsLastRun(null);
+      setMetaInsightsRows([]);
+    }
+  }, [serverAdminAuth.status, workspaceId, isMortgage]);
+
+  async function checkCrmHealth() {
+    if (!access.isCurrent()) return null;
+    setBusy("crm-health", true);
+    try {
+      const body = await crmRequest<CrmHealthData>("/api/crm/health");
+      if (!access.isCurrent()) return null;
+      const data = body.data || null;
+      setHealth(data);
+      setIntegrationCards(buildIntegrationCards(data));
+      toast.success("Диагностика CRM обновлена");
+      return data;
+    } catch (error) {
+      if (!access.isCurrent()) return null;
+      toast.error(error instanceof Error ? error.message : "Не удалось проверить CRM health");
+      return null;
+    } finally {
+      setBusy("crm-health", false);
+    }
+  }
+
+  async function checkTelegram() {
+    if (!access.isCurrent()) return;
+    setBusy("telegram", true);
+    try {
+      const response = await crmFetch(withWorkspace("/api/content-studio/send-telegram", workspaceId), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ test: true }),
+      });
+      const body = await safeJson<Record<string, unknown>>(response);
+      if (!access.isCurrent()) return;
+      const description = body.telegramDescription || body.error || "Telegram не подключен";
+      const hint = body.hint || body.warning || "";
+      setIntegrationCards((cards) =>
+        cards.map((card) =>
+          card.key === "telegram"
+            ? {
+                ...card,
+                status: response.ok && body.success !== false ? "connected" : "error",
+                details: response.ok && body.success !== false ? "Test message accepted" : description,
+                hint,
+              }
+            : card,
+        ),
+      );
+      if (!response.ok || body.success === false) {
+        toast.error(`Telegram: ${description}${hint ? `. ${hint}` : ""}`);
+        return;
+      }
+      toast.success("Telegram подключен");
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      throw error;
+    } finally {
+      setBusy("telegram", false);
+    }
+  }
+
+  async function checkTargetingAgent() {
+    if (!access.isCurrent()) return;
+    setBusy("targeting", true);
+    try {
+      const body = await crmRequest<Record<string, unknown>>("/api/targeting/health");
+      if (!access.isCurrent()) return;
+      setIntegrationCards((cards) =>
+        cards.map((card) =>
+          card.key === "targetingAgent"
+            ? { ...card, status: body.success === false ? "error" : "connected", details: "Railway Targeting Agent отвечает" }
+            : card,
+        ),
+      );
+      toast.success("Targeting Agent отвечает");
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      setIntegrationCards((cards) =>
+        cards.map((card) =>
+          card.key === "targetingAgent"
+            ? { ...card, status: "error", details: error instanceof Error ? error.message : "Ошибка Targeting Agent" }
+            : card,
+        ),
+      );
+      toast.error(error instanceof Error ? error.message : "Ошибка Targeting Agent");
+    } finally {
+      setBusy("targeting", false);
+    }
+  }
+
+  async function checkTikTokAds() {
+    if (!access.isCurrent()) return;
+    if (serverAdminAuth.status !== "confirmed") {
+      setIntegrationCards((cards) =>
+        cards.map((card) =>
+          card.key === "tiktok"
+            ? {
+                ...card,
+                status: "error",
+                details: "Админ-доступ не подтверждён",
+                hint: "Войдите заново как владелец или администратор рабочего пространства.",
+              }
+            : card,
+        ),
+      );
+      toast.warning("Сначала подтвердите админ-доступ");
+      return;
+    }
+
+    setBusy("tiktok", true);
+    try {
+      const body = await adminCrmRequest<TikTokAdsDiagnostic>(
+        `/api/crm/tiktok-validate?workspaceId=${encodeURIComponent(workspaceId)}`,
+        { method: "POST" },
+      );
+      if (!access.isCurrent()) return;
+      const diagnostic = body.data;
+      if (!diagnostic) throw new Error("TikTok не вернул результат проверки.");
+
+      const account = diagnostic.advertiser;
+      const details = diagnostic.connected && account
+        ? [
+            account.name,
+            account.maskedId ? `ID ${account.maskedId}` : "",
+            account.currency ? `валюта ${account.currency}` : "",
+            account.timezone ? `часовой пояс ${account.timezone}` : "",
+            account.status === "STATUS_ENABLE" ? "аккаунт активен" : "",
+          ].filter(Boolean).join(" · ")
+        : diagnostic.message || "TikTok Ads пока не подключён.";
+      const hint = diagnostic.connected
+        ? "Проверка только читает данные рекламного аккаунта. Запуск TikTok-рекламы не включён."
+        : diagnostic.hint;
+
+      setIntegrationCards((cards) =>
+        cards.map((card) =>
+          card.key === "tiktok"
+            ? {
+                ...card,
+                status: diagnostic.connected ? "connected" : diagnostic.configured ? "error" : "not_configured",
+                details,
+                hint,
+              }
+            : card,
+        ),
+      );
+
+      if (diagnostic.connected) {
+        toast.success("TikTok Ads подключён");
+      } else {
+        toast.warning(diagnostic.message || "TikTok Ads пока не подключён");
+      }
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      const message = error instanceof Error ? error.message : "Не удалось проверить TikTok Ads.";
+      setIntegrationCards((cards) =>
+        cards.map((card) =>
+          card.key === "tiktok"
+            ? {
+                ...card,
+                status: "error",
+                details: "Не удалось проверить TikTok Ads",
+                hint: message,
+              }
+            : card,
+        ),
+      );
+      toast.error(message);
+    } finally {
+      setBusy("tiktok", false);
+    }
+  }
+
+  function buildTikTokRequestPayload() {
+    return {
+      brief: {
+        schemaVersion: 1,
+        platform: "tiktok",
+        sourceModule: "content-studio",
+        sourceKind: "package",
+        campaignName: tiktokDryRunForm.campaignName,
+        service: tiktokDryRunForm.service,
+        city: tiktokDryRunForm.city,
+        primaryText: tiktokDryRunForm.primaryText,
+        creative: {
+          type: "video",
+          brief: "Вертикальный видеокреатив для TikTok",
+        },
+      },
+      dailyBudget: tiktokDryRunForm.dailyBudget,
+      currency: tiktokDryRunForm.currency,
+      destinationUrl: tiktokDryRunForm.destinationUrl,
+      scheduleStartTime: tiktokDryRunForm.scheduleStartTime,
+      videoAssetId: tiktokVideoSelection?.workspaceId === workspaceId
+        ? tiktokVideoSelection.assetId
+        : undefined,
+    };
+  }
+
+  async function buildTikTokDryRun() {
+    if (!access.isCurrent()) return;
+    if (serverAdminAuth.status !== "confirmed") {
+      setTikTokDryRunMessage("Сначала подтвердите админ-доступ.");
+      toast.warning("Сначала подтвердите админ-доступ");
+      return;
+    }
+
+    setBusy("tiktok-dry-run", true);
+    setTikTokDryRunMessage("");
+    setTikTokLaunchResult(null);
+    setTikTokLaunchMessage("");
+    setTikTokLaunchConfirmation("");
+    setTikTokLaunchRequestKey("");
+    try {
+      const body = await adminCrmRequest<TikTokDryRunResult>(
+        `/api/crm/tiktok-dry-run?workspaceId=${encodeURIComponent(workspaceId)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildTikTokRequestPayload()),
+        },
+      );
+      if (!access.isCurrent()) return;
+      if (!body.data) throw new Error("TikTok dry-run не вернул план кампании.");
+      setTikTokDryRun(body.data);
+      setTikTokDryRunMessage(
+        body.data.readiness.briefReady && body.data.readiness.providerReady
+          ? "План и серверные проверки готовы. На этом шаге ни один объект в TikTok не создавался."
+          : body.data.readiness.briefReady
+            ? "Бриф собран. Ни один объект в TikTok не создавался."
+          : "План собран, но в брифе остались обязательные поля.",
+      );
+      if (body.data.readiness.briefReady) {
+        toast.success("План TikTok собран без запуска");
+      } else {
+        toast.warning("Заполните обязательные поля TikTok-брифа");
+      }
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      const message = error instanceof Error ? error.message : "Не удалось собрать TikTok dry-run.";
+      setTikTokDryRun(null);
+      setTikTokDryRunMessage(message);
+      toast.error(message);
+    } finally {
+      setBusy("tiktok-dry-run", false);
+    }
+  }
+
+  async function launchTikTokDisabled() {
+    if (!access.isCurrent()) return;
+    if (serverAdminAuth.status !== "confirmed") {
+      setTikTokLaunchMessage("Сначала подтвердите админ-доступ.");
+      return;
+    }
+    if (!tiktokDryRun?.launchEnabled || !tiktokDryRun.readiness.briefReady || !tiktokDryRun.readiness.providerReady) {
+      setTikTokLaunchMessage("Сначала завершите все проверки плана TikTok.");
+      return;
+    }
+    if (tiktokLaunchConfirmation.trim() !== "СОЗДАТЬ") {
+      setTikTokLaunchMessage("Введите «СОЗДАТЬ», чтобы подтвердить выключенный запуск.");
+      return;
+    }
+
+    const requestKey = tiktokLaunchRequestKey || globalThis.crypto.randomUUID();
+    if (!tiktokLaunchRequestKey) setTikTokLaunchRequestKey(requestKey);
+    setBusy("tiktok-launch", true);
+    setTikTokLaunchMessage("");
+    try {
+      const body = await adminCrmRequest<TikTokDisabledLaunchResult>(
+        `/api/crm/tiktok-launch?workspaceId=${encodeURIComponent(workspaceId)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...buildTikTokRequestPayload(),
+            idempotencyKey: requestKey,
+            confirm: true,
+            confirmationPhrase: tiktokLaunchConfirmation.trim(),
+          }),
+        },
+      );
+      if (!access.isCurrent()) return;
+      if (!body.data) throw new Error("TikTok не вернул итог безопасного запуска.");
+      setTikTokLaunchResult(body.data);
+      setTikTokLaunchMessage(body.data.message);
+      if (body.data.status === "created_disabled") {
+        toast.success("Реклама создана в TikTok выключенной");
+      } else {
+        toast.warning(body.data.message);
+      }
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      const message = error instanceof Error ? error.message : "Не удалось безопасно создать рекламу в TikTok.";
+      setTikTokLaunchMessage(message);
+      toast.error(message);
+    } finally {
+      setBusy("tiktok-launch", false);
+    }
+  }
+
+  async function checkAdCreativesStorage() {
+    if (!access.isCurrent()) return;
+    setBusy("adCreativesStorage", true);
+    try {
+      const body = await crmRequest<StorageHealth>("/api/crm/storage-health");
+      if (!access.isCurrent()) return;
+      const storage = body.data || {};
+      const ready = Boolean(storage.exists && storage.publicAccess && storage.publicUrlWorks);
+      const details = [
+        `bucket ${storage.bucket || "ad-creatives"}`,
+        storage.exists ? "создан" : "не найден",
+        storage.publicAccess ? "public access включён" : "public access не подтверждён",
+        storage.canUpload ? "upload доступен" : "upload не подтверждён",
+      ].join(" · ");
+
+      setIntegrationCards((cards) =>
+        cards.map((card) =>
+          card.key === "adCreativesStorage"
+            ? {
+                ...card,
+                status: ready ? "connected" : "error",
+                details,
+                hint: storage.hint,
+              }
+            : card,
+        ),
+      );
+      if (ready) {
+        toast.success("Storage ad-creatives готов");
+      } else {
+        toast.warning(storage.hint || "Проверьте bucket ad-creatives и public access.");
+      }
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      setIntegrationCards((cards) =>
+        cards.map((card) =>
+          card.key === "adCreativesStorage"
+            ? {
+                ...card,
+                status: "error",
+                details: error instanceof Error ? error.message : "Не удалось проверить Storage.",
+              }
+            : card,
+        ),
+      );
+      toast.error(error instanceof Error ? error.message : "Не удалось проверить Storage.");
+    } finally {
+      setBusy("adCreativesStorage", false);
+    }
+  }
+
+  async function checkAllIntegrations() {
+    if (!access.isCurrent()) return;
+    const data = await checkCrmHealth();
+    if (!access.isCurrent()) return;
+    if (data) setIntegrationCards(buildIntegrationCards(data));
+    await Promise.allSettled([checkTelegram(), checkTargetingAgent(), checkAdCreativesStorage(), checkTikTokAds()]);
+  }
+
+  async function runReleaseAutocheck() {
+    if (!access.isCurrent()) return;
+    setBusy("release-autocheck", true);
+    try {
+      const data = await checkCrmHealth();
+      if (!access.isCurrent()) return;
+      const targetingOk = await (async () => {
+        try {
+          const body = await crmRequest<Record<string, unknown>>("/api/targeting/health");
+          return body.success !== false;
+        } catch {
+          return false;
+        }
+      })();
+      if (!access.isCurrent()) return;
+      const telegramEnvConfigured = isProviderConfigured(data, "telegram");
+      const telegramOk = telegramEnvConfigured
+        ? await (async () => {
+            try {
+              const response = await crmFetch(withWorkspace("/api/content-studio/send-telegram", workspaceId), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ test: true }),
+              });
+              const body = await safeJson<Record<string, unknown>>(response);
+              return response.ok && body.success !== false;
+            } catch {
+              return false;
+            }
+          })()
+        : false;
+      if (!access.isCurrent()) return;
+
+      const autoResults: Record<string, { status: ReleaseStatus; notes: string }> = {
+        supabase_configured: {
+          status: isProviderConfigured(data, "supabase") ? "passed" : "failed",
+          notes: isProviderConfigured(data, "supabase") ? "Supabase env configured." : "SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing.",
+        },
+        vercel_env: {
+          status: isProviderConfigured(data, "vercelBasic") ? "passed" : "failed",
+          notes: isProviderConfigured(data, "vercelBasic") ? "Basic Vercel env detected." : "TARGETING_AGENT_URL missing.",
+        },
+        staff_auth_env: {
+          status: isProviderConfigured(data, "staffAuth") ? "passed" : "failed",
+          notes: isProviderConfigured(data, "staffAuth") ? "Staff auth server env configured." : "Staff auth needs Supabase service env.",
+        },
+        telegram_test: {
+          status: telegramOk ? "passed" : "failed",
+          notes: telegramEnvConfigured ? (telegramOk ? "Telegram test passed." : "Telegram env configured, but test failed.") : "Telegram env missing.",
+        },
+        targeting_health: {
+          status: targetingOk ? "passed" : "failed",
+          notes: targetingOk ? "Targeting Agent health passed." : "Targeting Agent health failed.",
+        },
+        openai_env: {
+          status: isProviderConfigured(data, "openai") ? "passed" : "pending",
+          notes: isProviderConfigured(data, "openai") ? "OpenAI env configured." : "Optional: OPENAI_API_KEY is not configured.",
+        },
+        meta_env: {
+          status: data?.meta?.configured ? "passed" : "pending",
+          notes: data?.meta?.configured ? "Meta env configured. Save non-secret config in Meta tab." : "Optional before real ads launch: Meta env incomplete.",
+        },
+        migrations_009_013: {
+          status: "pending",
+          notes: isProviderConfigured(data, "supabase") ? "Env configured. Apply SQL migrations manually in Supabase SQL editor." : "Configure Supabase before applying migrations.",
+        },
+        staff_login: {
+          status: "pending",
+          notes: "Manual check: sign in as a staff user through /login.",
+        },
+        appointments_tested: {
+          status: "pending",
+          notes: "Manual check: create and edit an appointment in /appointments.",
+        },
+      };
+
+      const next = releaseChecks.map((check) => {
+        const result = autoResults[check.checkKey];
+        return result ? { ...check, ...result } : check;
+      });
+      setReleaseChecks(next);
+      writeStored("negis_release_checks", next);
+      await Promise.allSettled(
+        next
+          .filter((check) => Boolean(autoResults[check.checkKey]))
+          .map((check) =>
+            crmRequest("/api/crm/release-checks", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                workspaceId,
+                checkKey: check.checkKey,
+                status: check.status,
+                notes: check.notes,
+                checkedAt: check.status === "passed" || check.status === "failed" ? new Date().toISOString() : null,
+              }),
+            }),
+          ),
+      );
+      if (!access.isCurrent()) return;
+      toast.success("Автопроверка релиза завершена");
+    } finally {
+      setBusy("release-autocheck", false);
+    }
+  }
+
+  async function prefillMetaFromEnv() {
+    if (!access.isCurrent()) return;
+    setBusy("meta-prefill", true);
+    try {
+      const data = health || (await checkCrmHealth());
+      if (!access.isCurrent()) return;
+      const meta = data?.meta;
+      if (!meta) {
+        toast.error("Meta env summary недоступен");
+        return;
+      }
+      const next: MetaAccount = {
+        ...metaAccount,
+        // The clinic's own stored record is the only source of these values now.
+        metaBusinessId: metaAccount.metaBusinessId,
+        adAccountId: metaAccount.adAccountId,
+        pageId: metaAccount.pageId,
+        instagramActorId: metaAccount.instagramActorId,
+        accountName: "Medina OS Meta Ads",
+        currency: "USD",
+        timezoneName: "Asia/Almaty",
+        status: "draft",
+        permissions: {
+          ...metaAccount.permissions,
+          appCreated: meta.hasAppSecret || metaAccount.permissions.appCreated,
+          adAccountConnected: Boolean(meta.adAccountConfigured) || metaAccount.permissions.adAccountConnected,
+          pageConnected: Boolean(meta.pageConfigured) || metaAccount.permissions.pageConnected,
+          instagramConnected: Boolean(meta.instagramActorConfigured) || metaAccount.permissions.instagramConnected,
+          manualApproval: true,
+        },
+      };
+      setMetaAccount(next);
+      toast.success("Meta поля заполнены из безопасных env");
+    } finally {
+      setBusy("meta-prefill", false);
+    }
+  }
+
+  async function checkMetaCityKey() {
+    if (!access.isCurrent()) return;
+    const city = getKzMetaCityOption(metaCityKeyInput);
+    if (!city.id) {
+      toast.error("Введите город для проверки");
+      return;
+    }
+
+    setBusy("meta-city-key", true);
+    try {
+      const body = await crmRequest<MetaCityKeyResult>(`/api/crm/meta-city-key?city=${encodeURIComponent(city.id)}`);
+      if (!access.isCurrent()) return;
+      const result = body.data || null;
+      setMetaCityKeyResult(result);
+      if (result?.key) {
+        toast.success(`Meta city key найден: ${result.key}`);
+      } else {
+        toast.warning(result?.warning || "City key не найден, будет использован Казахстан.");
+      }
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      toast.error(error instanceof Error ? error.message : "Не удалось проверить Meta city key");
+    } finally {
+      setBusy("meta-city-key", false);
+    }
+  }
+
+  async function saveClinicSettings() {
+    if (!access.isCurrent()) return;
+    writeStored("negis_clinic_settings", clinic);
+    setBusy("clinic", true);
+    try {
+      await crmRequest("/api/crm/admin-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId, key: "clinic", value: clinic }),
+      });
+      if (!access.isCurrent()) return;
+      toast.success("Настройки клиники сохранены");
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      toast.warning(error instanceof Error ? error.message : "Сохранено локально, Supabase недоступен");
+    } finally {
+      setBusy("clinic", false);
+    }
+  }
+
+  // The pending list is only meaningful on the staff tab, and it is the one
+  // place it can go stale while someone works elsewhere in the admin centre.
+  useEffect(() => {
+    if (activeTab !== "staff") return;
+    void loadStaff();
+    void loadInvitations();
+    void loadJoinRequests();
+    void loadJoinCode();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, workspaceId]);
+
+  // Счётчик ждущих нужен и ЗА пределами вкладки: писем в этом продукте нет, и
+  // без пилюли на кнопке админ узнаёт о заявке случайно, раз в неделю.
+  useEffect(() => {
+    if (serverAdminAuth.status !== "confirmed") return;
+    void loadJoinRequests();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverAdminAuth.status, workspaceId]);
+
+  // Ссылка с других экранов должна открывать нужную вкладку, а не «Обзор».
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const requested = new URLSearchParams(window.location.search).get("tab");
+    if (requested && visibleTabs.some((tab) => tab.id === requested)) setActiveTab(requested as AdminTab);
+  }, []);
+
+  async function loadJoinRequests() {
+    if (!access.isCurrent()) return;
+    try {
+      const body = await crmRequest<{ requests?: JoinRequestRow[] }>(
+        `/api/crm/staff-join-requests?workspaceId=${encodeURIComponent(workspaceId)}`,
+      );
+      if (!access.isCurrent()) return;
+      setJoinRequests({ state: "ready", value: body.data?.requests || [] });
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      if (error instanceof CrmApiError && error.code === "not_provisioned") setJoinNotProvisioned(true);
+      setJoinRequests({ state: error instanceof CrmApiError && error.status === 403 ? "denied" : "failed" });
+    }
+  }
+
+  async function loadJoinCode() {
+    if (!access.isCurrent()) return;
+    try {
+      const body = await crmRequest<{ code?: string | null }>(
+        `/api/crm/join-code?workspaceId=${encodeURIComponent(workspaceId)}`,
+      );
+      if (!access.isCurrent()) return;
+      setJoinCode({ state: "ready", value: body.data?.code ?? null });
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      if (error instanceof CrmApiError && error.code === "not_provisioned") setJoinNotProvisioned(true);
+      setJoinCode({ state: error instanceof CrmApiError && error.status === 403 ? "denied" : "failed" });
+    }
+  }
+
+  /**
+   * Выпуск и смена кода. Смена — намеренно с подтверждением: она мгновенно
+   * ломает код у всех, кому его уже продиктовали.
+   */
+  async function issueJoinCode() {
+    if (!access.isCurrent()) return;
+    const currentCode = joinCode.state === "ready" ? joinCode.value : null;
+    if (currentCode) {
+      const confirmed = window.confirm(
+        `${isMortgage ? "Сменить код пространства?" : "Сменить код клиники?"}\n\nСтарый перестанет работать сразу, и всем, кому вы его называли, придётся сообщить новый. Уже поданные заявки и работающие сотрудники не пострадают.`,
+      );
+      if (!confirmed) return;
+    }
+    setBusy("joinCode", true);
+    try {
+      const body = await crmRequest<{ code?: string; concurrent?: boolean }>(`/api/crm/join-code?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!access.isCurrent()) return;
+      setJoinCode({ state: "ready", value: body.data?.code ?? null });
+      toast.success(body.data?.concurrent
+        ? "Код уже сменили в другой вкладке — на экране действующий"
+        : currentCode ? "Код сменён" : "Код выпущен");
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      toast.error(staffErrorText(error, "Не удалось выпустить код"));
+    } finally {
+      setBusy("joinCode", false);
+    }
+  }
+
+  async function decideJoinRequest(request: JoinRequestRow, decision: "approve" | "reject") {
+    if (!access.isCurrent()) return;
+    if (decision === "approve" && !decisionRole) {
+      toast.error("Выберите роль — без неё нельзя одобрить.");
+      return;
+    }
+    if (decision === "reject") {
+      const confirmed = window.confirm(`Отклонить заявку от ${request.fullName || request.email}?
+
+Человек увидит отказ и сможет подать заново через сутки.`);
+      if (!confirmed) return;
+    }
+    setBusy("staff", true);
+    try {
+      const body = await crmRequest<{ outcome?: string; alreadyMember?: boolean }>(
+        `/api/crm/staff-join-requests?workspaceId=${encodeURIComponent(workspaceId)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: request.id, decision, ...(decision === "approve" ? { role: decisionRole } : {}) }),
+        },
+      );
+      if (!access.isCurrent()) return;
+      const who = request.fullName || request.email;
+      if (decision === "reject") {
+        toast.success("Заявка отклонена. Человек увидит отказ и сможет подать заново.");
+      } else if (body.data?.outcome === "already") {
+        // Сервер роль НЕ переписал: тихое повышение или понижение хуже отказа.
+        // Тост обязан сказать правду, иначе админ уверен, что выдал другую.
+        toast.success(`${who} уже в команде — заявка закрыта. Роль осталась прежней: меняйте её в таблице слева.`);
+      } else if (body.data?.outcome === "revived") {
+        toast.success(`${who} снова в команде — роль «${roleTitles[decisionRole as StaffRole]}». Он войдёт своей почтой и паролем.`);
+      } else {
+        toast.success(`${who} в команде — роль «${roleTitles[decisionRole as StaffRole]}». Он войдёт своей почтой и паролем.`);
+      }
+      setDecidingRequestId(null);
+      setDecisionRole("");
+      await Promise.all([loadJoinRequests(), loadStaff(), loadInvitations()]);
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      toast.error(staffErrorText(error, "Не удалось обработать заявку"));
+      // Обновить список обязательно: чаще всего отказ означает, что заявку уже
+      // решил коллега, а карточка с кнопками так и висела бы на экране.
+      await loadJoinRequests();
+    } finally {
+      setBusy("staff", false);
+    }
+  }
+
+  /**
+   * Пачка логинов и паролей.
+   *
+   * Сервер намеренно НЕ получает списка: каждая строка идёт отдельным запросом
+   * тем же маршрутом, что и одиночное заведение. Так пачка не заводит второй
+   * набор проверок, каждая строка получает честный исход (заведён / почта
+   * занята — выписано приглашение / отказ), и частичный провал не выглядит как
+   * общий. Последовательно, а не пачкой параллельных: двадцать одновременных
+   * созданий аккаунтов — это то, за что Supabase отвечает 429.
+   */
+  async function createStaffBatch() {
+    if (!access.isCurrent()) return;
+    // Строка на человека, четыре допустимых формы:
+    //   «Айгуль Ботанова»            — логин сделаем из имени
+    //   «Айгуль Ботанова, aigul»     — логин задан явно
+    //   «aigul@mail.ru»              — настоящая почта
+    //   «aigul@mail.ru, Айгуль»      — почта и имя
+    const rows = batchEmails
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const parts = line.split(/[,;	]/).map((part) => part.trim()).filter(Boolean);
+        const emailPart = parts.find((part) => part.includes("@")) || "";
+        const rest = parts.filter((part) => part !== emailPart);
+        if (emailPart) {
+          return { source: line, email: emailPart.toLowerCase(), login: "", fullName: rest.join(" ") };
+        }
+        // Без «@» первая часть — имя, вторая (если есть) — желаемый логин.
+        const fullName = parts[0] || "";
+        // Второй кусок — ЖЕЛАЕМЫЙ ЛОГИН, его нормализуют, а не транслитерируют
+        // как имя: иначе «Дана Ким, dana.k» завела бы «danak».
+        const login = parts[1] ? normalizeLogin(parts[1]) : loginFromFullName(fullName);
+        return { source: line, email: "", login, fullName };
+      })
+      .filter((row) => row.email || row.login);
+
+    // Дедуп ТОЛЬКО по почте: один адрес — точно один человек. Одинаковые ИМЕНА
+    // — обычное дело, и две «Дана Ким» это две разные женщины; выбросить вторую
+    // значило бы раздать девятнадцать паролей вместо двадцати и узнать об этом
+    // в смену. Столкновение логинов разрешает сервер хвостом.
+    const unique = rows.filter((row, index) => {
+      if (!row.email) return true;
+      return rows.findIndex((other) => other.email === row.email) === index;
+    });
+    const dropped = rows.length - unique.length;
+
+    if (unique.length === 0) {
+      toast.error("Вставьте имена или почты — по одному человеку в строке");
+      return;
+    }
+    if (unique.length > 30) {
+      toast.error("За раз — не больше 30 человек: пароли нужно успеть раздать");
+      return;
+    }
+    if ((batchResults ?? []).some((row) => row.kind === "created")) {
+      const confirmed = window.confirm(
+        "На экране остались логины и пароли прошлой пачки. Начать новую? Старый список исчезнет — если вы его ещё не раздали, сначала скопируйте.",
+      );
+      if (!confirmed) return;
+    }
+
+    setBusy("staffBatch", true);
+    setBatchResults([]);
+    const results: BatchStaffResult[] = [];
+    try {
+      for (const row of unique) {
+        if (!access.isCurrent()) return;
+        const password = generateStaffPassword();
+        const payload = row.email
+          ? { email: row.email, role: batchRole, fullName: row.fullName || row.email.split("@")[0], password }
+          : { login: row.login, role: batchRole, fullName: row.fullName || row.login, password };
+        try {
+          const response = await crmFetch(`/api/crm/staff-credentials?workspaceId=${encodeURIComponent(workspaceId)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const body = await safeJson<{ acceptUrl?: string; login?: string }>(response);
+          if (!access.isCurrent()) return;
+          const code = typeof (body as { code?: unknown }).code === "string" ? (body as { code: string }).code : "request_failed";
+          if (response.ok && body.success !== false) {
+            // Печатаем то, что ВЫДАЛ сервер: при столкновении логин получил
+            // хвост, и «aigul» на бумажке никуда бы не пустил.
+            results.push({ source: row.source, login: body.data?.login || row.login || row.email, kind: "created", password });
+          } else if (body.data?.acceptUrl) {
+            results.push({ source: row.source, login: row.email, kind: "invited", acceptUrl: body.data.acceptUrl });
+          } else {
+            // Аккаунт СОЗДАН, а членство нет: пароль всё ещё действует, и он
+            // единственный способ этому человеку войти. Для логина это тем
+            // важнее — письма-восстановления у него нет вовсе.
+            const accountExists = code === "partial_staff_credentials" || code === "staff_credentials_unreadable";
+            results.push({
+              source: row.source,
+              login: body.data?.login || row.login || row.email,
+              kind: "failed",
+              ...(accountExists ? { password } : {}),
+              error: staffErrorText(new CrmApiError(response.status, code, body.error || ""), "Отказ"),
+            });
+          }
+        } catch (error) {
+          if (!access.isCurrent()) return;
+          results.push({ source: row.source, login: row.login || row.email, kind: "failed", error: staffErrorText(error, "Отказ") });
+        }
+        setBatchResults([...results]);
+      }
+      const created = results.filter((row) => row.kind === "created").length;
+      const invited = results.filter((row) => row.kind === "invited").length;
+      const failed = results.filter((row) => row.kind === "failed").length;
+      const summary = `Готово: заведено ${created}, приглашений ${invited}, отказов ${failed}${dropped > 0 ? `, повторов почты пропущено ${dropped}` : ""}`;
+      if (failed === 0) {
+        toast.success(summary);
+        setBatchEmails("");
+      } else {
+        toast.warning(`${summary}. Список оставлен в поле — уберите прошедших и повторите.`);
+      }
+      await Promise.all([loadStaff(), loadInvitations()]);
+    } finally {
+      setBusy("staffBatch", false);
+    }
+  }
+
+  async function copyBatchCredentials() {
+    if (!access.isCurrent()) return;
+    const rows = (batchResults ?? []).filter((row) => row.kind === "created" && row.password);
+    if (rows.length === 0) return;
+    try {
+      // С именем: раздают это по одному человеку в мессенджере, и без имени
+      // администратор не знает, кому какой пароль.
+      await navigator.clipboard.writeText(
+        rows.map((row) => `${row.source} — логин ${row.login}, пароль ${row.password}`).join("\n"),
+      );
+      if (!access.isCurrent()) return;
+      toast.success("Скопировано");
+    } catch {
+      if (!access.isCurrent()) return;
+      // Буфер недоступен — таблица на экране, её можно переписать руками.
+      toast.error("Буфер недоступен — перепишите с экрана");
+    }
+  }
+
+  async function loadInvitations() {
+    if (!access.isCurrent()) return;
+    try {
+      const body = await crmRequest<{ invitations?: StaffInvitation[] }>(
+        `/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`,
+      );
+      if (!access.isCurrent()) return;
+      setInvitations(body.data?.invitations || []);
+    } catch {
+      if (!access.isCurrent()) return;
+      // A clinic without the enrollment table yet simply has no invitations.
+      setInvitations([]);
+    }
+  }
+
+  async function sendInvitation() {
+    if (!access.isCurrent()) return;
+    const email = inviteForm.email.trim().toLowerCase();
+    if (!email) {
+      toast.error("Укажите email сотрудника");
+      return;
+    }
+
+    setBusy("staff", true);
+    try {
+      const body = await crmRequest<{ invitation?: StaffInvitation; acceptUrl?: string; emailSent?: boolean; emailStatus?: string }>(
+        `/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, role: inviteForm.role }),
+        },
+      );
+      if (!access.isCurrent()) return;
+      setIssuedInvite({
+        email,
+        acceptUrl: body.data?.acceptUrl || "",
+        emailSent: Boolean(body.data?.emailSent),
+        emailStatus: body.data?.emailStatus || "",
+      });
+      setInviteForm({ email: "", role: defaultStaffRole });
+      await loadInvitations();
+      if (!access.isCurrent()) return;
+      toast.success(body.data?.emailSent ? "Приглашение отправлено" : "Приглашение создано — передайте ссылку");
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      // No local fallback: an invitation that only exists in this browser would
+      // be a person who believes they have access and does not.
+      toast.error(staffErrorText(error, "Не удалось создать приглашение"));
+    } finally {
+      setBusy("staff", false);
+    }
+  }
+
+  /**
+   * Заведение сотрудника с паролем — когда письмо-приглашение не доходит.
+   *
+   * Пароль уходит одним запросом и остаётся в состоянии экрана, чтобы
+   * администратор успел его передать: сервер пароль не возвращает и не хранит.
+   */
+  async function createStaffWithPassword() {
+    if (!access.isCurrent()) return;
+    const entered = inviteForm.email.trim();
+    if (!entered || !staffPassword) {
+      toast.error("Нужны логин (или почта) и пароль сотрудника");
+      return;
+    }
+    // С «@» — настоящая почта; без — логин. Сервер сам сделает служебный адрес
+    // и вернёт ВЫДАННЫЙ логин: при столкновении он получит короткий хвост.
+    const usesLogin = !entered.includes("@");
+    const payload = usesLogin
+      // Введённое БЕЗ «@» — это логин, а не имя: normalizeLogin сохраняет точку
+      // и приводит дефис к точке, тогда как loginFromFullName точку выбрасывает
+      // (он для имён). Админ, набравший «aigul.b», получал бы «aigulb» и
+      // диктовал сотруднице логин, которого нет.
+      ? { login: normalizeLogin(entered) || loginFromFullName(entered), role: inviteForm.role, fullName: staffFullName.trim() || entered, password: staffPassword }
+      : { email: entered.toLowerCase(), role: inviteForm.role, fullName: staffFullName.trim(), password: staffPassword };
+
+    setBusy("staff", true);
+    try {
+      const response = await crmFetch(`/api/crm/staff-credentials?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const responseBody = await safeJson<{ acceptUrl?: string; staff?: unknown; login?: string; email?: string }>(response);
+      if (!access.isCurrent()) return;
+      if (!response.ok || responseBody.success === false) {
+        // Занятая почта — не тупик: сервер уже выписал приглашение, и ссылка
+        // приходит вместе с отказом. Показываем её тем же блоком, что и у
+        // обычного приглашения, — передать её можно прямо сейчас.
+        if (responseBody.data?.acceptUrl) {
+          setIssuedInvite({ email: entered.toLowerCase(), acceptUrl: responseBody.data.acceptUrl, emailSent: false, emailStatus: "already_registered" });
+          setStaffMode("invite");
+          await loadInvitations();
+          if (!access.isCurrent()) return;
+        }
+        const code = typeof (responseBody as { code?: unknown }).code === "string" ? (responseBody as { code: string }).code : "request_failed";
+        throw new CrmApiError(response.status, code, responseBody.error || `HTTP ${response.status}`);
+      }
+      // Показываем то, что выдал СЕРВЕР, а не то, что отправили.
+      const issued = responseBody.data?.login || responseBody.data?.email || entered;
+      setCreatedStaff({ email: issued, password: staffPassword, kind: "created" });
+      setStaffPassword("");
+      setStaffFullName("");
+      setInviteForm({ email: "", role: defaultStaffRole });
+      await Promise.all([loadStaff(), loadInvitations()]);
+      if (!access.isCurrent()) return;
+      toast.success("Сотрудник добавлен — передайте ему логин и пароль");
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      toast.error(staffErrorText(error, "Не удалось добавить сотрудника"));
+    } finally {
+      setBusy("staff", false);
+    }
+  }
+
+  /**
+   * Новый пароль сотруднику, который уже в команде.
+   *
+   * Забытый пароль иначе чинится только письмом «Забыли пароль?» — тем самым
+   * каналом, который до клиник не доходит. Пароль показывается один раз тем же
+   * блоком, что и при заведении: сервер его не возвращает и не хранит.
+   */
+  async function resetStaffPassword(member: StaffMember) {
+    if (!access.isCurrent()) return;
+    // Подтверждение обязательно: смена мгновенно ломает пароль, которым
+    // сотрудник пользуется прямо сейчас. Случайный клик по соседней кнопке
+    // (на телефоне они рядом) выкинул бы человека из системы посреди смены.
+    const confirmed = window.confirm(
+      `Задать новый пароль для ${member.name || member.email}?\n\nСтарый перестанет работать сразу. Новый покажется один раз — передайте его лично.`,
+    );
+    if (!confirmed) return;
+
+    const password = generateStaffPassword();
+    setBusy("staff", true);
+    try {
+      await crmRequest(`/api/crm/staff-credentials?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ staffUserId: member.id, password }),
+      });
+      if (!access.isCurrent()) return;
+      setCreatedStaff({ email: member.email, password, kind: "reset" });
+      setStaffMode("password");
+      toast.success("Пароль задан — передайте его сотруднику");
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      // Обрыв связи не означает, что пароль НЕ применён: Supabase мог успеть
+      // его записать, и тогда старый уже не работает, а нового не знает никто.
+      // У входа по логину письма-подстраховки нет, поэтому пароль остаётся на
+      // экране с честной оговоркой, а не выбрасывается вместе с ошибкой.
+      const networkFailure = !(error instanceof CrmApiError);
+      if (networkFailure) {
+        setCreatedStaff({ email: member.email, password, kind: "reset" });
+        setStaffMode("password");
+        toast.warning("Ответ не получен — пароль мог уже примениться. Он показан ниже: передайте его и проверьте вход.");
+      } else {
+        toast.error(staffErrorText(error, "Не удалось задать пароль"));
+      }
+    } finally {
+      setBusy("staff", false);
+    }
+  }
+
+  async function copyStaffCredentials() {
+    if (!access.isCurrent()) return;
+    if (!createdStaff) return;
+    try {
+      await navigator.clipboard.writeText(`Логин: ${loginFromEmail(createdStaff.email)}\nПароль: ${createdStaff.password}`);
+      if (!access.isCurrent()) return;
+      toast.success("Скопировано");
+    } catch {
+      // Буфер недоступен — данные на экране, их можно переписать руками.
+    }
+  }
+
+  async function revokeInvitation(id: string) {
+    if (!access.isCurrent()) return;
+    try {
+      await crmRequest(`/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      await loadInvitations();
+      if (!access.isCurrent()) return;
+      toast.success("Приглашение отозвано");
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      toast.error(staffErrorText(error, "Не удалось отозвать приглашение"));
+    }
+  }
+
+  /**
+   * Перевыпуск ссылки сотруднику: отзыв старой + новая одним действием.
+   *
+   * Ссылка показывается один раз (в базе только хэш), а доставка идёт через
+   * мессенджеры, где она теряется. Без этого владелец салона упирался в
+   * «приглашение уже выслано» и не имел выхода: отзывать он должен был руками,
+   * не понимая связи.
+   */
+  async function reissueInvitation(invitation: StaffInvitation) {
+    if (!access.isCurrent()) return;
+    setBusy("staff", true);
+    try {
+      await crmRequest(`/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: invitation.id }),
+      });
+      if (!access.isCurrent()) return;
+      const body = await crmRequest<{ acceptUrl?: string; emailSent?: boolean; emailStatus?: string }>(
+        `/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: invitation.email, role: invitation.role }),
+        },
+      );
+      if (!access.isCurrent()) return;
+      setIssuedInvite({
+        email: invitation.email,
+        acceptUrl: body.data?.acceptUrl || "",
+        emailSent: Boolean(body.data?.emailSent),
+        emailStatus: body.data?.emailStatus || "",
+      });
+      await loadInvitations();
+      if (!access.isCurrent()) return;
+      toast.success("Ссылка перевыпущена — прежняя больше не работает");
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      // Отзыв мог пройти, а выписка — нет: обещать «старая ещё работает» нельзя.
+      toast.error(staffErrorText(error, "Не удалось перевыпустить приглашение. Проверьте список ниже."));
+    } finally {
+      setBusy("staff", false);
+    }
+  }
+
+  async function loadStaff() {
+    if (!access.isCurrent()) return;
+    try {
+      const body = await crmRequest<{ staff?: StaffMember[]; items?: StaffMember[] }>(
+        `/api/crm/staff?workspaceId=${encodeURIComponent(workspaceId)}`,
+      );
+      if (!access.isCurrent()) return;
+      setStaff(body.data?.staff || body.data?.items || []);
+    } catch {
+      if (!access.isCurrent()) return;
+      // An administrator who cannot read the team is shown an empty table
+      // rather than a plausible-looking one.
+      setStaff([]);
+    }
+  }
+
+  async function updateStaffStatus(id: string, status: string) {
+    if (!access.isCurrent()) return;
+    try {
+      await crmRequest(`/api/crm/staff?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, status }),
+      });
+      await loadStaff();
+      if (!access.isCurrent()) return;
+      toast.success(status === "active" ? "Сотрудник активирован" : "Доступ приостановлен");
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      // No local edit on failure: the previous behaviour changed the row in
+      // this browser only, so a suspended colleague kept working.
+      toast.error(staffErrorText(error, "Не удалось изменить статус"));
+    }
+  }
+
+  /**
+   * Смена роли принятого сотрудника.
+   *
+   * Сервер это умел с самого начала (staffPatchRejection валидирует роль,
+   * запрещает самоповышение и выдачу роли не ниже своей), но ни один экран не
+   * вызывал — повысить регистратора до менеджера владелец салона не мог
+   * никак: обходной путь «пригласить заново» закрыт проверкой already_member.
+   */
+  async function updateStaffRole(id: string, role: StaffRole) {
+    if (!access.isCurrent()) return;
+    try {
+      await crmRequest(`/api/crm/staff?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, role }),
+      });
+      await loadStaff();
+      if (!access.isCurrent()) return;
+      toast.success(`Роль изменена: ${roleTitles[role]}`);
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      toast.error(staffErrorText(error, "Не удалось изменить роль"));
+    }
+  }
+
+  async function saveAiProvider(provider: AiProviderSetting) {
+    if (!access.isCurrent()) return;
+    const next = aiProviders.map((item) => (item.id === provider.id ? provider : item));
+    setAiProviders(next);
+    writeStored("negis_ai_provider_settings", next);
+    setBusy(`ai-${provider.id}`, true);
+    try {
+      await crmRequest("/api/crm/ai-providers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          provider: provider.provider,
+          purpose: provider.purpose,
+          enabled: provider.enabled,
+          modelName: provider.modelName,
+          config: { module: provider.module, status: provider.status },
+        }),
+      });
+      if (!access.isCurrent()) return;
+      toast.success(`${provider.label} сохранен`);
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      toast.warning(error instanceof Error ? error.message : "Сохранено локально");
+    } finally {
+      setBusy(`ai-${provider.id}`, false);
+    }
+  }
+
+  async function saveMetaConfig(status: Status = metaAccount.status) {
+    if (!access.isCurrent()) return;
+    const next = { ...metaAccount, status };
+    setMetaAccount(next);
+    writeStored("negis_meta_account", next);
+    setBusy("meta", true);
+    try {
+      const body = await crmRequest("/api/crm/meta-accounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          ...next,
+          metadata: { permissions: next.permissions, manualApprovalOnly: true, liveLaunchEnabled: metaLiveLaunchEnabled },
+        }),
+      });
+      if (!access.isCurrent()) return;
+      const mode = body.mode === "supabase" ? "supabase" : "local";
+      setMetaConfigMode(mode);
+      writeStored("negis_meta_config_save_mode", mode);
+      toast.success("Meta config сохранен без secret token");
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      setMetaConfigMode("local");
+      writeStored("negis_meta_config_save_mode", "local");
+      toast.warning(error instanceof Error ? error.message : "Meta config сохранен локально");
+    } finally {
+      setBusy("meta", false);
+    }
+  }
+
+  async function saveMetaLiveLaunchEnabled(enabled: boolean) {
+    if (!access.isCurrent()) return;
+    setMetaLiveLaunchEnabled(enabled);
+    writeStored("negis_meta_live_launch_enabled", enabled);
+    setBusy("meta-live-launch", true);
+    try {
+      await crmRequest("/api/crm/admin-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          key: "meta_live_launch_enabled",
+          value: {
+            enabled,
+            updatedAt: new Date().toISOString(),
+            note: "Controls ACTIVE Meta launch from /ads-automation",
+          },
+        }),
+      });
+      if (!access.isCurrent()) return;
+      toast.success(enabled ? "Live launch разрешен" : "Live launch выключен");
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      toast.warning(error instanceof Error ? error.message : "Live launch сохранен локально");
+    } finally {
+      setBusy("meta-live-launch", false);
+    }
+  }
+
+  async function saveReleaseCheck(check: ReleaseCheck) {
+    if (!access.isCurrent()) return;
+    const next = releaseChecks.map((item) => (item.checkKey === check.checkKey ? check : item));
+    setReleaseChecks(next);
+    writeStored("negis_release_checks", next);
+    setBusy(`release-${check.checkKey}`, true);
+    try {
+      await crmRequest("/api/crm/release-checks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          checkKey: check.checkKey,
+          status: check.status,
+          notes: check.notes,
+          checkedAt: check.status === "passed" || check.status === "failed" ? new Date().toISOString() : null,
+        }),
+      });
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      toast.warning(error instanceof Error ? error.message : "Release check сохранен локально");
+    } finally {
+      setBusy(`release-${check.checkKey}`, false);
+    }
+  }
+
+  async function copyEnvList() {
+    if (!access.isCurrent()) return;
+    const text = envList.join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      if (!access.isCurrent()) return;
+      toast.success("Список env скопирован");
+    } catch {
+      if (!access.isCurrent()) return;
+      toast.error("Не удалось скопировать автоматически");
+    }
+  }
+
+  async function copyInviteLink() {
+    if (!access.isCurrent()) return;
+    if (!issuedInvite?.acceptUrl) return;
+    try {
+      await navigator.clipboard.writeText(issuedInvite.acceptUrl);
+      if (!access.isCurrent()) return;
+      toast.success("Ссылка скопирована");
+    } catch {
+      if (!access.isCurrent()) return;
+      toast.error("Не удалось скопировать автоматически");
+    }
+  }
+
+  function renderMortgageWhatsApp() {
+    if (!hasMortgageChannelAccess || !access.isCurrent()) return null;
+    return (
+      <div className="space-y-5" data-testid="mortgage-whatsapp-channels">
+        <section className="neu-card flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <h2 className="text-lg font-black text-[#0F172A]">WhatsApp: ипотечные заявки</h2>
+          <button type="button" className="neu-btn w-full justify-center sm:w-auto" onClick={() => void loadMortgageChannels()}
+            disabled={mortgageChannelsLoading || mortgageChannelBusy !== null}>
+            <RefreshCw size={16} />Обновить
+          </button>
+        </section>
+        {mortgageChannelsLoading && <p role="status" className="text-sm text-[#64748B]">Загружаем состояние каналов…</p>}
+        {mortgageChannelsError && <p role="alert" className="text-sm text-[#DC2626]">{mortgageChannelsError}</p>}
+        {!mortgageChannelsLoading && mortgageChannels?.length === 0 && (
+          <p className="text-sm text-[#64748B]">WhatsApp пока не подключён к этому пространству.</p>
+        )}
+        {mortgageChannels && mortgageChannels.length > 0 && <div className="grid gap-4 lg:grid-cols-2">
+          {mortgageChannels.map((channel) => (
+            <section key={`${channel.provider}:${channel.id}`} className="neu-card min-w-0">
+              <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#ECFDF5] text-[#059669]">
+                    <MessageCircle size={18} />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="break-all font-black text-[#0F172A]">WhatsApp {channel.keyMasked}</p>
+                    <p className="text-xs text-[#64748B]">{channel.provider === "wazzup" ? "через Wazzup" : "напрямую от WhatsApp"}</p>
+                  </div>
+                </div>
+                <span className={`rounded-full px-3 py-1 text-xs font-bold ${channel.enabled ? "bg-[#ECFDF5] text-[#059669]" : "bg-[#F1F5F9] text-[#64748B]"}`}>
+                  {channel.enabled ? "Приём включён" : "Выключен"}
+                </span>
+              </div>
+              <dl className="grid grid-cols-3 gap-3 text-center">
+                <div className="min-w-0"><dt className="text-xs text-[#64748B]">Заявок</dt><dd className="break-words text-lg font-black text-[#0F172A]">{channel.leadsFiled}</dd></div>
+                <div className="min-w-0"><dt className="text-xs text-[#64748B]">Повторных</dt><dd className="break-words text-lg font-black text-[#0F172A]">{channel.repeatsSeen}</dd></div>
+                <div className="min-w-0"><dt className="text-xs text-[#64748B]">Последнее</dt><dd className="break-words text-sm font-bold text-[#0F172A]">{formatAdminDateTime(channel.lastInboundAt)}</dd></div>
+              </dl>
+              {channel.enabled && <button type="button" className="neu-btn mt-4 w-full justify-center"
+                disabled={mortgageChannelBusy !== null} onClick={() => void disableMortgageChannel(channel)}>
+                {mortgageChannelBusy === `${channel.provider}:${channel.id}` ? <Loader2 className="animate-spin" size={16} /> : <Power size={16} />}
+                Выключить приём заявок
+              </button>}
+            </section>
+          ))}
+        </div>}
+      </div>
+    );
+  }
+
+  function renderOverview() {
+    // Плитки «CRM записей» и «Сегодня записей» удалены: они считали
+    // demo-localStorage, в который реальная клиника не пишет, и показывали
+    // владельцу нули при живой работе. Ложная цифра хуже отсутствующей —
+    // настоящие счётчики уже есть на Главной и в Аналитике.
+    const connected = integrationCards.filter((card) => ["configured", "connected", "demo"].includes(card.status)).length;
+
+    return (
+      <div className="space-y-5">
+        {/* Commercial-1: платформенная готовность живёт во внутреннем разделе
+            диагностики; клиника видит только состояние интеграций и команду. */}
+        {/* Писем в этом продукте нет, поэтому о заявке админ узнаёт только с
+            экрана. «Обзор» — вкладка, на которую он попадает, открыв настройки:
+            плашка здесь и есть уведомление. */}
+        {pendingJoinRequests.length > 0 && (
+          <button
+            type="button"
+            className="flex w-full items-center justify-between gap-3 rounded-2xl border border-[#FECACA] bg-[#FEF2F2] px-4 py-3 text-left"
+            onClick={() => setActiveTab("staff")}
+          >
+            <span className="text-sm font-semibold text-[#B91C1C]">
+              {pendingJoinRequests.length === 1
+                ? "1 человек просит доступ в клинику"
+                : `${pendingJoinRequests.length} человека просят доступ в клинику`}
+            </span>
+            <span className="text-sm font-semibold text-[#B91C1C] underline">Посмотреть заявки</span>
+          </button>
+        )}
+        <div className="grid gap-4 sm:grid-cols-2">
+          <MetricCard label="Состояние интеграций" value={`${connected}/${integrationCards.length}`} icon={Database} tone="info" />
+          <MetricCard label="Сотрудники" value={staff.length} icon={Users} tone="primary" />
+        </div>
+        <div className="grid gap-5 lg:grid-cols-3">
+          <section className="neu-card lg:col-span-2">
+            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="text-lg font-black text-[#0F172A]">Готовность к тестовому дню</h2>
+                <p className="mt-1 text-sm text-[#64748B]">
+                  {readiness.complete ? "Платформа готова к тестовой работе сотрудников." : "Есть блокеры, которые нужно закрыть перед сменой."}
+                </p>
+              </div>
+              <button type="button" className="neu-btn-primary w-full sm:w-auto" onClick={() => setActiveTab("release")}>
+                <ClipboardCheck size={16} />
+                Открыть checklist
+              </button>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-1">
+              <StatusTile title="AI-модули" value={`${aiProviders.filter((item) => item.enabled).length}/${aiProviders.length}`} />
+            </div>
+          </section>
+          <section className="neu-card">
+            <h2 className="text-lg font-black text-[#0F172A]">Быстрые действия</h2>
+            <div className="mt-4 grid gap-2">
+              <button type="button" className="neu-btn w-full justify-center" onClick={() => setActiveTab("integrations")}>
+                <Database size={16} />
+                Проверить интеграции
+              </button>
+              {hasStaffManagementAccess && (
+                <button type="button" className="neu-btn w-full justify-center" onClick={() => setActiveTab("staff")}>
+                  <UserPlus size={16} />
+                  Добавить сотрудника
+                </button>
+              )}
+              <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/ads-automation")}>
+                <Rocket size={16} />
+                AI запуск рекламы
+              </button>
+            </div>
+          </section>
+        </div>
+      </div>
+    );
+  }
+
+  function renderStaff() {
+    if (!hasStaffManagementAccess) return null;
+    const actorRole: StaffRole = serverAdminAuth.role || "admin";
+    const actorStaffUserId = serverAdminAuth.staffUserId || "";
+    // Роли ниже своей — те, что сервер примет; owner недоступен никому.
+    const assignableRoles = workspaceStaffRoles.filter((role) => canAssignRole(actorRole, role));
+    const statusText = (status: string) => (status === "active" ? "работает" : status === "paused" ? "на паузе" : status);
+    // Своя строка и строка владельца (для админа) не редактируются: сервер
+    // такие запросы отклоняет, и кнопка обещала бы невозможное.
+    const canEdit = (member: StaffMember) =>
+      member.id !== actorStaffUserId && (member.role !== "owner" || actorRole === "owner");
+    const staffSectionClass = isMortgage ? "min-w-0 border-t border-[var(--negis-border)] pt-5" : "neu-card min-w-0";
+    const staffHeadingClass = isMortgage ? "text-base font-semibold text-[var(--negis-text)]" : "text-lg font-black text-[#0F172A]";
+    const staffModeClass = (selected: boolean) => isMortgage
+      ? `flex min-h-10 min-w-0 flex-1 items-center justify-center rounded-lg border px-3 py-2 text-sm font-medium transition-colors max-sm:min-h-11 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--negis-primary)] ${selected
+        ? "border-[var(--negis-mint)] bg-[var(--negis-mint)] text-[var(--negis-mint-ink)]"
+        : "border-[var(--negis-border)] bg-white text-[var(--negis-text-2)] hover:bg-[var(--negis-surface-2)]"}`
+      : selected ? "neu-btn-primary flex-1 justify-center" : "neu-btn flex-1 justify-center";
+
+    return (
+      <div className={isMortgage ? "grid min-w-0 items-start gap-6 xl:grid-cols-3" : "grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]"}>
+        <section className={isMortgage ? "min-w-0 xl:col-span-3" : "neu-card min-w-0"}>
+          <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <h2 className={staffHeadingClass}>{isMortgage ? "Команда" : "Сотрудники"}</h2>
+              <p className="text-sm text-[#64748B]">{isMortgage
+                ? "Доступы выдаются по ролям. У каждого участника команды свой логин и пароль."
+                : "Доступы выдаются по ролям. Каждый входит со своим паролем — пароли за сотрудников не создаются."}</p>
+            </div>
+            <span className={isMortgage ? "w-fit shrink-0 rounded-md bg-[var(--negis-mint-soft)] px-2.5 py-1 text-xs font-medium tabular-nums text-[var(--negis-mint-ink)]" : "rounded-full bg-[#E0F2FE] px-3 py-1 text-xs font-bold text-[#0369A1]"}>Профилей: {staff.length}</span>
+          </div>
+          <div className="grid gap-3 md:hidden">
+            {staff.map((member) => (
+              <article key={member.id} className={isMortgage ? "min-w-0 rounded-lg border border-[var(--negis-border)] bg-white p-4" : "rounded-2xl border border-[#E2E8F0] bg-white/70 p-4"}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 break-words">
+                    <h3 className="font-semibold text-[var(--negis-text)]">{member.name}</h3>
+                    <p className="mt-1 break-all text-sm text-[#64748B]">{loginFromEmail(member.email)}</p>
+                    <p className="mt-1 text-xs text-[#64748B]">{roleTitles[member.role]}</p>
+                  </div>
+                  <StatusPill compact={isMortgage} status={member.status === "active" ? "configured" : "partial"} label={statusText(member.status)} />
+                </div>
+                {canEdit(member) ? (
+                  <>
+                    {assignableRoles.length > 0 ? (
+                      <select
+                        className="neu-input mt-3 w-full"
+                        value={assignableRoles.includes(member.role) ? member.role : ""}
+                        onChange={(event) => updateStaffRole(member.id, event.target.value as StaffRole)}
+                        aria-label={`Роль: ${member.name}`}
+                      >
+                        {!assignableRoles.includes(member.role) ? <option value="" disabled={isMortgage}>{roleTitles[member.role]}</option> : null}
+                        {assignableRoles.map((role) => (
+                          <option key={role} value={role}>{roleTitles[role]}</option>
+                        ))}
+                      </select>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="neu-btn mt-3 w-full justify-center"
+                      onClick={() => updateStaffStatus(member.id, member.status === "active" ? "paused" : "active")}
+                    >
+                      {member.status === "active" ? "Поставить на паузу" : "Активировать"}
+                    </button>
+                    <button
+                      type="button"
+                      className="neu-btn mt-2 w-full justify-center"
+                      disabled={loading.staff}
+                      onClick={() => resetStaffPassword(member)}
+                    >
+                      Новый пароль
+                    </button>
+                  </>
+                ) : (
+                  <p className="mt-3 text-xs text-[#94A3B8]">{member.id === actorStaffUserId ? "Это вы" : "Строку владельца меняет только владелец"}</p>
+                )}
+              </article>
+            ))}
+          </div>
+          <div className={isMortgage ? "medina-table hidden md:block" : "hidden overflow-x-auto md:block"}>
+            <table className="w-full min-w-[760px] text-left text-sm">
+              <thead className={isMortgage ? "bg-[var(--negis-surface-2)] text-xs text-[var(--negis-muted)]" : "text-xs uppercase tracking-[0.12em] text-[#94A3B8]"}>
+                <tr>
+                  <th scope="col" className="px-3 py-3 font-medium">Имя</th>
+                  <th scope="col" className="px-3 py-3 font-medium">Логин / почта</th>
+                  <th scope="col" className="px-3 py-3 font-medium">Роль</th>
+                  <th scope="col" className="px-3 py-3 font-medium">Статус</th>
+                  <th scope="col" className="px-3 py-3 font-medium">Действие</th>
+                </tr>
+              </thead>
+              <tbody>
+                {staff.map((member) => (
+                  <tr key={member.id} className={isMortgage ? "border-t border-[var(--negis-border)] hover:bg-[var(--negis-surface-2)]" : "border-t border-[#E2E8F0]"}>
+                    <td className="min-w-40 max-w-60 break-words px-3 py-3 font-semibold text-[var(--negis-text)]">{member.name}</td>
+                    <td className="max-w-48 break-all px-3 py-3 text-[#64748B]">{loginFromEmail(member.email)}</td>
+                    <td className="px-3 py-3 text-[#334155]">
+                      {canEdit(member) && assignableRoles.length > 0 ? (
+                        <select
+                          className="neu-input min-w-36 px-2 py-1 text-xs"
+                          value={assignableRoles.includes(member.role) ? member.role : ""}
+                          onChange={(event) => updateStaffRole(member.id, event.target.value as StaffRole)}
+                          aria-label={`Роль: ${member.name}`}
+                        >
+                          {!assignableRoles.includes(member.role) ? <option value="" disabled={isMortgage}>{roleTitles[member.role]}</option> : null}
+                          {assignableRoles.map((role) => (
+                            <option key={role} value={role}>{roleTitles[role]}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        roleTitles[member.role]
+                      )}
+                    </td>
+                    <td className="px-3 py-3"><StatusPill compact={isMortgage} status={member.status === "active" ? "configured" : "partial"} label={statusText(member.status)} /></td>
+                    <td className="px-3 py-3">
+                      {canEdit(member) ? (
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            className="neu-btn px-3 py-1.5 text-xs"
+                            onClick={() => updateStaffStatus(member.id, member.status === "active" ? "paused" : "active")}
+                          >
+                            {member.status === "active" ? "Пауза" : "Активировать"}
+                          </button>
+                          {/* Забытый пароль иначе чинится только письмом, а письма
+                              до клиник не доходят. */}
+                          <button
+                            type="button"
+                            className="neu-btn px-3 py-1.5 text-xs"
+                            disabled={loading.staff}
+                            onClick={() => resetStaffPassword(member)}
+                          >
+                            Новый пароль
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-[#94A3B8]">{member.id === actorStaffUserId ? "это вы" : "только владелец"}</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        {/* Код клиники стоит первым: по нему приходят люди, и владелец должен
+            видеть его, а не искать. */}
+        <section className={staffSectionClass}>
+          <h2 className={staffHeadingClass}>{isMortgage ? "Код пространства" : "Код клиники"}</h2>
+          <p className="mt-2 text-sm text-[#64748B]">
+            Диктуйте код только своим людям. По коду нельзя войти — по нему можно только попроситься, а пускаете вы.
+          </p>
+          {joinCode.state === "loading" && <p className="mt-3 text-sm text-[#94A3B8]">Загружаем…</p>}
+          {joinCode.state === "failed" && (
+            <p className="mt-3 text-sm text-[#94A3B8]">
+              {joinNotProvisioned
+                ? "Заявки по коду ещё не активированы — владелец платформы применяет обновление базы."
+                : "Не удалось прочитать код — обновите страницу."}
+            </p>
+          )}
+          {/* 403 — это не сбой: обновление страницы не поможет никогда. */}
+          {joinCode.state === "denied" && (
+            <p className="mt-3 text-sm text-[#94A3B8]">{isMortgage
+              ? "Код пространства видят владелец и администратор. Попросите их продиктовать его."
+              : "Код клиники видят владелец и администратор. Попросите их продиктовать его."}</p>
+          )}
+          {joinCode.state === "ready" && joinCode.value === null && (
+            <button type="button" className="neu-btn-primary mt-4" disabled={loading.joinCode} onClick={() => void issueJoinCode()}>
+              {loading.joinCode ? "Выпускаем…" : "Выпустить код"}
+            </button>
+          )}
+          {joinCode.state === "ready" && joinCode.value !== null && (
+            <>
+              <p className={isMortgage ? "mt-4 break-all font-mono text-2xl font-semibold text-[var(--negis-text)]" : "mt-4 font-mono text-2xl font-black tracking-[0.08em] text-[#0F172A]"}>{formatJoinCode(joinCode.value)}</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="neu-btn"
+                  onClick={() => {
+                    if (!access.isCurrent()) return;
+                    void navigator.clipboard.writeText(formatJoinCode(joinCode.value as string)).then(
+                      () => { if (access.isCurrent()) toast.success("Скопировано"); },
+                      () => { if (access.isCurrent()) toast.error("Буфер недоступен — перепишите с экрана"); },
+                    );
+                  }}
+                >
+                  Скопировать
+                </button>
+                {/* Смена — право владельца, и фронт его знает: показывать
+                    кнопку админу значит вести его к отказу после страшного
+                    подтверждения. */}
+                {serverAdminAuth.role === "owner" && (
+                  <button type="button" className="neu-btn" disabled={loading.joinCode} onClick={() => void issueJoinCode()}>
+                    Сменить код
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </section>
+
+        {/* Входящая очередь — над формой заведения: она требует решения, а не
+            повторяет уже принятые. */}
+        <section className={staffSectionClass}>
+          <h2 className={staffHeadingClass}>
+            Заявки на вступление
+            {pendingJoinRequests.length > 0 && (
+              <span className="ml-2 rounded-full bg-[#DC2626] px-2 py-0.5 text-xs font-bold text-white">{pendingJoinRequests.length}</span>
+            )}
+          </h2>
+          {joinRequests.state === "loading" && <p className="mt-3 text-sm text-[#94A3B8]">Загружаем…</p>}
+          {joinRequests.state === "failed" && (
+            <p className="mt-3 text-sm text-[#94A3B8]">
+              {joinNotProvisioned
+                ? "Раздел заработает, как только владелец платформы применит обновление базы. Пока зачисляйте сотрудников паролем или приглашением."
+                : "Не удалось прочитать заявки — обновите страницу."}
+            </p>
+          )}
+          {joinRequests.state === "denied" && (
+            <p className="mt-3 text-sm text-[#94A3B8]">{isMortgage
+              ? "Заявки разбирают владелец и администратор пространства."
+              : "Заявки разбирают владелец и администратор клиники."}</p>
+          )}
+          {joinRequests.state === "ready" && pendingJoinRequests.length === 0 && (
+            <p className="mt-3 text-sm text-[#64748B]">{isMortgage
+              ? "Заявок нет. Продиктуйте код пространства тем, кого ждёте — он в карточке выше."
+              : "Заявок нет. Продиктуйте код клиники тем, кого ждёте — он в карточке выше."}</p>
+          )}
+          {joinRequests.state === "ready" && pendingJoinRequests.length > 0 && (
+            <div className="mt-3 space-y-3">
+              {pendingJoinRequests.map((request) => (
+                <article key={request.id} className="min-w-0 break-words rounded-lg border border-[#E2E8F0] bg-white p-4">
+                  <p className="font-semibold text-[#0F172A]">{request.fullName || request.email}</p>
+                  <p className="text-xs text-[#64748B]">{request.email}</p>
+                  {request.phone && <p className="text-xs text-[#64748B]">{request.phone}</p>}
+                  {request.positionNote && <p className="mt-1 text-xs italic text-[#475569]">{request.positionNote}</p>}
+                  {/* Пришёл по коду, который уже отозвали, — самый частый повод
+                      отклонить: код меняют как раз потому, что он утёк. */}
+                  {request.viaRevokedCode && (
+                    <p className="mt-2 rounded-lg bg-[#FEF2F2] px-2 py-1 text-xs font-semibold text-[#B91C1C]">
+                      Пришёл по отозванному коду
+                    </p>
+                  )}
+                  {decidingRequestId === request.id ? (
+                    <div className="mt-3 space-y-2">
+                      {/* Без значения по умолчанию: предзаполненная роль
+                          нажимается «Одобрить» не глядя. */}
+                      <select
+                        className="neu-input text-sm"
+                        value={decisionRole}
+                        onChange={(event) => setDecisionRole(event.target.value as StaffRole)}
+                        aria-label="Роль сотрудника"
+                      >
+                        <option value="">Выберите роль</option>
+                        {assignableRoles.map((role) => (
+                          <option key={role} value={role}>{roleTitles[role]}</option>
+                        ))}
+                      </select>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="neu-btn-primary"
+                          disabled={!decisionRole || loading.staff}
+                          onClick={() => void decideJoinRequest(request, "approve")}
+                        >
+                          Подтвердить
+                        </button>
+                        <button type="button" className="neu-btn" onClick={() => { setDecidingRequestId(null); setDecisionRole(""); }}>
+                          Отмена
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="neu-btn-primary"
+                        onClick={() => { setDecidingRequestId(request.id); setDecisionRole(""); }}
+                      >
+                        Одобрить
+                      </button>
+                      <button type="button" className="neu-btn" disabled={loading.staff} onClick={() => void decideJoinRequest(request, "reject")}>
+                        Отклонить
+                      </button>
+                    </div>
+                  )}
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className={staffSectionClass}>
+          <h2 className={staffHeadingClass}>Добавить сотрудника</h2>
+          <p className="mt-2 text-xs text-[#64748B]">
+            Вы зовёте человека — здесь. Человек попросился сам по коду — в «Заявках на вступление» выше.
+          </p>
+          {/* «Логин и пароль» — режим по умолчанию: письма-приглашения до клиник
+              доходят плохо, и сотрудник неделями не мог войти. Приглашение
+              осталось вторым способом — оно единственное для почты, у которой
+              уже есть аккаунт. */}
+          <div className="mt-3 flex gap-2" role="group" aria-label="Способ добавления сотрудника">
+            {/* Переключение режима НЕ стирает показанные данные: пароль и
+                ссылка существуют в одном экземпляре, и случайный клик по
+                соседней кнопке уничтожал единственную копию. */}
+            <button
+              type="button"
+              className={staffModeClass(staffMode === "password")}
+              aria-pressed={staffMode === "password"}
+              onClick={() => setStaffMode("password")}
+            >
+              Логин и пароль
+            </button>
+            <button
+              type="button"
+              className={staffModeClass(staffMode === "invite")}
+              aria-pressed={staffMode === "invite"}
+              onClick={() => setStaffMode("invite")}
+            >
+              Ссылка-приглашение
+            </button>
+          </div>
+          <p className="mt-2 text-sm text-[#64748B]">
+            {staffMode === "password"
+              ? "Вы задаёте логин и пароль и передаёте их сотруднику лично. Почта не нужна: впишите логин латиницей или имя — мы сделаем логин сами. Письмо не отправляется, вход работает сразу."
+              : "Сотрудник получает письмо, задаёт свой пароль и принимает приглашение. Ссылка одноразовая и действует 7 дней; если она потеряется — перевыпустите её в списке ниже."}
+          </p>
+          <div className="mt-4 grid gap-3">
+            <input
+              className="neu-input"
+              type={staffMode === "invite" ? "email" : "text"}
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              placeholder={staffMode === "invite" ? "Почта сотрудника" : "Логин (aigul.botanova) или почта"}
+              value={inviteForm.email}
+              onChange={(event) => setInviteForm({ ...inviteForm, email: event.target.value })}
+            />
+            {staffMode === "password" ? (
+              <input
+                className="neu-input"
+                placeholder="Имя сотрудника"
+                value={staffFullName}
+                onChange={(event) => setStaffFullName(event.target.value)}
+              />
+            ) : null}
+            {/* Роли выше своей сервер отклонит: админ, выбравший «Администратор»,
+                всегда получал 403 без объяснения, какая роль допустима. */}
+            <select
+              className="neu-input"
+              value={inviteForm.role}
+              onChange={(event) => setInviteForm({ ...inviteForm, role: event.target.value as StaffRole })}
+            >
+              {assignableRoles.map((role) => (
+                <option key={role} value={role}>{roleTitles[role]}</option>
+              ))}
+            </select>
+            {staffMode === "password" ? (
+              <>
+                <div className="flex flex-wrap gap-2">
+                  {/* Поле видимое намеренно: это не свой секрет, а данные,
+                      которые администратор сейчас передаст дальше. */}
+                  <input
+                    className="neu-input min-w-0 flex-[1_1_180px]"
+                    placeholder="Пароль: 8–72 символа"
+                    autoComplete="off"
+                    value={staffPassword}
+                    onChange={(event) => setStaffPassword(event.target.value)}
+                  />
+                  <button type="button" className="neu-btn" onClick={() => setStaffPassword(generateStaffPassword())}>
+                    Сгенерировать
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  className="neu-btn-primary w-full justify-center"
+                  disabled={loading.staff}
+                  onClick={createStaffWithPassword}
+                >
+                  {loading.staff ? <Loader2 className="animate-spin" size={16} /> : <UserPlus size={16} />}
+                  Добавить сотрудника
+                </button>
+              </>
+            ) : (
+              <button type="button" className="neu-btn-primary w-full justify-center" disabled={loading.staff} onClick={sendInvitation}>
+                {loading.staff ? <Loader2 className="animate-spin" size={16} /> : <UserPlus size={16} />}
+                Отправить приглашение
+              </button>
+            )}
+          </div>
+
+          {createdStaff && (
+            <div className="mt-4 break-words rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+              <p className="font-bold">{createdStaff.kind === "reset" ? "Новый пароль для" : "Сотрудник добавлен:"} {loginFromEmail(createdStaff.email)}</p>
+              <p className="mt-1">
+                Передайте эти данные лично. Пароль показывается один раз — потом его нельзя посмотреть, только задать
+                новый через «Забыли пароль?» на странице входа.
+              </p>
+              <p className="mt-2 font-mono text-xs text-emerald-900">Логин: {loginFromEmail(createdStaff.email)}</p>
+              <p className="font-mono text-xs text-emerald-900">Пароль: {createdStaff.password}</p>
+              <button
+                type="button"
+                className="neu-btn mt-3 w-full justify-center bg-white/80"
+                onClick={() => void copyStaffCredentials()}
+              >
+                <Copy size={15} />
+                Скопировать логин и пароль
+              </button>
+            </div>
+          )}
+
+          {/* Пачка. Открывается по ссылке, а не занимает экран: обычный случай —
+              один человек, а пачка нужна на открытии салона. */}
+          <div className="mt-4 border-t border-[#E2E8F0] pt-4">
+            <button type="button" className="text-sm font-semibold underline" style={{ color: "var(--negis-primary)" }} onClick={() => {
+                setBatchOpen((open) => {
+                  // Закрыли панель — пароли с экрана уходят: подпись обещает
+                  // «второй раз не покажутся», и она должна быть правдой.
+                  if (open) setBatchResults(null);
+                  return !open;
+                });
+              }}>
+              {batchOpen ? "Скрыть добавление пачкой" : "Добавить сразу нескольких"}
+            </button>
+
+            {batchOpen && (
+              <div className="mt-3 space-y-3">
+                <p className="text-xs text-[#64748B]">
+                  По одной строке на человека — почта НЕ нужна: вставьте имена, логин сделаем сами латиницей и
+                  покажем его. Раздавайте именно показанный логин: если такой уже занят, мы добавим к нему короткий
+                  хвост. Можно и «Имя, желаемый.логин», и «почта», и «почта, Имя». Роль одна на всех, поменять её
+                  каждому можно потом в таблице слева. Пароли сгенерируются сами и покажутся один раз.
+                </p>
+                {/* Про восстановление надо сказать здесь, а не после того, как
+                    человек потеряет пароль: у логина почты нет, и письмо ему
+                    не придёт никогда. */}
+                <p className="text-xs text-[#B91C1C]">
+                  У логина нет почты: забытый пароль восстанавливается только кнопкой «Новый пароль» в таблице слева.
+                </p>
+                <textarea
+                  className="neu-input min-h-[120px] font-mono text-xs"
+                  placeholder={"aigul@medi.kz\ndana@medi.kz\nsaule@medi.kz"}
+                  value={batchEmails}
+                  onChange={(event) => setBatchEmails(event.target.value)}
+                />
+                <select
+                  className="neu-input text-sm"
+                  value={batchRole}
+                  onChange={(event) => setBatchRole(event.target.value as StaffRole)}
+                  aria-label="Роль для всех из списка"
+                >
+                  {assignableRoles.map((role) => (
+                    <option key={role} value={role}>{roleTitles[role]}</option>
+                  ))}
+                </select>
+                <button type="button" className="neu-btn-primary w-full justify-center" disabled={loading.staffBatch} onClick={() => void createStaffBatch()}>
+                  {loading.staffBatch ? "Заводим…" : "Завести всех"}
+                </button>
+
+                {batchResults && batchResults.length > 0 && (
+                  <div className="break-words rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+                    <p className="font-bold">Логины и пароли</p>
+                    <p className="mt-1 text-xs">Раздайте их лично. Второй раз пароли не покажутся.</p>
+                    <div className="mt-3 space-y-2 text-xs text-emerald-900">
+                      {batchResults.map((row) => (
+                        <div key={row.source}>
+                          <p className="font-semibold">{row.source}</p>
+                          <p className="font-mono">
+                            {row.kind === "created" && `логин ${row.login} · пароль ${row.password}`}
+                            {row.kind === "invited" && `${row.login} — почта занята, выписано приглашение`}
+                            {row.kind === "failed" && (row.password
+                              ? `логин ${row.login} · пароль ${row.password} — ${row.error}`
+                              : row.error)}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                    {batchResults.some((row) => row.kind === "created") && (
+                      <button type="button" className="neu-btn mt-3 w-full justify-center bg-white/80" onClick={() => void copyBatchCredentials()}>
+                        <Copy size={15} />
+                        Скопировать список
+                      </button>
+                    )}
+                    {batchResults.some((row) => row.kind === "invited") && (
+                      <p className="mt-2 text-xs">
+                        Занятой почте пароль не задаётся — это был бы захват чужого аккаунта. Такие сотрудники получают
+                        приглашение: ссылки на них — в списке «Ожидают принятия» ниже.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {issuedInvite && (
+            <div className="mt-4 break-words rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+              <p className="font-bold">Приглашение для {issuedInvite.email}</p>
+              <p className="mt-1">
+                {issuedInvite.emailSent
+                  ? "Письмо отправлено. Ссылка ниже — на случай, если оно не дошло."
+                  : issuedInvite.emailStatus === "already_registered"
+                    ? "У сотрудника уже есть аккаунт — письмо-приглашение таким не отправляется. Передайте ссылку: он войдёт со своим паролем и примет её."
+                    : "Письмо отправить не удалось. Передайте ссылку сотруднику лично."}
+              </p>
+              <p className="mt-2 break-all font-mono text-xs text-emerald-900">{issuedInvite.acceptUrl}</p>
+              {/* Письмо шлёт Supabase, и его ссылка ведёт на адрес из Site URL
+                  проекта. Если там остался localhost, письмо приведёт в
+                  никуда — а ссылка выше правильная всегда: она собрана нашим
+                  сервером из адреса, по которому вы работаете. Подсказка нужна
+                  только там, где письмо реально отправляли. */}
+              {issuedInvite.emailSent ? (
+                <p className="mt-2 text-xs text-emerald-900/80">
+                  Если письмо открывает «localhost» — в Supabase не настроен адрес сайта. Передайте ссылку выше вручную,
+                  она рабочая, или заведите сотрудника через «Логин и пароль».
+                </p>
+              ) : null}
+              <button type="button" className="neu-btn mt-3 w-full justify-center bg-white/80" onClick={copyInviteLink}>
+                <Copy size={15} />
+                Скопировать ссылку
+              </button>
+            </div>
+          )}
+
+          <div className="mt-6">
+            <h3 className={isMortgage ? "text-sm font-semibold text-[var(--negis-text-2)]" : "text-sm font-black uppercase tracking-[0.12em] text-[#94A3B8]"}>Ожидают принятия</h3>
+            {/* Иначе владелец ищет в этом списке сотрудника, заведённого
+                паролем, и решает, что тот не сохранился. */}
+            <p className="mt-1 text-xs text-[#94A3B8]">
+              Здесь только приглашения. Сотрудники, заведённые логином и паролем, сразу в таблице слева.
+            </p>
+            {invitations.filter((invitation) => invitation.status === "pending").length === 0 ? (
+              <p className="mt-2 text-sm text-[#64748B]">Активных приглашений нет.</p>
+            ) : (
+              <ul className="mt-3 grid gap-2">
+                {invitations
+                  .filter((invitation) => invitation.status === "pending")
+                  .map((invitation) => (
+                    <li key={invitation.id} className="grid min-w-0 gap-2 rounded-lg border border-[#E2E8F0] bg-white px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold text-[#0F172A]">{invitation.email}</p>
+                        <p className="text-xs text-[#64748B]">
+                          {roleTitles[invitation.role as StaffRole] || invitation.role}
+                          {invitation.expiresAt ? ` · действует до ${invitation.expiresAt.slice(0, 10)}` : ""}
+                        </p>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          className="neu-btn px-3 py-1.5 text-xs"
+                          disabled={loading.staff}
+                          onClick={() => reissueInvitation(invitation)}
+                        >
+                          Перевыпустить ссылку
+                        </button>
+                        <button type="button" className="neu-btn px-3 py-1.5 text-xs" onClick={() => revokeInvitation(invitation.id)}>
+                          Отозвать
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+              </ul>
+            )}
+
+            {/* Завершённые приглашения: без них принятие сотрудника было видно
+                только косвенно, а истёкшее — не видно вовсе. */}
+            {invitations.filter((invitation) => invitation.status !== "pending").length > 0 ? (
+              <div className="mt-4">
+                <h3 className={isMortgage ? "text-sm font-semibold text-[var(--negis-text-2)]" : "text-sm font-black uppercase tracking-[0.12em] text-[#94A3B8]"}>История</h3>
+                <ul className="mt-2 grid gap-1.5">
+                  {invitations
+                    .filter((invitation) => invitation.status !== "pending")
+                    .slice(0, 5)
+                    .map((invitation) => (
+                      <li key={invitation.id} className="flex items-center justify-between gap-3 text-xs text-[#64748B]">
+                        <span className="truncate">{invitation.email}</span>
+                        <span className="whitespace-nowrap">
+                          {invitation.status === "accepted" ? "принято" : invitation.status === "expired" ? "истекло" : "отозвано"}
+                          {invitation.createdAt ? ` · ${invitation.createdAt.slice(0, 10)}` : ""}
+                        </span>
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  function renderRoles() {
+    return (
+      <div className="grid gap-4 lg:grid-cols-2">
+        {staffRoles.map((role) => {
+          const permissions = permissionsForRole(role);
+          return (
+            <section key={role} className="neu-card">
+              <div className="mb-4 flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-black text-[#0F172A]">{roleTitles[role]}</h2>
+                  <p className="mt-1 text-sm text-[#64748B]">{permissions.length} прав доступа</p>
+                </div>
+                <ShieldCheck className="text-[#0D9488]" size={22} />
+              </div>
+              <p className="sr-only">{permissionSummary(permissions)}</p>
+              <div className="flex flex-wrap gap-2">
+                {permissions.map((permission) => (
+                  <span key={permission} className="rounded-full border border-[#E2E8F0] bg-white/70 px-3 py-1 text-xs font-bold text-[#334155]">
+                    {permissionLabels[permission]}
+                  </span>
+                ))}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    );
+  }
+
+  function renderClinic() {
+    const update = (key: keyof ClinicSettings, value: string) => setClinic((current) => ({ ...current, [key]: value }));
+    return (
+      <section className="neu-card">
+        <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-lg font-black text-[#0F172A]">Настройки клиники</h2>
+            <p className="text-sm text-[#64748B]">Название, контакты и тексты — используются в рекламе и сообщениях.</p>
+          </div>
+          <button type="button" className="neu-btn-primary w-full sm:w-auto" disabled={loading.clinic} onClick={saveClinicSettings}>
+            {loading.clinic ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />}
+            Сохранить
+          </button>
+        </div>
+        {/* Подписи — по-русски, а не именами переменных. Поля timezone здесь
+            больше нет: расписание читает только clinic_schedule, который
+            задаётся закрытым списком на вкладке исполнителей, — свободный
+            текст тут молча не менял ничего. */}
+        <div className="grid gap-4 md:grid-cols-2">
+          <Field label="Название" value={clinic.clinicName} onChange={(value) => update("clinicName", value)} />
+          <Field label="Город" value={clinic.city} onChange={(value) => update("city", value)} />
+          <Field label="Телефон" value={clinic.phone} onChange={(value) => update("phone", value)} />
+          <Field label="WhatsApp" value={clinic.whatsapp} onChange={(value) => update("whatsapp", value)} />
+          <Field label="Адрес" value={clinic.address} onChange={(value) => update("address", value)} />
+          <Field label="Основные услуги" value={clinic.defaultServices} onChange={(value) => update("defaultServices", value)} />
+          <Field label="Тон бренда" value={clinic.brandTone} onChange={(value) => update("brandTone", value)} />
+          <div className="md:col-span-2">
+            <label className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Юридическая оговорка</label>
+            <textarea className="neu-input min-h-28" value={clinic.legalDisclaimer} onChange={(event) => update("legalDisclaimer", event.target.value)} />
+          </div>
+        </div>
+        <p className="mt-3 text-xs font-semibold text-[#94A3B8]">
+          Часовой пояс расписания задаётся на вкладке «{capitalize(termsFor(vertical).specialistPlural)}» — там, где живёт график.
+        </p>
+      </section>
+    );
+  }
+
+  function renderIntegrations() {
+    const resetTikTokPreparedLaunch = () => {
+      if (!access.isCurrent()) return;
+      setTikTokDryRun(null);
+      setTikTokDryRunMessage("");
+      setTikTokLaunchResult(null);
+      setTikTokLaunchMessage("");
+      setTikTokLaunchConfirmation("");
+      setTikTokLaunchRequestKey("");
+    };
+    const updateTikTokDryRunField = <Key extends keyof TikTokDryRunForm>(key: Key, value: TikTokDryRunForm[Key]) => {
+      if (!access.isCurrent()) return;
+      setTikTokDryRunForm((current) => ({ ...current, [key]: value }));
+      resetTikTokPreparedLaunch();
+    };
+
+    return (
+      <div className="space-y-5">
+        <div className="neu-card flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-lg font-black text-[#0F172A]">Integration health</h2>
+            <p className="text-sm text-[#64748B]">Проверка читает только наличие env и health endpoints. Секреты не отображаются.</p>
+          </div>
+          <button type="button" className="neu-btn-primary w-full sm:w-auto" onClick={checkAllIntegrations}>
+            <RefreshCw size={16} />
+            Проверить всё
+          </button>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {integrationCards.map((card) => (
+            <IntegrationStatusCard
+              key={card.key}
+              card={card}
+              loading={Boolean(loading[card.key] || (card.key === "telegram" && loading.telegram) || (card.key === "targetingAgent" && loading.targeting))}
+              onCheck={
+                card.key === "telegram"
+                  ? checkTelegram
+                  : card.key === "targetingAgent"
+                    ? checkTargetingAgent
+                    : card.key === "tiktok"
+                      ? checkTikTokAds
+                      : card.key === "adCreativesStorage"
+                        ? checkAdCreativesStorage
+                        : card.key === "supabase"
+                          ? () => { void checkCrmHealth(); }
+                          : undefined
+              }
+            />
+          ))}
+        </div>
+
+        <section className="neu-card" data-testid="tiktok-campaign-dry-run">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0">
+              <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#0D9488]">Admin · без запуска</p>
+              <h2 className="mt-1 text-lg font-black text-[#0F172A]">TikTok Ads · план кампании</h2>
+              <p className="mt-1 max-w-3xl text-sm text-[#64748B]">
+                Собирает безопасный шаблон campaign, ad group и ad. Запросы на создание объектов в TikTok не отправляются.
+              </p>
+            </div>
+            <span className="w-fit rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-black text-amber-700">
+              Только выключенный запуск
+            </span>
+          </div>
+
+          <div className="mt-5 grid gap-4 md:grid-cols-2">
+            <Field
+              label="Название кампании"
+              value={tiktokDryRunForm.campaignName}
+              onChange={(value) => updateTikTokDryRunField("campaignName", value)}
+            />
+            <Field
+              label="Услуга"
+              value={tiktokDryRunForm.service}
+              onChange={(value) => updateTikTokDryRunField("service", value)}
+            />
+            <Field
+              label="Город показа"
+              value={tiktokDryRunForm.city}
+              onChange={(value) => updateTikTokDryRunField("city", value)}
+            />
+            <label className="block">
+              <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Бюджет в день</span>
+              <div className="grid grid-cols-[minmax(0,1fr)_92px] gap-2">
+                <input
+                  className="neu-input min-w-0"
+                  inputMode="decimal"
+                  value={tiktokDryRunForm.dailyBudget}
+                  onChange={(event) => updateTikTokDryRunField("dailyBudget", event.target.value)}
+                />
+                <select
+                  className="neu-input min-w-0"
+                  value={tiktokDryRunForm.currency}
+                  onChange={(event) => updateTikTokDryRunField("currency", event.target.value as "KZT" | "USD")}
+                >
+                  <option value="KZT">KZT</option>
+                  <option value="USD">USD</option>
+                </select>
+              </div>
+            </label>
+            <Field
+              label="Ссылка назначения"
+              value={tiktokDryRunForm.destinationUrl}
+              onChange={(value) => updateTikTokDryRunField("destinationUrl", value)}
+            />
+            <label className="block">
+              <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Начало по времени аккаунта</span>
+              <input
+                type="datetime-local"
+                className="neu-input w-full"
+                value={tiktokDryRunForm.scheduleStartTime}
+                onChange={(event) => updateTikTokDryRunField("scheduleStartTime", event.target.value)}
+              />
+            </label>
+            <label className="block md:col-span-2">
+              <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Текст объявления</span>
+              <textarea
+                className="neu-input min-h-24 w-full resize-y"
+                value={tiktokDryRunForm.primaryText}
+                onChange={(event) => updateTikTokDryRunField("primaryText", event.target.value)}
+              />
+            </label>
+          </div>
+
+          <TikTokConnection
+            key={`connection:${workspaceId}:${serverAdminAuth.status}`}
+            enabled={serverAdminAuth.status === "confirmed"}
+            request={async (save, signal) => {
+              const response = await adminCrmRequest<TikTokConnectionSummary>(
+                `/api/crm/tiktok-connection?workspaceId=${encodeURIComponent(workspaceId)}`,
+                { method: save ? "POST" : "GET", signal,
+                  ...(save ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }) } : {}) },
+              );
+              access.assertCurrent();
+              if (!response.data) throw new Error("Не удалось проверить подключение TikTok.");
+              return response.data;
+            }}
+            onChanged={resetTikTokPreparedLaunch}
+          />
+
+          <TikTokVideoUpload
+            key={`video:${workspaceId}:${serverAdminAuth.status}`}
+            enabled={serverAdminAuth.status === "confirmed"}
+            list={async (signal) => {
+              const response = await adminCrmRequest<TikTokVideoList>(
+                `/api/crm/tiktok-videos?workspaceId=${encodeURIComponent(workspaceId)}`, { signal });
+              access.assertCurrent();
+              if (!response.data) throw new Error("Не удалось прочитать видео клиники.");
+              return response.data;
+            }}
+            request={async (assetId, action, retry, signal) => {
+              const readOnly = action === "read";
+              const response = await adminCrmRequest<TikTokVideoSummary>(
+                `/api/crm/tiktok-videos?workspaceId=${encodeURIComponent(workspaceId)}${readOnly ? `&assetId=${encodeURIComponent(assetId)}` : ""}`,
+                readOnly ? { signal } : { method: "POST", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ assetId, action, confirm: action === "transfer", retry }), signal });
+              access.assertCurrent();
+              if (!response.data) throw new Error("Не удалось проверить передачу видео.");
+              return response.data;
+            }}
+            onSelected={(assetId) => {
+              if (!access.isCurrent()) return;
+              setTikTokVideoSelection({ workspaceId, assetId });
+              resetTikTokPreparedLaunch();
+            }}
+          />
+
+          <TikTokSetupCheck
+            key={`${workspaceId}:${tiktokDryRunForm.city}:${serverAdminAuth.status}`}
+            enabled={serverAdminAuth.status === "confirmed"}
+            city={tiktokDryRunForm.city}
+            check={async (signal) => {
+              const response = await adminCrmRequest<TikTokSetupSummary>(
+                `/api/crm/tiktok-setup?workspaceId=${encodeURIComponent(workspaceId)}`,
+                { method: "POST", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ city: tiktokDryRunForm.city }), signal },
+              );
+              access.assertCurrent();
+              if (!response.data) throw new Error("TikTok verification unavailable");
+              return response.data;
+            }}
+            onChecked={resetTikTokPreparedLaunch}
+          />
+
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <button
+              type="button"
+              className="neu-btn-primary w-full justify-center sm:w-auto"
+              disabled={loading["tiktok-dry-run"] || serverAdminAuth.status !== "confirmed"}
+              onClick={() => void buildTikTokDryRun()}
+            >
+              {loading["tiktok-dry-run"] ? <Loader2 className="animate-spin" size={16} /> : <ClipboardCheck size={16} />}
+              Проверить план без запуска
+            </button>
+            <p className="text-xs font-semibold text-[#64748B]">
+              Проверка плана ничего не создаёт. Реальный выключенный запуск доступен только отдельным подтверждением.
+            </p>
+          </div>
+
+          {tiktokDryRunMessage ? (
+            <p className="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-[#334155]">
+              {tiktokDryRunMessage}
+            </p>
+          ) : null}
+
+          {tiktokDryRun ? (
+            <div className="mt-5 space-y-4" data-testid="tiktok-dry-run-result">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <StatusTile title="Бриф" value={tiktokDryRun.readiness.briefReady ? "Готов" : "Нужно заполнить"} />
+                <StatusTile title="Площадка" value={tiktokDryRun.summary.placement} />
+                <StatusTile
+                  title="Бюджет в день"
+                  value={tiktokDryRun.summary.dailyBudget ? `${tiktokDryRun.summary.dailyBudget} ${tiktokDryRun.summary.currency}` : "—"}
+                />
+                <StatusTile title="Статус запуска" value="Выключен" />
+              </div>
+
+              <div className="grid gap-3 lg:grid-cols-2">
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                  <div className="flex items-start gap-3">
+                    <ShieldCheck className="mt-0.5 shrink-0 text-emerald-700" size={20} />
+                    <div className="min-w-0">
+                      <p className="font-black text-emerald-900">Безопасный dry-run</p>
+                      <p className="mt-1 text-sm text-emerald-800">
+                        Кампания, группа и объявление запланированы со статусом «выключено». TikTok API не вызывался.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                  <p className="font-black text-amber-900">
+                    {tiktokDryRun.readiness.providerReady ? "Проверки площадки пройдены" : "До реального подключения"}
+                  </p>
+                  {tiktokDryRun.readiness.providerDependencies.length > 0 ? (
+                    <ul className="mt-2 grid gap-1.5 text-sm text-amber-800">
+                      {tiktokDryRun.readiness.providerDependencies.map((item) => (
+                        <li key={item.code} className="break-words">• {item.message}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-2 text-sm text-amber-800">
+                      Аккаунт, город, профиль и готовое видео подтверждены сервером.
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {!tiktokDryRun.readiness.briefReady ? (
+                <div className="rounded-2xl border border-red-200 bg-red-50 p-4">
+                  <p className="font-black text-red-900">Заполните бриф</p>
+                  <ul className="mt-2 grid gap-1.5 text-sm text-red-800">
+                    {tiktokDryRun.readiness.blockers
+                      .filter((item) => !tiktokDryRun.readiness.providerDependencies.some((dependency) => dependency.code === item.code))
+                      .map((item) => <li key={item.code} className="break-words">• {item.message}</li>)}
+                  </ul>
+                </div>
+              ) : null}
+
+              <details className="rounded-2xl border border-[#E2E8F0] bg-white/70 p-4">
+                <summary className="cursor-pointer font-bold text-[#334155]">Технический шаблон без ID и секретов</summary>
+                <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+                  <p className="break-words text-[#64748B]">campaign: <strong className="text-[#0F172A]">{String(tiktokDryRun.payloadTemplate.campaign.operation_status || "—")}</strong></p>
+                  <p className="break-words text-[#64748B]">ad group: <strong className="text-[#0F172A]">{String(tiktokDryRun.payloadTemplate.adGroup.operation_status || "—")}</strong></p>
+                  <p className="break-words text-[#64748B]">ad: <strong className="text-[#0F172A]">{tiktokDryRun.targetOperationStatus}</strong></p>
+                  <p className="break-words text-[#64748B]">objective: <strong className="text-[#0F172A]">{String(tiktokDryRun.payloadTemplate.campaign.objective_type || "—")}</strong></p>
+                  <p className="break-words text-[#64748B]">placement: <strong className="text-[#0F172A]">TikTok</strong></p>
+                  <p className="break-words text-[#64748B]">provider calls: <strong className="text-[#0F172A]">нет</strong></p>
+                </div>
+              </details>
+
+              <div className="border-t border-[#E2E8F0] pt-5" data-testid="tiktok-disabled-launch">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#0D9488]">Безопасный запуск</p>
+                    <h3 className="mt-1 text-base font-black text-[#0F172A]">Создать рекламу в TikTok выключенной</h3>
+                    <p className="mt-1 max-w-3xl text-sm text-[#64748B]">
+                      Система последовательно создаст кампанию, группу и объявление. Все три объекта останутся выключенными до ручной проверки в TikTok Ads Manager.
+                    </p>
+                  </div>
+                  <span className="w-fit shrink-0 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-black text-slate-700">
+                    Только DISABLE
+                  </span>
+                </div>
+
+                {!tiktokDryRun.launchEnabled ? (
+                  <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900">
+                    Реальный TikTok-запуск закрыт серверным флагом. Сначала применяется миграция журнала и проводится отдельный production canary.
+                  </p>
+                ) : !tiktokDryRun.readiness.providerReady ? (
+                  <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900">
+                    Завершите серверные проверки аккаунта, города, профиля и видео.
+                  </p>
+                ) : (
+                  <p className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-900">
+                    Всё готово к созданию выключенной рекламы. Включение и расход бюджета этим действием невозможны.
+                  </p>
+                )}
+
+                <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+                  <label className="block min-w-0">
+                    <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">
+                      Для подтверждения введите СОЗДАТЬ
+                    </span>
+                    <input
+                      className="neu-input w-full min-w-0"
+                      value={tiktokLaunchConfirmation}
+                      onChange={(event) => {
+                        setTikTokLaunchConfirmation(event.target.value);
+                        setTikTokLaunchMessage("");
+                      }}
+                      disabled={!tiktokDryRun.launchEnabled || !tiktokDryRun.readiness.providerReady || Boolean(tiktokLaunchResult)}
+                      autoComplete="off"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="neu-btn-primary w-full justify-center lg:w-auto"
+                    onClick={() => void launchTikTokDisabled()}
+                    disabled={
+                      loading["tiktok-launch"] ||
+                      !tiktokDryRun.launchEnabled ||
+                      !tiktokDryRun.readiness.briefReady ||
+                      !tiktokDryRun.readiness.providerReady ||
+                      tiktokLaunchConfirmation.trim() !== "СОЗДАТЬ" ||
+                      Boolean(tiktokLaunchResult)
+                    }
+                  >
+                    {loading["tiktok-launch"] ? <Loader2 className="animate-spin" size={16} /> : <Rocket size={16} />}
+                    Создать выключенной
+                  </button>
+                </div>
+                <p className="mt-2 text-xs font-semibold text-[#64748B]">
+                  ACTIVE-запуск недоступен. При неопределённом ответе повтор блокируется, чтобы не создать дубликат.
+                </p>
+
+                {tiktokLaunchMessage ? (
+                  <p className="mt-4 break-words rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-[#334155]">
+                    {tiktokLaunchMessage}
+                  </p>
+                ) : null}
+
+                {tiktokLaunchResult ? (
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4" data-testid="tiktok-disabled-launch-result">
+                    <StatusTile title="Итог" value={tiktokLaunchResult.status === "created_disabled" ? "Создана выключенной" : "Требует проверки"} />
+                    <StatusTile title="Кампания" value={tiktokLaunchResult.providerObjects.campaignCreated ? "Создана" : "Не подтверждена"} />
+                    <StatusTile title="Группа" value={tiktokLaunchResult.providerObjects.adGroupCreated ? "Создана" : "Не подтверждена"} />
+                    <StatusTile title="Объявление" value={tiktokLaunchResult.providerObjects.adCreated ? "Создано" : "Не подтверждено"} />
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+        </section>
+      </div>
+    );
+  }
+
+  function renderAiProviders() {
+    return (
+      <div className="space-y-5">
+        <section className="neu-card flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-lg font-black text-[#0F172A]">Нейросети для генерации контента</h2>
+            <p className="text-sm text-[#64748B]">Реальные ключи добавляются только в Vercel Environment Variables.</p>
+          </div>
+          <button type="button" className="neu-btn w-full sm:w-auto" onClick={copyEnvList}>
+            <Copy size={16} />
+            Скопировать список env
+          </button>
+        </section>
+        <div className="grid gap-4 lg:grid-cols-2">
+          {aiProviders.map((provider) => (
+            <section key={provider.id} className="neu-card">
+              <div className="mb-4 flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="font-black text-[#0F172A]">{provider.label}</h3>
+                  <p className="mt-1 text-sm text-[#64748B]">Используется в модуле: {provider.module}</p>
+                </div>
+                <StatusPill status={provider.status} />
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="flex items-center gap-2 text-sm font-semibold text-[#334155]">
+                  <input
+                    type="checkbox"
+                    checked={provider.enabled}
+                    onChange={(event) => {
+                      const next = { ...provider, enabled: event.target.checked };
+                      setAiProviders((current) => current.map((item) => (item.id === provider.id ? next : item)));
+                    }}
+                  />
+                  enabled
+                </label>
+                <select
+                  className="neu-input"
+                  value={provider.provider}
+                  onChange={(event) => {
+                    const next = { ...provider, provider: event.target.value };
+                    setAiProviders((current) => current.map((item) => (item.id === provider.id ? next : item)));
+                  }}
+                >
+                  <option value="openai">OpenAI</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="elevenlabs">ElevenLabs</option>
+                  <option value="heygen">HeyGen</option>
+                  <option value="tapnow">TapNow</option>
+                  <option value="demo">Demo fallback</option>
+                </select>
+                <input
+                  className="neu-input sm:col-span-2"
+                  value={provider.modelName}
+                  placeholder="modelName"
+                  onChange={(event) => {
+                    const next = { ...provider, modelName: event.target.value };
+                    setAiProviders((current) => current.map((item) => (item.id === provider.id ? next : item)));
+                  }}
+                />
+              </div>
+              <button type="button" className="neu-btn mt-4 w-full justify-center" disabled={loading[`ai-${provider.id}`]} onClick={() => saveAiProvider(provider)}>
+                {loading[`ai-${provider.id}`] ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />}
+                Сохранить настройку
+              </button>
+            </section>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  function renderMeta() {
+    const update = (key: keyof Omit<MetaAccount, "permissions">, value: string) => setMetaAccount((current) => ({ ...current, [key]: value }));
+    const metaStatus = providerStatus(health, "meta");
+    const metaSummary = health?.meta;
+    const metaEnvFound = Boolean(
+      metaSummary?.configured ||
+        metaSummary?.businessIdConfigured ||
+        metaSummary?.adAccountConfigured ||
+        metaSummary?.pageConfigured ||
+        metaSummary?.instagramActorConfigured ||
+        metaSummary?.hasAccessToken ||
+        metaSummary?.hasAppSecret,
+    );
+    const metaFormEmpty = !hasMetaFormValues(metaAccount);
+    const metaNotice =
+      metaConfigMode === "supabase"
+        ? "Сохранено в Supabase"
+        : metaConfigMode === "local"
+          ? "Сохранено локально, Supabase недоступен"
+          : metaEnvFound && metaFormEmpty
+            ? "Meta env найдены. Нажмите 'Заполнить из env' и сохраните конфиг."
+            : metaEnvFound
+              ? "Env настроены, config не сохранён"
+              : "Meta env пока не найдены. Добавьте переменные в Vercel перед реальным запуском рекламы.";
+    return (
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_380px]">
+        <section className="neu-card">
+          <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-lg font-black text-[#0F172A]">Meta/Facebook Ads connector foundation</h2>
+              <p className="text-sm text-[#64748B]">MVP готовит config и draft preview. Реальный launch рекламы вручную подтверждается позже.</p>
+            </div>
+            <StatusPill status={metaStatus} />
+          </div>
+          <div className={`mb-5 rounded-2xl border px-4 py-3 text-sm font-semibold ${
+            metaConfigMode === "supabase"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+              : metaEnvFound
+                ? "border-amber-200 bg-amber-50 text-amber-800"
+                : "border-slate-200 bg-slate-50 text-slate-700"
+          }`}>
+            {metaNotice}
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <Field label="Meta Business ID" value={metaAccount.metaBusinessId} onChange={(value) => update("metaBusinessId", value)} />
+            <Field label="Ad Account ID" value={metaAccount.adAccountId} onChange={(value) => update("adAccountId", value)} />
+            <Field label="Page ID" value={metaAccount.pageId} onChange={(value) => update("pageId", value)} />
+            <Field label="Instagram Actor ID" value={metaAccount.instagramActorId} onChange={(value) => update("instagramActorId", value)} />
+            <Field label="Account name" value={metaAccount.accountName} onChange={(value) => update("accountName", value)} />
+            <Field label="Currency" value={metaAccount.currency} onChange={(value) => update("currency", value)} />
+            <Field label="Timezone" value={metaAccount.timezoneName} onChange={(value) => update("timezoneName", value)} />
+            <select className="neu-input" value={metaAccount.status} onChange={(event) => update("status", event.target.value)}>
+              <option value="draft">draft</option>
+              <option value="configured">configured</option>
+              <option value="error">error</option>
+            </select>
+          </div>
+          <div className="mt-5 rounded-2xl border border-[#E2E8F0] bg-white/70 p-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h3 className="font-black text-[#0F172A]">Разрешить live launch</h3>
+                <p className="mt-1 text-sm text-[#64748B]">
+                  Если выключено, /ads-automation создает только PAUSED campaigns. ACTIVE доступен owner/admin после ручного подтверждения.
+                </p>
+              </div>
+              <label className="flex items-center gap-3 rounded-2xl bg-[#F8FAFC] px-4 py-3 text-sm font-bold text-[#334155]">
+                <input
+                  type="checkbox"
+                  checked={metaLiveLaunchEnabled}
+                  disabled={loading["meta-live-launch"]}
+                  onChange={(event) => void saveMetaLiveLaunchEnabled(event.target.checked)}
+                />
+                <span>{metaLiveLaunchEnabled ? "ACTIVE разрешен" : "Только PAUSED"}</span>
+              </label>
+            </div>
+          </div>
+          <div className="mt-5 flex flex-col gap-2 sm:flex-row">
+            <button type="button" className="neu-btn w-full justify-center" onClick={checkCrmHealth}>
+              <RefreshCw size={16} />
+              Проверить настройки
+            </button>
+            <button type="button" className="neu-btn w-full justify-center" disabled={loading["meta-prefill"]} onClick={prefillMetaFromEnv}>
+              {loading["meta-prefill"] ? <Loader2 className="animate-spin" size={16} /> : <Copy size={16} />}
+              Заполнить из env
+            </button>
+            <button type="button" className="neu-btn-primary w-full justify-center" disabled={loading.meta} onClick={() => saveMetaConfig()}>
+              {loading.meta ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />}
+              Сохранить Meta config
+            </button>
+            <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/ads-automation")}>
+              <Megaphone size={16} />
+              Открыть Ads Automation
+            </button>
+          </div>
+        </section>
+
+        <section className="neu-card">
+          <h3 className="font-black text-[#0F172A]">Permissions checklist</h3>
+          <div className="mt-4 grid gap-2">
+            {permissionChecklist.map((item) => (
+              <label key={item.key} className="flex items-center gap-3 rounded-2xl border border-[#E2E8F0] bg-white/70 px-3 py-2 text-sm font-semibold text-[#334155]">
+                <input
+                  type="checkbox"
+                  checked={Boolean(metaAccount.permissions[item.key])}
+                  onChange={(event) =>
+                    setMetaAccount((current) => ({
+                      ...current,
+                      permissions: { ...current.permissions, [item.key]: event.target.checked },
+                    }))
+                  }
+                />
+                <span>{item.label}</span>
+              </label>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="neu-btn-primary mt-4 w-full justify-center"
+            onClick={() => {
+              if (!access.isCurrent()) return;
+              void saveMetaConfig("draft");
+              toast.success("Тестовый draft подготовлен. Реальная реклама не запущена.");
+            }}
+          >
+            <FileCheck2 size={16} />
+            Подготовить тестовый draft
+          </button>
+
+          <div className="mt-5 rounded-2xl border border-[#E2E8F0] bg-white/70 p-4">
+            <h3 className="font-black text-[#0F172A]">Проверить Meta city key</h3>
+            <p className="mt-1 text-sm text-[#64748B]">Введите город Казахстана. Backend вернет безопасный city key/source без секретов.</p>
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+              <select
+                className="neu-input"
+                value={getKzMetaCityOption(metaCityKeyInput).id}
+                onChange={(event) => setMetaCityKeyInput(event.target.value)}
+              >
+                {KZ_META_CITY_OPTIONS.map((city) => (
+                  <option key={city.id} value={city.id}>
+                    {city.labelRu}
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="neu-btn-primary justify-center" disabled={loading["meta-city-key"]} onClick={() => void checkMetaCityKey()}>
+                {loading["meta-city-key"] ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+                Проверить
+              </button>
+            </div>
+            {metaCityKeyResult ? (
+              <div className="mt-3 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-3 text-sm font-semibold text-[#334155]">
+                <p>city: {metaCityKeyResult.city || metaCityKeyInput}</p>
+                <p>cityId: {metaCityKeyResult.cityId || getKzMetaCityOption(metaCityKeyInput).id}</p>
+                <p>canonicalName: {metaCityKeyResult.canonicalName || getKzMetaCityOption(metaCityKeyInput).canonicalName}</p>
+                <p>key: {metaCityKeyResult.key || "-"}</p>
+                <p>name: {metaCityKeyResult.name || "-"}</p>
+                <p>country_code: {metaCityKeyResult.country_code || metaCityKeyResult.countryCode || "KZ"}</p>
+                <p>source: {metaCityKeyResult.source || "-"}</p>
+                <p>selected: {metaCityKeyResult.selected?.name || "-"}</p>
+                <p>candidates: {metaCityKeyResult.candidates?.length || 0}</p>
+                <p>rejectedCandidates: {metaCityKeyResult.rejectedCandidates?.length || 0}</p>
+                {metaCityKeyResult.rejectedCandidates?.length ? (
+                  <p>rejectedCandidateNames: {metaCityKeyResult.rejectedCandidates.map((item) => item.name || item.reason || "unknown").join(", ")}</p>
+                ) : null}
+                <p>geoMode: {metaCityKeyResult.geoMode || (metaCityKeyResult.key ? "city" : "country")}</p>
+                {metaCityKeyResult.warning ? <p className="mt-2 text-amber-700">warning: {metaCityKeyResult.warning}</p> : null}
+              </div>
+            ) : null}
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  function renderReleaseChecklist() {
+    return (
+      <section className="neu-card">
+        <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-lg font-black text-[#0F172A]">Release checklist</h2>
+            <p className="text-sm text-[#64748B]">Хранится в release_checks, fallback: negis_release_checks.</p>
+          </div>
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+            <StatusPill status={readiness.complete ? "passed" : "pending"} label={readiness.complete ? "Готово" : `Проблем: ${readiness.blockers}`} />
+            <button type="button" className="neu-btn-primary w-full justify-center sm:w-auto" disabled={loading["release-autocheck"]} onClick={runReleaseAutocheck}>
+              {loading["release-autocheck"] ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+              Автопроверка релиза
+            </button>
+          </div>
+        </div>
+        <div className="grid gap-3">
+          {releaseChecks.map((check) => (
+            <article key={check.checkKey} className="rounded-2xl border border-[#E2E8F0] bg-white/70 p-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="font-bold text-[#0F172A]">{check.title}</h3>
+                    {check.critical && <span className="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-bold text-red-700">critical</span>}
+                    {check.automated && <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-bold text-blue-700">automated</span>}
+                  </div>
+                  <textarea
+                    className="neu-input mt-3 min-h-20"
+                    placeholder="Заметка"
+                    value={check.notes}
+                    onChange={(event) => {
+                      const next = { ...check, notes: event.target.value };
+                      setReleaseChecks((current) => current.map((item) => (item.checkKey === check.checkKey ? next : item)));
+                    }}
+                  />
+                </div>
+                <div className="flex w-full flex-col gap-2 lg:w-48">
+                  <StatusPill status={check.status} />
+                  {(["passed", "failed", "skipped"] as ReleaseStatus[]).map((status) => (
+                    <button
+                      key={status}
+                      type="button"
+                      className="neu-btn w-full justify-center px-3 py-2 text-xs"
+                      disabled={loading[`release-${check.checkKey}`]}
+                      onClick={() => saveReleaseCheck({ ...check, status })}
+                    >
+                      {statusLabel(status)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+    );
+  }
+
+  function renderDiagnostics() {
+    const providers = health?.providers ? Object.entries(health.providers) : [];
+    const lastRunLabel = metaInsightsLastRun
+      ? {
+          pending: "Ожидает",
+          running: "Выполняется",
+          succeeded: "Завершена",
+          failed: "Ошибка",
+        }[metaInsightsLastRun.status]
+      : "Ещё не запускалась";
+    const diagnosticsCampaign = metaInsightsLastRun?.metaCampaignLaunchId
+      ? metaInsightsLaunches.find((launch) => launch.id === metaInsightsLastRun.metaCampaignLaunchId)
+      : metaInsightsLaunches.find((launch) => launch.id === metaInsightsLaunchId);
+    const spendSummaryLabel = metaInsightsDiagnostics.spendByCurrency.length
+      ? metaInsightsDiagnostics.spendByCurrency
+          .map(({ currency, spendMinor }) => formatMetaSpendMinor(spendMinor, currency))
+          .join(" · ")
+      : "0";
+    const currencySummaryLabel = metaInsightsDiagnostics.spendByCurrency.length
+      ? metaInsightsDiagnostics.spendByCurrency.map(({ currency }) => currency).join(", ")
+      : "—";
+    const showEmptyInsightsNote =
+      metaInsightsLastRun?.status === "succeeded" && metaInsightsLastRun.rowsUpserted === 0;
+    return (
+      <div className="space-y-5">
+        <section className="neu-card flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-lg font-black text-[#0F172A]">Health diagnostics</h2>
+            <p className="text-sm text-[#64748B]">Последняя проверка: {health?.generatedAt || "еще не выполнялась"}</p>
+          </div>
+          <button type="button" className="neu-btn-primary w-full sm:w-auto" onClick={checkCrmHealth} disabled={loading["crm-health"]}>
+            {loading["crm-health"] ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+            Обновить
+          </button>
+        </section>
+        <section className="neu-card" data-testid="meta-insights-manual-sync">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#0D9488]">Admin · read-only</p>
+              <h2 className="mt-1 text-lg font-black text-[#0F172A]">Meta Insights: ручная синхронизация</h2>
+              <p className="mt-1 max-w-3xl text-sm text-[#64748B]">
+                Получает дневные факты Meta для выбранного сохранённого запуска. Кампания и её статус не изменяются; коэффициенты эффективности не рассчитываются.
+              </p>
+            </div>
+            <span className={`w-fit rounded-full px-3 py-1 text-xs font-black ${
+              serverAdminAuth.status === "confirmed"
+                ? "bg-emerald-50 text-emerald-700"
+                : "bg-amber-50 text-amber-700"
+            }`}>
+              {serverAdminAuth.status === "confirmed" ? "Админ подтверждён" : "Требуется админ-доступ"}
+            </span>
+          </div>
+
+          <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_180px_180px]">
+            <label className="min-w-0 text-sm font-bold text-[#334155]">
+              Кампания Meta
+              <select
+                className="neu-input mt-2 w-full"
+                value={metaInsightsLaunchId}
+                onChange={(event) => setMetaInsightsLaunchId(event.target.value)}
+                disabled={loading["meta-insights-load"] || serverAdminAuth.status !== "confirmed"}
+              >
+                {metaInsightsLaunches.length === 0 ? <option value="">Нет подходящих реальных запусков</option> : null}
+                {metaInsightsLaunches.map((launch) => (
+                  <option key={launch.id} value={launch.id}>
+                    {launch.campaignName || "Кампания без названия"} · {launch.metaStatus || launch.status || "создана"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-sm font-bold text-[#334155]">
+              Дата начала
+              <input
+                type="date"
+                className="neu-input mt-2 w-full"
+                value={metaInsightsDateStart}
+                max={localIsoDateOffset(0)}
+                onChange={(event) => setMetaInsightsDateStart(event.target.value)}
+              />
+            </label>
+            <label className="text-sm font-bold text-[#334155]">
+              Дата окончания
+              <input
+                type="date"
+                className="neu-input mt-2 w-full"
+                value={metaInsightsDateStop}
+                max={localIsoDateOffset(0)}
+                onChange={(event) => setMetaInsightsDateStop(event.target.value)}
+              />
+            </label>
+          </div>
+
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+            <button
+              type="button"
+              className="neu-btn w-full justify-center sm:w-auto"
+              onClick={() => void loadMetaInsightsDiagnostics()}
+              disabled={loading["meta-insights-load"] || serverAdminAuth.status !== "confirmed"}
+            >
+              {loading["meta-insights-load"] ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+              Обновить список
+            </button>
+            <button
+              type="button"
+              className="neu-btn-primary w-full justify-center sm:w-auto"
+              onClick={() => void synchronizeMetaInsights()}
+              disabled={
+                loading["meta-insights-sync"] ||
+                serverAdminAuth.status !== "confirmed" ||
+                !metaInsightsLaunchId ||
+                !metaInsightsDateStart ||
+                !metaInsightsDateStop
+              }
+            >
+              {loading["meta-insights-sync"] ? <Loader2 className="animate-spin" size={16} /> : <Database size={16} />}
+              Синхронизировать Insights
+            </button>
+          </div>
+
+          {metaInsightsMessage ? (
+            <p className="mt-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-[#334155]">
+              {metaInsightsMessage}
+            </p>
+          ) : null}
+        </section>
+        <section className="neu-card" data-testid="meta-insights-diagnostics">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Admin only · read-only</p>
+              <h2 className="mt-1 text-lg font-black text-[#0F172A]">Meta Insights · диагностика</h2>
+              <p className="mt-1 text-sm text-[#64748B]">
+                Сводка безопасных дневных строк, сохранённых после ручной синхронизации.
+              </p>
+            </div>
+            <span className={`w-fit rounded-full border px-3 py-1 text-xs font-black ${
+              metaInsightsLastRun?.status === "succeeded"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                : metaInsightsLastRun?.status === "failed"
+                  ? "border-red-200 bg-red-50 text-red-700"
+                  : "border-slate-200 bg-slate-50 text-slate-600"
+            }`}>
+              {lastRunLabel}
+            </span>
+          </div>
+
+          <div className="mt-5 grid gap-x-6 gap-y-5 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="min-w-0">
+              <p className="text-xs font-bold uppercase tracking-[0.1em] text-[#64748B]">Последняя синхронизация</p>
+              <p className="mt-1 font-black text-[#0F172A]">{lastRunLabel}</p>
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-bold uppercase tracking-[0.1em] text-[#64748B]">Дата и время</p>
+              <p className="mt-1 font-black text-[#0F172A]">
+                {formatAdminDateTime(metaInsightsLastRun?.finishedAt || metaInsightsLastRun?.createdAt)}
+              </p>
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-bold uppercase tracking-[0.1em] text-[#64748B]">Кампания</p>
+              <p className="mt-1 break-words font-black text-[#0F172A]">
+                {diagnosticsCampaign?.campaignName || "—"}
+              </p>
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-bold uppercase tracking-[0.1em] text-[#64748B]">Запрошенный период</p>
+              <p className="mt-1 font-black text-[#0F172A]">
+                {metaInsightsLastRun?.dateStart && metaInsightsLastRun?.dateStop
+                  ? `${metaInsightsLastRun.dateStart} — ${metaInsightsLastRun.dateStop}`
+                  : "—"}
+              </p>
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-bold uppercase tracking-[0.1em] text-[#64748B]">Строк сохранено за запуск</p>
+              <p className="mt-1 font-black text-[#0F172A]">{metaInsightsLastRun?.rowsUpserted ?? "—"}</p>
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-bold uppercase tracking-[0.1em] text-[#64748B]">Всего строк Insights</p>
+              <p className="mt-1 font-black text-[#0F172A]">{metaInsightsDiagnostics.totalRows}</p>
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-bold uppercase tracking-[0.1em] text-[#64748B]">Последние данные fetched_at</p>
+              <p className="mt-1 font-black text-[#0F172A]">
+                {formatAdminDateTime(metaInsightsDiagnostics.latestFetchedAt)}
+              </p>
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-bold uppercase tracking-[0.1em] text-[#64748B]">Расход в доступных строках</p>
+              <p className="mt-1 break-words font-black text-[#0F172A]">{spendSummaryLabel}</p>
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-bold uppercase tracking-[0.1em] text-[#64748B]">Валюта</p>
+              <p className="mt-1 font-black text-[#0F172A]">{currencySummaryLabel}</p>
+            </div>
+          </div>
+
+          {showEmptyInsightsNote ? (
+            <p className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900">
+              Meta не вернула данные за выбранный период. Это нормально для выключенных или не откручивавшихся кампаний.
+            </p>
+          ) : null}
+          {metaInsightsLastRun?.status === "failed" && metaInsightsLastRun.errorMessage ? (
+            <p className="mt-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-800">
+              {metaInsightsLastRun.errorMessage}
+            </p>
+          ) : null}
+
+          <div className="mt-5 border-t border-[#E2E8F0] pt-4 text-sm text-[#64748B]">
+            <p>Расходы Meta показываются отдельно от выручки CRM.</p>
+            <p className="mt-1 font-semibold text-[#475569]">Это ещё не ROI и не эффективность рекламы.</p>
+          </div>
+        </section>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {providers.length === 0 ? (
+            <section className="neu-card">
+              <p className="text-sm text-[#64748B]">Нажмите “Обновить”, чтобы получить server-side health.</p>
+            </section>
+          ) : (
+            providers.map(([key]) => (
+              <section key={key} className="neu-card">
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="font-black capitalize text-[#0F172A]">{key}</h3>
+                  <StatusPill status={providerStatus(health, key)} />
+                </div>
+                <p className="mt-3 text-sm text-[#64748B]">{providerDetails(health, key)}</p>
+              </section>
+            ))
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <PageLayout>
+      <div className={isMortgage ? "min-w-0 space-y-4" : "min-w-0 space-y-6"}>
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+          <div className="min-w-0">
+            <p className={isMortgage ? "text-xs font-medium text-[var(--negis-muted)]" : "text-xs font-bold uppercase tracking-[0.18em] text-[#64748B]"}>Администрирование</p>
+            <h1 className="mt-2 text-2xl font-semibold leading-8 text-[var(--negis-text)]">{isMortgage ? "Команда" : "Настройки клиники"}</h1>
+            <p className="mt-2 max-w-3xl break-words text-sm text-[#64748B]">
+              {isMortgage ? loginFromEmail(user?.email) || "demo user" : `Клиника: ${workspaceId}. Владелец: ${loginFromEmail(user?.email) || "demo user"}.`}
+            </p>
+          </div>
+          <button type="button" className="neu-btn w-full justify-center xl:w-auto" onClick={() => setLocation(isMortgage ? "/leads" : "/ai-control-center")}>
+            Вернуться в приложение
+          </button>
+        </div>
+
+        {/* Internal platform diagnostics — progressive disclosure for Medina
+            Platform staff only; hidden by default from the clinic settings flow.
+            Commercial-2+ will move this behind a server-verified superadmin role. */}
+        {!isMortgage && <details className="rounded-xl border border-slate-700 bg-slate-900 text-white">
+          <summary className="cursor-pointer select-none p-4 text-sm font-semibold text-slate-200">
+            Диагностика платформы · внутренний раздел Medina Platform
+          </summary>
+          <div className="border-t border-slate-700 p-5">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-teal-300">Панель платформы · Medina OS</p>
+            <h2 className="mt-1 text-lg font-semibold">Внутренняя диагностика платформы</h2>
+            {/* Панель владельца платформы живёт в отдельном портале Medina
+                Control; из продукта клиник на неё не ведёт ничего — само
+                существование экрана со списком всех клиник тоже сведения. */}
+            <p className="mt-1 max-w-3xl text-sm text-slate-300">
+              Раздел для команды Medina Platform. Секреты, токены и service role key здесь не отображаются.
+            </p>
+            <div className="mt-4">
+              <ReleaseBanner readiness={readiness} />
+            </div>
+          </div>
+        </details>}
+
+        <section className={isMortgage && serverAdminAuth.status === "confirmed" ? "flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-[var(--negis-border)] pb-3" : "neu-card flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"} data-testid="server-admin-auth">
+          <div className={isMortgage && serverAdminAuth.status === "confirmed" ? "flex min-w-0 items-center gap-2" : "flex min-w-0 items-start gap-3"}>
+            <span className={isMortgage ? `${serverAdminAuth.status === "confirmed" ? "h-8 w-8" : "mt-0.5 h-10 w-10"} grid shrink-0 place-items-center rounded-lg bg-[var(--negis-mint-soft)] text-[var(--negis-mint-ink)]` : "mt-0.5 grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-teal-50 text-teal-700"}>
+              {serverAdminAuth.status === "checking" ? (
+                <Loader2 className="animate-spin" size={19} />
+              ) : serverAdminAuth.status === "confirmed" ? (
+                <ShieldCheck size={19} />
+              ) : (
+                <AlertTriangle size={19} />
+              )}
+            </span>
+            <div className="min-w-0">
+              <p className={isMortgage && serverAdminAuth.status === "confirmed" ? "sr-only" : isMortgage ? "text-xs font-medium text-[var(--negis-muted)]" : "text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]"}>Сессия</p>
+              <h2 className={isMortgage && serverAdminAuth.status === "confirmed" ? "text-sm font-medium text-[var(--negis-text)]" : "mt-1 text-base font-semibold text-[var(--negis-text)]"}>
+                {serverAdminAuth.status === "confirmed" && "Админ-доступ подтверждён"}
+                {serverAdminAuth.status === "reauth" && "Сессия завершена"}
+                {serverAdminAuth.status === "forbidden" && "Недостаточно прав"}
+                {serverAdminAuth.status === "unavailable" && "Не удалось проверить доступ"}
+                {serverAdminAuth.status === "checking" && "Проверяем доступ…"}
+              </h2>
+              <p className={isMortgage && serverAdminAuth.status === "confirmed" ? "sr-only" : "mt-1 text-sm text-[#64748B]"}>
+                {serverAdminAuth.status === "confirmed" && (isMortgage
+                  ? "Доступ администратора подтверждён для текущего пространства."
+                  : "Доступ администратора подтверждён для текущей клиники.")}
+                {serverAdminAuth.status === "reauth" && "Для защиты данных необходимо войти в аккаунт повторно."}
+                {serverAdminAuth.status === "forbidden" && "Для этого раздела нужна активная роль владельца или администратора."}
+                {serverAdminAuth.status === "unavailable" && "Сервис авторизации временно недоступен. Остальные разделы можно использовать."}
+                {serverAdminAuth.status === "checking" && "Проверяем сессию и права доступа."}
+              </p>
+            </div>
+          </div>
+          <div className={isMortgage && serverAdminAuth.status === "confirmed" ? "flex shrink-0 items-center gap-2" : "flex w-full shrink-0 flex-col gap-2 sm:w-auto sm:flex-row"}>
+            {serverAdminAuth.status === "reauth" ? (
+              <button
+                type="button"
+                className="neu-btn-primary w-full justify-center sm:w-auto"
+                onClick={() => setLocation("/login")}
+              >
+                Войти снова
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className={isMortgage && serverAdminAuth.status === "confirmed" ? "neu-btn justify-center max-sm:min-h-11" : "neu-btn w-full justify-center sm:w-auto"}
+              onClick={() => void checkServerAdminAccess()}
+              disabled={serverAdminAuth.status === "checking"}
+            >
+              <RefreshCw size={16} />
+              Проверить доступ
+            </button>
+          </div>
+        </section>
+
+        {/* Commercial-2: honest pilot status + support path. There is no billing
+            domain yet — no payment claims, no fake purchase flow, no dead CTA
+            buttons. The only action is a functional workspace-ID copy for support. */}
+        <div className={isMortgage ? "min-w-0" : "grid gap-4 lg:grid-cols-2"}>
+          {/*
+            Здесь была одна фраза: «условия пилота и тариф согласуются с
+            менеджером». Тарифов на экране не было вовсе — их ключи жили во
+            фронтенде, цен не было нигде, и клиника не могла узнать, за что и
+            сколько платит. Теперь текущий тариф читается из её собственной
+            подписки, рядом стоит прайс, а расчёт стоимости считает нашу часть
+            счёта и позволяет вписать чужую.
+          */}
+          {!isMortgage && <PlanCalculator />}
+          {!isMortgage && <VerticalSwitch />}
+          <section className={isMortgage ? "grid min-w-0 items-center gap-x-4 gap-y-1 border-b border-[var(--negis-border)] pb-4 sm:grid-cols-[minmax(0,1fr)_auto]" : "neu-card"} aria-label="Поддержка">
+            <p className={isMortgage ? "sr-only" : "text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]"}>Поддержка</p>
+            <h2 className={isMortgage ? "text-sm font-semibold text-[var(--negis-text)]" : "mt-1 text-base font-semibold text-[var(--negis-text)]"}>Связь с Medina OS</h2>
+            <p className={isMortgage ? "text-xs text-[var(--negis-muted)] sm:row-start-2" : "mt-1 text-sm text-[#64748B]"}>
+              {isMortgage
+                ? "По вопросам доступа обращайтесь к вашему менеджеру Medina OS и указывайте идентификатор пространства."
+                : "Канал поддержки настраивается для вашей клиники. До подключения обращайтесь к вашему менеджеру Medina OS и указывайте идентификатор клиники."}
+            </p>
+            <button
+              type="button"
+              className={isMortgage ? "neu-btn mt-2 w-full justify-center max-sm:min-h-11 sm:col-start-2 sm:row-span-2 sm:row-start-1 sm:mt-0 sm:w-auto" : "neu-btn mt-3 w-full justify-center sm:w-auto"}
+              onClick={async () => {
+                if (!access.isCurrent()) return;
+                try {
+                  await navigator.clipboard.writeText(workspaceId);
+                  if (!access.isCurrent()) return;
+                  toast.success(isMortgage ? "Идентификатор пространства скопирован" : "Идентификатор клиники скопирован");
+                } catch {
+                  if (!access.isCurrent()) return;
+                  toast.error("Не удалось скопировать идентификатор");
+                }
+              }}
+            >
+              <Copy size={15} aria-hidden="true" />
+              {isMortgage ? "Скопировать идентификатор пространства" : "Скопировать идентификатор клиники"}
+            </button>
+          </section>
+        </div>
+
+        <div className="md:hidden">
+          <label htmlFor="admin-section" className={isMortgage ? "mb-2 block text-xs font-medium text-[var(--negis-muted)]" : "mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]"}>Раздел админки</label>
+          <select id="admin-section" className="neu-input w-full" value={activeTab} onChange={(event) => setActiveTab(event.target.value as AdminTab)}>
+            {visibleTabs.map((tab) => (
+              <option key={tab.id} value={tab.id}>
+                {/* Счётчик и в мобильном селекте: иначе на телефоне его не
+                    видно вовсе, а именно с телефона смотрят чаще. */}
+                {tabLabel(tab)}
+                {tab.id === "staff" && pendingJoinRequests.length > 0 ? ` (${pendingJoinRequests.length})` : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <nav className="hidden overflow-x-auto md:block" aria-label="Admin sections">
+          <div className={isMortgage ? "inline-flex min-w-max gap-2" : "inline-flex min-w-max gap-2 rounded-[28px] border border-white/70 bg-white/55 p-2 shadow-[8px_10px_28px_rgba(116,135,154,0.12)]"}>
+            {visibleTabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                className={isMortgage ? `flex min-h-10 items-center gap-2 rounded-lg border px-4 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--negis-primary)] ${
+                  activeTab === tab.id ? "border-[var(--negis-mint)] bg-[var(--negis-mint)] text-[var(--negis-mint-ink)]" : "border-[var(--negis-border)] bg-white text-[var(--negis-text-2)] hover:bg-[var(--negis-surface-2)]"
+                }` : `flex min-h-11 items-center gap-2 rounded-2xl px-4 text-sm font-bold transition ${
+                  activeTab === tab.id ? "bg-[#0D9488] text-white shadow-[0_8px_20px_rgba(13,148,136,0.22)]" : "text-[#64748B] hover:bg-white/80"
+                }`}
+                aria-pressed={activeTab === tab.id}
+                onClick={() => setActiveTab(tab.id)}
+              >
+                <tab.icon size={16} />
+                {tabLabel(tab)}
+                {tab.id === "staff" && pendingJoinRequests.length > 0 && (
+                  <span className="rounded-full bg-[#DC2626] px-1.5 text-[11px] font-bold text-white">{pendingJoinRequests.length}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </nav>
+
+        {isMortgage ? (activeTab === "whatsapp" ? renderMortgageWhatsApp() : renderStaff()) : <>
+          {activeTab === "overview" && renderOverview()}
+          {activeTab === "staff" && renderStaff()}
+          {activeTab === "operators" && <ClinicOperators key={workspaceId} workspaceId={workspaceId}
+            actorId={access.actorId} isSessionCurrent={access.isCurrent} />}
+          {activeTab === "creators" && <CreatorJobs workspaceId={workspaceId} actorId={access.actorId} isSessionCurrent={access.isCurrent} />}
+          {activeTab === "doctors" && <DoctorSchedule />}
+          {activeTab === "roles" && renderRoles()}
+          {activeTab === "clinic" && renderClinic()}
+          {activeTab === "whatsapp" && <WhatsAppChannels />}
+          {activeTab === "integrations" && renderIntegrations()}
+          {activeTab === "ai" && renderAiProviders()}
+          {activeTab === "meta" && renderMeta()}
+          {activeTab === "release" && renderReleaseChecklist()}
+          {activeTab === "diagnostics" && renderDiagnostics()}
+        </>}
+      </div>
+    </PageLayout>
+  );
+}
+
+function buildIntegrationCards(health: CrmHealthData | null): IntegrationCard[] {
+  return [
+    {
+      key: "supabase",
+      title: "Supabase",
+      description: "Storage для CRM, настроек и release checklist",
+      status: providerStatus(health, "supabase"),
+      icon: Database,
+      details: providerDetails(health, "supabase"),
+    },
+    {
+      key: "adCreativesStorage",
+      title: "Ad creatives storage",
+      description: "Bucket ad-creatives для фото и видео рекламы",
+      status: providerStatus(health, "adCreativesStorage"),
+      icon: FileCheck2,
+      details: `${providerDetails(health, "adCreativesStorage")}. Дополнительно проверьте /api/crm/storage-health.`,
+    },
+    {
+      key: "telegram",
+      title: "Telegram",
+      description: "Content Studio handoff",
+      status: providerStatus(health, "telegram"),
+      icon: MessageCircle,
+      details: providerDetails(health, "telegram"),
+    },
+    {
+      key: "openai",
+      title: "OpenAI",
+      description: "Content text, summaries, reports",
+      status: providerStatus(health, "openai"),
+      icon: Sparkles,
+      details: providerDetails(health, "openai"),
+    },
+    {
+      key: "anthropic",
+      title: "Anthropic",
+      description: "Targeting Agent analysis",
+      status: providerStatus(health, "anthropic"),
+      icon: Bot,
+      details: providerDetails(health, "anthropic"),
+    },
+    {
+      key: "gemini",
+      title: "Gemini",
+      description: "Prompt generation fallback",
+      status: providerStatus(health, "gemini"),
+      icon: BrainCircuit,
+      details: providerDetails(health, "gemini"),
+    },
+    {
+      key: "elevenlabs",
+      title: "ElevenLabs",
+      description: "Voice generation",
+      status: providerStatus(health, "elevenlabs"),
+      icon: Stethoscope,
+      details: providerDetails(health, "elevenlabs"),
+    },
+    {
+      key: "heygen",
+      title: "HeyGen",
+      description: "Avatar/video generation",
+      status: providerStatus(health, "heygen"),
+      icon: Bot,
+      details: providerDetails(health, "heygen"),
+    },
+    {
+      key: "targetingAgent",
+      title: "Railway Targeting Agent",
+      description: "MedCall analyze / launch / report proxy",
+      status: providerStatus(health, "targetingAgent"),
+      icon: BrainCircuit,
+      details: providerDetails(health, "targetingAgent"),
+    },
+    {
+      key: "meta",
+      title: "Meta/Facebook Ads",
+      description: "Manual approval connector foundation",
+      status: providerStatus(health, "meta"),
+      icon: Facebook,
+      details: providerDetails(health, "meta"),
+    },
+    {
+      key: "tiktok",
+      title: "TikTok Ads",
+      description: "Проверка доступа к рекламному аккаунту без запуска кампаний",
+      status: providerStatus(health, "tiktok"),
+      icon: Music2,
+      details: providerDetails(health, "tiktok"),
+      hint: "Доступ проверяется только на чтение. Создание TikTok-рекламы пока не включено.",
+    },
+  ];
+}
+
+function ReleaseBanner({ readiness }: { readiness: { complete: boolean; blockers: number; score: number } }) {
+  return (
+    <section className={`rounded-[22px] border p-4 ${readiness.complete ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start gap-3">
+          {readiness.complete ? <CheckCircle2 className="mt-0.5 text-emerald-700" size={20} /> : <AlertTriangle className="mt-0.5 text-amber-700" size={20} />}
+          <div>
+            <p className={`font-bold ${readiness.complete ? "text-emerald-800" : "text-amber-800"}`}>
+              {readiness.complete
+                ? "Платформа готова к тестовой работе сотрудников"
+                : "Платформа в режиме подготовки к релизу"}
+            </p>
+            <p className={`mt-1 text-sm ${readiness.complete ? "text-emerald-700" : "text-amber-700"}`}>
+              Готовность платформы: {readiness.score}% · критические проблемы: {readiness.blockers}
+            </p>
+            <p className={`mt-1 text-xs ${readiness.complete ? "text-emerald-700" : "text-amber-700"}`}>
+              Optional AI providers вроде ElevenLabs, HeyGen, Gemini, Anthropic и TapNow не считаются blocker.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function StatusTile({ title, value }: { title: string; value: string }) {
+  return (
+    <div className="rounded-2xl border border-[#E2E8F0] bg-white/70 p-4">
+      <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#94A3B8]">{title}</p>
+      <p className="mt-2 text-2xl font-black text-[#0F172A]">{value}</p>
+    </div>
+  );
+}
+
+function StatusPill({ status, label, compact = false }: { status: Status | ReleaseStatus | string; label?: string; compact?: boolean }) {
+  return (
+    <span className={`inline-flex w-fit shrink-0 items-center whitespace-nowrap border ${compact ? "rounded-md px-2 py-1 text-[11px] font-medium" : "rounded-full px-3 py-1 text-xs font-bold"} ${statusClass(status as Status | ReleaseStatus)}`}>
+      {label || statusLabel(status as Status | ReleaseStatus)}
+    </span>
+  );
+}
+
+function Field({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <label className="block">
+      <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">{label}</span>
+      <input className="neu-input w-full" value={value} onChange={(event) => onChange(event.target.value)} />
+    </label>
+  );
+}
+
+function IntegrationStatusCard({
+  card,
+  loading,
+  onCheck,
+}: {
+  card: IntegrationCard;
+  loading: boolean;
+  onCheck?: () => void | Promise<void>;
+}) {
+  const Icon = card.icon;
+  return (
+    <section className="neu-card" data-testid={`integration-${card.key}`}>
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-3">
+          <div className="rounded-2xl bg-[#E0F2FE] p-2 text-[#0369A1]">
+            <Icon size={20} />
+          </div>
+          <div className="min-w-0">
+            <h3 className="font-black text-[#0F172A]">{card.title}</h3>
+            <p className="mt-1 text-sm text-[#64748B]">{card.description}</p>
+          </div>
+        </div>
+        <StatusPill status={card.status} />
+      </div>
+      <p className="text-sm text-[#334155]">{card.details || "Проверка не выполнялась"}</p>
+      {card.hint && <p className="mt-2 rounded-2xl bg-amber-50 px-3 py-2 text-sm text-amber-800">{card.hint}</p>}
+      {onCheck && (
+        <button type="button" className="neu-btn mt-4 w-full justify-center" disabled={loading} onClick={() => void onCheck()}>
+          {loading ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+          Проверить
+        </button>
+      )}
+    </section>
+  );
+}

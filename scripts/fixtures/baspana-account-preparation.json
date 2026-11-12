@@ -1,0 +1,124 @@
+{
+  "status": "accounts_created",
+  "provisioning": {
+    "createdLogins": [
+      "baspana.dinara", "baspana.tolkyn", "baspana.gulnur", "baspana.adelya",
+      "baspana.nesibeli", "baspana.munira", "baspana.tleugaisha"
+    ],
+    "ownerFirstLogin": "accepted",
+    "staff": "seven_active_profiles_verified",
+    "credentialsDelivery": "owner_saved_one_time_results",
+    "teamAnalytics": "seven_members_loaded_zero_counters"
+  },
+  "target": {
+    "environment": "production",
+    "database": "medcall-negis-crm",
+    "projectRef": "eeoudrmohgftcdoexdmd",
+    "appOrigin": "https://negis-medcall-mvp-api-server.vercel.app",
+    "controlOrigin": "https://medcall-mvp-medina-control.vercel.app",
+    "releaseSource": "1d0afa58138b36598e5b4a6febe59878a16d26be"
+  },
+  "productionRelease": {
+    "approval": {
+      "status": "explicitly_approved",
+      "releaseSource": "1d0afa58138b36598e5b4a6febe59878a16d26be",
+      "necessaryMigrations": ["062", "063", "064", "065", "066", "067", "069"],
+      "accountCreationScope": "all_seven_real_baspana_accounts"
+    },
+    "crm": {
+      "deploymentId": "dpl_3qZHHvHLSRkxEy1mGe5dFpc7QnSM",
+      "status": "READY"
+    },
+    "migrations": {
+      "status": "applied",
+      "applied": ["062", "063", "064", "065", "066", "067", "069"],
+      "exactFunctionHashVerificationCount": 14
+    },
+    "control": {
+      "deploymentId": "dpl_EK7CYSgtmqKudnJBjzcmYJvXuMJc",
+      "status": "READY",
+      "configurationChange": "missing_public_api_url_only",
+      "platformOwnerAuthentication": "accepted",
+      "onboarding": "owner_created"
+    }
+  },
+  "company": {
+    "name": "Baspana ipoteka building",
+    "city": "Астана",
+    "country": "Казахстан"
+  },
+  "platformBusiness": {
+    "reportedName": "ИП Медина",
+    "publicLegalName": "ИП КЫПШАКОВА ДИАНА КИЯСКЫЗЫ",
+    "website": "https://medinaos.com",
+    "websiteStatus": "published_pending_meta_acceptance",
+    "metaPortfolioId": "1694609597992242",
+    "metaPortfolioStatus": "owner_confirmed_unverified",
+    "metaAppPortfolioLinkStatus": "not_confirmed",
+    "verificationStatus": "owner_reports_resubmitted",
+    "verificationEvidence": "owner_message",
+    "verificationObservedOn": "2026-10-15",
+    "verificationNote": "Owner reports resubmitting business verification after the observed rejection. The new submission status or approval has not been independently observed. Do not duplicate the application.",
+    "phoneEvidenceStatus": "owner_reports_phone_confirmation",
+    "phoneEvidenceNote": "Owner reports personally confirming the WhatsApp number. The last observed Meta notice before reported resubmission rejected company phone evidence. Number verification does not establish business verification or CRM connection."
+  },
+  "onboardingDraft": {
+    "name": "Baspana ipoteka building",
+    "purpose": "mortgage_leads",
+    "vertical": "",
+    "ownerLogin": "baspana.dinara",
+    "ownerName": "Динара",
+    "timeZone": "Asia/Almaty"
+  },
+  "ownerBootstrapAcceptance": {
+    "status": "accepted",
+    "scope": "test_owner_only",
+    "release": "9a9d25a",
+    "acceptedOn": "2026-10-14"
+  },
+  "confirmedTimeZone": "Asia/Almaty",
+  "timeZoneConfirmedOn": "2026-10-15",
+  "accounts": [
+    { "login": "baspana.dinara", "fullName": "Динара", "role": "owner" },
+    { "login": "baspana.tolkyn", "fullName": "Турсын Толкын", "role": "admin" },
+    { "login": "baspana.gulnur", "fullName": "Танетова Гульнур", "role": "lead_manager" },
+    { "login": "baspana.adelya", "fullName": "Кажыгалиева Аделя", "role": "lead_manager" },
+    { "login": "baspana.nesibeli", "fullName": "Ахметова Несибели", "role": "lead_manager" },
+    { "login": "baspana.munira", "fullName": "Айтмухамедова Мунира", "role": "lead_manager" },
+    { "login": "baspana.tleugaisha", "fullName": "Накишева Тлеугайша", "role": "lead_manager" }
+  ],
+  "assignment": {
+    "mode": "manual",
+    "assignedByRole": "admin",
+    "assigneeRole": "lead_manager",
+    "managerVisibility": "assigned_only",
+    "unassignedVisibleTo": ["owner", "admin"]
+  },
+  "whatsapp": {
+    "selectedApproach": "direct_meta_negis",
+    "connectionMode": "coexistence",
+    "allowApiOnly": false,
+    "metaAppId": "1791176138576964",
+    "provider": null,
+    "enabled": false,
+    "phoneNumberId": null,
+    "channelId": null,
+    "inboundOnly": true,
+    "preserveBusinessApp": true,
+    "importHistory": false
+  },
+  "pending": [],
+  "whatsappPending": [
+    "platform_website_meta_acceptance",
+    "platform_business_identity_and_portfolio",
+    "platform_phone_ownership_evidence",
+    "meta_app_portfolio_link_confirmation",
+    "meta_tech_provider_and_app_review",
+    "coexistence_embedded_signup_acceptance",
+    "shared_meta_callback_isolation",
+    "test_channel_schema_and_permissions",
+    "atomic_inbound_deduplication_acceptance",
+    "mortgage_channel_disable_rollback",
+    "signed_synthetic_inbound_and_assignment_acceptance"
+  ]
+}

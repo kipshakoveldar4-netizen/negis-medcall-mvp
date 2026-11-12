@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Medina OS monogram: primary teal, geometric M -->
+  <rect width="64" height="64" rx="14" fill="#0F766E"/>
+  <path
+    d="M15 47 L15 17 L21.5 17 L32 32.5 L42.5 17 L49 17 L49 47 L43 47 L43 27.5 L34 40.5 L30 40.5 L21 27.5 L21 47 Z"
+    fill="#FFFFFF"
+  />
+</svg>

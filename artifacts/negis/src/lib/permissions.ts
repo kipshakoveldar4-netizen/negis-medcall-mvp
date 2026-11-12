@@ -1,0 +1,201 @@
+export const staffRoles = ["owner", "admin", "receptionist", "marketer", "doctor", "manager", "lead_manager"] as const;
+
+export type StaffRole = (typeof staffRoles)[number];
+
+/**
+ * Ранг ролей — копия серверного (lib/auth/permissions.ts): экран показывает
+ * ровно те роли, которые сервер примет. Раньше админ, выбравший
+ * «Администратор», всегда получал 403 без объяснения, какая роль допустима.
+ * Значения обязаны совпадать с серверными — расхождение вернёт это же 403;
+ * сервер остаётся единственным, кто решает.
+ */
+const roleRank: Record<StaffRole, number> = {
+  owner: 100,
+  admin: 80,
+  manager: 60,
+  marketer: 40,
+  doctor: 40,
+  receptionist: 20,
+  lead_manager: 20,
+};
+
+/** Роль строго ниже своей; owner не выдаётся никому и никогда. */
+export function canAssignRole(actorRole: StaffRole, targetRole: StaffRole): boolean {
+  if (targetRole === "owner") return false;
+  return roleRank[actorRole] > roleRank[targetRole];
+}
+
+export const crmPermissions = [
+  "view_clients",
+  "manage_clients",
+  "view_appointments",
+  "manage_appointments",
+  "view_leads",
+  "manage_leads",
+  "view_calls",
+  "manage_calls",
+  "view_tasks",
+  "manage_tasks",
+  "view_chat",
+  "send_chat",
+  "view_marketing",
+  "manage_marketing",
+  "view_ai_content",
+  "manage_ai_content",
+  "view_targeting",
+  "manage_targeting",
+  "view_reports",
+  "view_admin",
+  // Справочники клиники: прайс, исполнители и их график. Отдельно от view_admin
+  // намеренно — право на прайс не должно тянуть за собой право на секреты.
+  "manage_directory",
+  "manage_staff",
+  "manage_integrations",
+] as const;
+
+export type CrmPermission = (typeof crmPermissions)[number];
+
+const rolePermissions: Record<StaffRole, CrmPermission[]> = {
+  owner: [...crmPermissions],
+  lead_manager: ["view_leads", "manage_leads"],
+  admin: [
+    "manage_directory",
+    "view_clients",
+    "manage_clients",
+    "view_appointments",
+    "manage_appointments",
+    "view_leads",
+    "manage_leads",
+    "view_calls",
+    "manage_calls",
+    "view_tasks",
+    "manage_tasks",
+    "view_chat",
+    "send_chat",
+    "view_marketing",
+    "manage_marketing",
+    "view_ai_content",
+    "manage_ai_content",
+    "view_targeting",
+    "manage_targeting",
+    "view_reports",
+    "view_admin",
+    "manage_staff",
+    "manage_integrations",
+  ],
+  receptionist: [
+    // Администратор салона правит прайс, мастеров и смены сам.
+    "manage_directory",
+    "view_clients",
+    "manage_clients",
+    "view_appointments",
+    "manage_appointments",
+    "view_leads",
+    "manage_leads",
+    "view_calls",
+    "manage_calls",
+    "view_tasks",
+    "manage_tasks",
+    "view_chat",
+    "send_chat",
+  ],
+  marketer: [
+    "view_clients",
+    "view_leads",
+    "manage_leads",
+    "view_tasks",
+    "manage_tasks",
+    "view_chat",
+    "send_chat",
+    "view_marketing",
+    "manage_marketing",
+    "view_ai_content",
+    "manage_ai_content",
+    "view_targeting",
+    "manage_targeting",
+    "view_reports",
+  ],
+  doctor: [
+    // view_clients СНЯТО намеренно и синхронно с серверным каталогом
+    // (lib/auth/permissions.ts): мастер не видит контактов клиентов. Эта копия
+    // управляет только видимостью экранов — власть у сервера, — но
+    // расхождение показало бы мастеру раздел «Клиенты», который ответит 403.
+    "view_appointments",
+    "manage_appointments",
+    "view_tasks",
+    "manage_tasks",
+    "view_chat",
+    "send_chat",
+  ],
+  manager: [
+    // Управляющий правил прайс через view_admin; с выделением отдельного
+    // права справочников оно ему возвращается явно, а не через админку.
+    "manage_directory",
+    "view_clients",
+    "manage_clients",
+    "view_appointments",
+    "manage_appointments",
+    "view_leads",
+    "manage_leads",
+    "view_calls",
+    "manage_calls",
+    "view_tasks",
+    "manage_tasks",
+    "view_chat",
+    "send_chat",
+    "view_marketing",
+    "view_ai_content",
+    "view_targeting",
+    "view_reports",
+    "view_admin",
+  ],
+};
+
+export const roleLabels: Record<StaffRole, string> = {
+  owner: "Владелец",
+  admin: "Администратор",
+  receptionist: "Ресепшн",
+  marketer: "Маркетолог",
+  doctor: "Врач",
+  manager: "Менеджер",
+  lead_manager: "Менеджер заявок",
+};
+
+export const permissionLabels: Record<CrmPermission, string> = {
+  view_clients: "Просмотр клиентов",
+  manage_clients: "Управление клиентами",
+  view_appointments: "Просмотр записей",
+  manage_appointments: "Управление записями",
+  view_leads: "Просмотр лидов",
+  manage_leads: "Управление лидами",
+  view_calls: "Просмотр звонков",
+  manage_calls: "Управление звонками",
+  view_tasks: "Просмотр задач",
+  manage_tasks: "Управление задачами",
+  view_chat: "Просмотр чата",
+  send_chat: "Отправка сообщений",
+  view_marketing: "Маркетинг",
+  manage_marketing: "Управление маркетингом",
+  view_ai_content: "ИИ студия контента",
+  manage_ai_content: "Управление ИИ контентом",
+  view_targeting: "ИИ таргетолог",
+  manage_targeting: "Управление таргетингом",
+  view_reports: "Отчёты",
+  view_admin: "Админ панель",
+  manage_directory: "Справочники клиники",
+  manage_staff: "Сотрудники",
+  manage_integrations: "Интеграции",
+};
+
+export function permissionsForRole(role: StaffRole): CrmPermission[] {
+  return rolePermissions[role] ?? [];
+}
+
+export function isStaffRole(value: unknown): value is StaffRole {
+  return typeof value === "string" && staffRoles.includes(value as StaffRole);
+}
+
+export function hasPermission(role: StaffRole | string | null | undefined, permission: CrmPermission): boolean {
+  if (!isStaffRole(role)) return false;
+  return permissionsForRole(role).includes(permission);
+}

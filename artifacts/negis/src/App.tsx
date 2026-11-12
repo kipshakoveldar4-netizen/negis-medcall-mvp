@@ -1,0 +1,404 @@
+import { lazy, Suspense, useEffect, type ComponentType } from "react";
+import { Switch, Route, Redirect, Router as WouterRouter, useLocation } from "wouter";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Toaster } from "sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { AuthProvider } from "@/contexts/AuthContext";
+import { useAuth } from "@/contexts/AuthContext";
+import { workspaceAllowsRoute } from "@/lib/workspaceRoutes";
+import { LoaderCircle, RotateCw } from "lucide-react";
+
+// Eager: the public entry (Landing) and the shared fallbacks stay in the main
+// chunk so the first paint never waits on a second request.
+import Landing from "@/pages/Landing";
+import DemoPlaceholder from "@/pages/DemoPlaceholder";
+import { UpdatePrompt } from "@/components/layout/UpdatePrompt";
+import NotFound from "@/pages/not-found";
+import FbPixelInit from "@/components/FbPixelInit";
+import { WorkspacePicker } from "@/components/WorkspacePicker";
+import { RouteErrorBoundary } from "@/components/layout/RouteErrorBoundary";
+import { WebAnalytics } from "@/components/WebAnalytics";
+
+// Lazy: every operational screen loads as its own chunk. Before this, all 28
+// routes (including the 4.6k-line AdsAutomation) shipped in one bundle that
+// the landing page had to download.
+const Login = lazy(() => import("@/pages/Login"));
+const Onboarding = lazy(() => import("@/pages/Onboarding"));
+const JoinWorkspace = lazy(() => import("@/pages/JoinWorkspace"));
+const JoinRequest = lazy(() => import("@/pages/JoinRequest"));
+const OperatorPortal = lazy(() => import("@/pages/OperatorPortal"));
+const ContributorPortal = lazy(() => import("@/pages/ContributorPortal"));
+const PartnerEntry = lazy(() => import("@/pages/PartnerEntry"));
+const PartnerCompany = lazy(() => import("@/pages/PartnerCompany"));
+const ClientBasePage = lazy(() => import("@/pages/ClientBasePage"));
+const StatsPage = lazy(() => import("@/pages/StatsPage"));
+const Dashboard = lazy(() => import("@/pages/Dashboard"));
+const MortgageOverview = lazy(() => import("@/pages/MortgageOverview"));
+const MortgageClients = lazy(() => import("@/pages/MortgageClients"));
+const MortgageCalendar = lazy(() => import("@/pages/MortgageCalendar"));
+const MortgageTasks = lazy(() => import("@/pages/MortgageTasks"));
+const MortgageAnalytics = lazy(() => import("@/pages/MortgageAnalytics"));
+const AiControlCenter = lazy(() => import("@/pages/AiControlCenter"));
+// Security-1A removed the legacy ad cabinet that queried tables absent from the
+// production schema. /ads is now a small hub over the supported advertising
+// resources; the launch implementation remains isolated in AdsAutomation.
+const AdvertisingHub = lazy(() => import("@/pages/AdvertisingHub"));
+const AdsAutomation = lazy(() => import("@/pages/AdsAutomation"));
+const AppointmentsPage = lazy(() => import("@/pages/AppointmentsPage").then(m => ({ default: m.AppointmentsPage })));
+const ContentStudio = lazy(() => import("@/pages/ContentStudio"));
+const SiteBlog = lazy(() => import("@/pages/SiteBlog"));
+const AdminCenter = lazy(() => import("@/pages/AdminCenter"));
+const LeadsPage = lazy(() => import("@/pages/LeadsPage"));
+const ClientsPage = lazy(() => import("@/pages/ClientsPage"));
+const SalesPage = lazy(() => import("@/pages/SalesPage"));
+const ServicesPage = lazy(() => import("@/pages/ServicesPage"));
+const DemoCalls = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoCalls })));
+const DemoChat = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoChat })));
+const MarketplacePage = lazy(() => import("@/pages/MarketplacePage"));
+const DirectoryPage = lazy(() => import("@/pages/DirectoryPage"));
+
+
+const DemoTasks = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoTasks })));
+const Privacy = lazy(() => import("@/pages/Privacy"));
+const Terms = lazy(() => import("@/pages/Terms"));
+const DataDeletion = lazy(() => import("@/pages/DataDeletion"));
+const ResetPassword = lazy(() => import("@/pages/ResetPassword"));
+
+/**
+ * Warms the lazy route chunks once the user is authenticated and the browser
+ * is idle. Measured on production: ProtectedPage keeps a route unmounted until
+ * auth resolves, so the page's chunk request used to start only ~2.3s into a
+ * cold load, and every first visit to a section paid its chunk fetch inside
+ * the transition. Vite deduplicates dynamic imports, so a warmed chunk makes
+ * the later route render use it from module cache — and a prefetch failure is
+ * harmless, the route import simply fetches again.
+ */
+const PREFETCH_ROUTES: Array<() => Promise<unknown>> = [
+  () => import("@/pages/AiControlCenter"),
+  () => import("@/pages/Dashboard"),
+  () => import("@/pages/LeadsPage"),
+  () => import("@/pages/ClientsPage"),
+  () => import("@/pages/AppointmentsPage"),
+  () => import("@/pages/SalesPage"),
+  () => import("@/pages/AdminCenter"),
+  () => import("@/pages/DemoCrmModules"),
+  () => import("@/pages/AdvertisingHub"),
+  // The two heaviest chunks benefit the most: AdsAutomation alone is ~34KB
+  // gzip, which used to sit inside the first transition to /ads-automation.
+  () => import("@/pages/AdsAutomation"),
+  () => import("@/pages/ContentStudio"),
+];
+
+function RoutePrefetcher() {
+  const { isLoading, userRole, workspacePurpose } = useAuth();
+
+  useEffect(() => {
+    if (isLoading || !userRole || !workspacePurpose) return;
+    const idle: (cb: () => void) => number =
+      typeof window.requestIdleCallback === "function"
+        ? (cb) => window.requestIdleCallback(cb)
+        : (cb) => window.setTimeout(cb, 1200);
+    let cancelled = false;
+    idle(() => {
+      if (cancelled) return;
+      const loads = workspacePurpose === 'mortgage_leads'
+        ? [() => import('@/pages/MortgageOverview'), () => import('@/pages/MortgageCalendar'), () => import('@/pages/MortgageClients'), () => import('@/pages/MortgageTasks'), () => import('@/pages/LeadsPage'), ...(userRole === 'owner' || userRole === 'admin' ? [() => import('@/pages/AdminCenter'), () => import('@/pages/MortgageAnalytics')] : [])]
+        : PREFETCH_ROUTES;
+      for (const load of loads) void load().catch(() => undefined);
+    });
+    return () => { cancelled = true; };
+  }, [isLoading, userRole, workspacePurpose]);
+
+  return null;
+}
+
+function RouteFallback() {
+  return (
+    <div className="flex min-h-screen items-center justify-center" style={{ background: "var(--negis-bg)" }}>
+      <div className="text-xs font-medium tracking-[0.14em]" style={{ color: "var(--negis-muted)" }}>
+        ЗАГРУЗКА…
+      </div>
+    </div>
+  );
+}
+
+const queryClient = new QueryClient();
+
+const ROUTE_PERMISSIONS: Record<string, string> = {
+  '/ai-control-center': 'dashboard',
+  '/dashboard': 'dashboard',
+  '/booking': 'booking',
+  '/appointments': 'booking',
+  '/services': 'booking',
+  '/staff-schedule': 'directory',
+  '/reception': 'reception',
+  '/calls': 'reception',
+  '/sales': 'crm',
+  '/leads': 'crm',
+  '/clients': 'crm',
+  '/tasks': 'tasks',
+  '/analytics': 'crm',
+  '/chat': 'chat',
+  '/marketplace': 'marketplace',
+  '/market': 'marketplace',
+  '/admin': 'admin',
+  '/ads': 'ads',
+  '/ads-automation': 'ads',
+  '/reports': 'ads',
+  '/profile': 'dashboard',
+  '/targeting-agent': 'ads',
+  '/content-studio': 'ads',
+  '/site-blog': 'admin',
+  '/ai-content-studio': 'ads',
+  '/content': 'ads',
+  '/studio': 'ads',
+};
+
+function firstAllowedRoute(rolePermissions: Record<string, boolean>, userRole: string | null, workspacePurpose: ReturnType<typeof useAuth>['workspacePurpose']) {
+  if (workspacePurpose === 'mortgage_leads') {
+    return workspaceAllowsRoute(workspacePurpose, userRole, '/dashboard') && rolePermissions.crm ? '/dashboard' : '/';
+  }
+  if (userRole === 'lead_manager') return '/leads';
+  const first = Object.entries(ROUTE_PERMISSIONS).find(([route, permission]) =>
+    workspaceAllowsRoute(workspacePurpose, userRole, route) && rolePermissions[permission]);
+  return first?.[0] ?? '/';
+}
+
+/* ── Impersonation Banner ────────────────────────────────── */
+function ImpersonationBanner() {
+  const { isImpersonation, impersonationClinicName, signOut } = useAuth();
+  if (!isImpersonation) return null;
+
+  return (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9999,
+      height: 40,
+      background: '#DC2626',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
+      fontFamily: "'Inter', sans-serif", fontSize: 13, fontWeight: 500,
+      color: '#FFFFFF',
+      letterSpacing: '0.01em',
+    }}>
+      <span style={{ opacity: 0.75, fontSize: 12 }}>РЕЖИМ ПРОСМОТРА</span>
+      <span style={{ opacity: 0.35 }}>|</span>
+      <span>{impersonationClinicName}</span>
+      <span style={{ opacity: 0.35 }}>|</span>
+      <button
+        onClick={signOut}
+        style={{
+          background: 'rgba(255,255,255,0.15)',
+          border: '1px solid rgba(255,255,255,0.30)',
+          borderRadius: 6,
+          color: '#FFFFFF', cursor: 'pointer',
+          fontSize: 12, fontWeight: 600,
+          padding: '3px 10px',
+          fontFamily: "'Inter', sans-serif",
+          letterSpacing: '0.03em',
+        }}
+      >
+        Выйти
+      </button>
+    </div>
+  );
+}
+
+export function ProtectedPage({
+  component: Component,
+  permission,
+  demoFallbackTitle,
+}: {
+  component: ComponentType;
+  permission: string;
+  demoFallbackTitle?: string;
+}) {
+  const { isLoading, user, clinicId, userRole, rolePermissions, isDemoMode, workspacePurpose, signOut } = useAuth();
+  const [location, setLocation] = useLocation();
+  const roleAllowed = userRole === 'lead_manager'
+    ? permission === 'crm' && (location === '/leads' || (workspacePurpose === 'mortgage_leads' && workspaceAllowsRoute(workspacePurpose, userRole, location)))
+    : userRole === 'owner' || userRole === 'manager' || !!rolePermissions[permission];
+  const allowed = roleAllowed && workspaceAllowsRoute(workspacePurpose, userRole, location);
+  const noMortgageRoute = workspacePurpose === 'mortgage_leads'
+    && !workspaceAllowsRoute(workspacePurpose, userRole, '/leads');
+
+  useEffect(() => {
+    if (isLoading || allowed || noMortgageRoute) return;
+    const target = firstAllowedRoute(rolePermissions, userRole, workspacePurpose);
+    if (target !== location) setLocation(target);
+  }, [allowed, isLoading, noMortgageRoute, location, rolePermissions, userRole, workspacePurpose, setLocation]);
+
+  if (isLoading) return null;
+  // Landing sends a signed-in mortgage user back to /leads; redirecting there
+  // via / would loop when this role has no permitted mortgage route.
+  if (noMortgageRoute) return (
+    <main className="flex min-h-screen flex-col items-center justify-center gap-4 px-6 text-center" style={{ background: "var(--negis-bg)", color: "var(--negis-text)" }}>
+      <h1 className="text-xl font-semibold">Доступ к пространству ограничен</h1>
+      <p className="max-w-md text-sm" style={{ color: "var(--negis-muted)" }}>Для вашей роли нет доступных разделов. Обратитесь к администратору пространства.</p>
+      <button type="button" className="min-h-11 rounded-md border px-4 text-sm font-medium" onClick={() => void signOut()}>Выйти</button>
+    </main>
+  );
+  if (!allowed) return null;
+  if (isDemoMode && demoFallbackTitle) return <DemoPlaceholder title={demoFallbackTitle} />;
+  return <Component key={`${user?.id ?? ''}:${clinicId ?? ''}:${userRole ?? ''}:${workspacePurpose ?? ''}`} />;
+}
+
+/* ── Router ── */
+/**
+ * Pages that answer to more than one path get one stable component each.
+ *
+ * `component={() => <ProtectedPage ... />}` written inline creates a new
+ * function on every Route, so two paths pointing at the same page are two
+ * different element types to React. Switching between them unmounts the page
+ * and mounts it again from scratch instead of keeping the mounted tree.
+ *
+ * On /ads-automation that was expensive in a way the user feels: opening
+ * «История запусков» and coming back dropped the whole wizard — the uploaded
+ * creative, the AI package, the confirmations — and silently killed the
+ * setInterval watching a running video optimisation (AdsAutomation.tsx:1697),
+ * so the job kept finishing on the server while the screen showed an empty
+ * step 1. The other three pairs lose their page state the same way.
+ *
+ * Single-path routes below keep their inline wrapper: Router does not
+ * re-render (only Switch subscribes to location), so those closures are stable
+ * for the life of the app, and moving between two different pages is supposed
+ * to unmount anyway.
+ */
+function PurposePage({ mortgage, clinic, permission }: { mortgage: ComponentType; clinic: ComponentType; permission: string }) {
+  const { workspacePurpose } = useAuth();
+  return <ProtectedPage component={workspacePurpose === 'mortgage_leads' ? mortgage : clinic} permission={workspacePurpose === 'mortgage_leads' ? 'crm' : permission} />;
+}
+const AppointmentsRoute = () => <PurposePage mortgage={MortgageCalendar} clinic={AppointmentsPage} permission="booking" />;
+const MarketRoute = () => <ProtectedPage component={MarketplacePage} permission="marketplace" />;
+const AdvertisingHubRoute = () => <ProtectedPage component={AdvertisingHub} permission="ads" />;
+const AdsAutomationRoute = () => <ProtectedPage component={AdsAutomation} permission="ads" />;
+const ContentStudioRoute = () => <ProtectedPage component={ContentStudio} permission="ads" />;
+
+function Router() {
+  return (
+    <RouteErrorBoundary>
+    <Suspense fallback={<RouteFallback />}>
+    <Switch>
+      <Route path="/" component={Landing} />
+      <Route path="/login" component={Login} />
+      <Route path="/onboarding" component={Onboarding} />
+      <Route path="/join" component={JoinWorkspace} />
+      {/* Заявка по коду клиники — отдельный маршрут: /join гасит токен
+          приглашения, и смешивать эти два пути нельзя. */}
+      <Route path="/join-request" component={JoinRequest} />
+      <Route path="/operator" component={OperatorPortal} />
+      <Route path="/contributors" component={ContributorPortal} />
+      <Route path="/r/:code" component={PartnerEntry} />
+      <Route path="/partner-company" component={PartnerCompany} />
+      <Route path="/ai-control-center" component={() => <ProtectedPage component={AiControlCenter} permission="dashboard" />} />
+      <Route path="/dashboard" component={() => <PurposePage mortgage={MortgageOverview} clinic={Dashboard} permission="dashboard" />} />
+      <Route path="/analytics" component={() => <PurposePage mortgage={MortgageAnalytics} clinic={NotFound} permission="crm" />} />
+      <Route path="/booking" component={AppointmentsRoute} />
+      <Route path="/appointments" component={AppointmentsRoute} />
+      {/*
+        /reception и /reports вели на экраны без единого источника данных: ни
+        маршрута в API, ни ресурса в реестре. Любому пользователю настоящей
+        клиники они показывали трёх выдуманных пациентов с телефонами и
+        недельную выручку в сотни тысяч тенге — числа, одинаковые при любой
+        базе, включая пустую.
+        Оба ведут туда, где то же самое считается по строкам клиники: приём —
+        это заявки и записи, отчёты — сводка.
+      */}
+      <Route path="/reception">
+        <Redirect to="/leads" />
+      </Route>
+      <Route path="/calls" component={() => <ProtectedPage component={DemoCalls} permission="reception" />} />
+      <Route path="/sales" component={() => <ProtectedPage component={SalesPage} permission="crm" />} />
+      <Route path="/services" component={() => <ProtectedPage component={ServicesPage} permission="booking" />} />
+      {/*
+        Мастера и график — отдельным маршрутом, а не только вкладкой
+        админ-центра. Правит их тот, кто ведёт запись каждый день: у
+        администратора салона права manage_directory достаточно, а весь
+        админ-центр с ключами интеграций ему по-прежнему закрыт.
+      */}
+      {/*
+        База клиентов по мастерам. Право booking, а не crm: мастер должен сюда
+        попадать, а crm ему закрыт намеренно — оно открывает списки всей клиники.
+        Сужение до своей части и срез номеров делает сервер.
+      */}
+      <Route path="/client-base" component={() => <ProtectedPage component={ClientBasePage} permission="booking" />} />
+      <Route path="/staff-schedule" component={() => <ProtectedPage component={DirectoryPage} permission="directory" />} />
+      <Route path="/leads" component={() => <ProtectedPage component={LeadsPage} permission="crm" />} />
+      <Route path="/clients" component={() => <PurposePage mortgage={MortgageClients} clinic={ClientsPage} permission="crm" />} />
+      <Route path="/tasks" component={() => <PurposePage mortgage={MortgageTasks} clinic={DemoTasks} permission="tasks" />} />
+      <Route path="/chat" component={() => <ProtectedPage component={DemoChat} permission="chat" />} />
+      <Route path="/marketplace" component={MarketRoute} />
+      {/* Панель платформы выехала из CRM в отдельный портал Medina Control
+          (artifacts/medina-control): в продукте клиник её кода больше нет,
+          бывший адрес /platform падает в общий 404 ниже. */}
+      <Route path="/market" component={MarketRoute} />
+      <Route path="/admin" component={() => <ProtectedPage component={AdminCenter} permission="admin" />} />
+      <Route path="/ads" component={AdvertisingHubRoute} />
+      <Route path="/ads-automation/history" component={AdsAutomationRoute} />
+      <Route path="/ads-automation" component={AdsAutomationRoute} />
+      {/* Legacy ad cabinet links keep working by pointing at the supported module. */}
+      <Route path="/advertising">
+        <Redirect to="/ads" />
+      </Route>
+      {/* Статистика владельца: выручка, загрузка, услуги. Право reports —
+          view_reports у owner/admin/manager/marketer. */}
+      <Route path="/reports" component={() => <ProtectedPage component={StatsPage} permission="reports" />} />
+      <Route path="/profile" component={() => <ProtectedPage component={() => <DemoPlaceholder title="Профиль" />} permission="dashboard" />} />
+      {/* AI Target is no longer a standalone module: its functionality lives inside
+          Ads Automation ("ИИ заполнит"). Old links land on /ads-automation. */}
+      <Route path="/targeting-agent">
+        <Redirect to="/ads-automation" />
+      </Route>
+      <Route path="/content-studio" component={ContentStudioRoute} />
+      <Route path="/site-blog"><ProtectedPage component={SiteBlog} permission="admin" /></Route>
+      <Route path="/ai-content-studio" component={ContentStudioRoute} />
+      <Route path="/content" component={ContentStudioRoute} />
+      <Route path="/studio" component={ContentStudioRoute} />
+      <Route path="/privacy" component={Privacy} />
+      <Route path="/terms" component={Terms} />
+      <Route path="/data-deletion" component={DataDeletion} />
+      <Route path="/reset-password" component={ResetPassword} />
+      <Route component={NotFound} />
+    </Switch>
+    </Suspense>
+    </RouteErrorBoundary>
+  );
+}
+
+/* ── App ── */
+function SessionContent() {
+  const { isSigningOut, signOutFailed, signOut } = useAuth();
+  if (isSigningOut) return (
+    <main className="flex min-h-screen flex-col items-center justify-center gap-4 px-6 text-center" aria-live="polite" style={{ background: "var(--negis-bg)", color: "var(--negis-text)" }}>
+      {!signOutFailed && <LoaderCircle size={24} className="animate-spin" aria-hidden="true" />}
+      <h1 className="text-lg font-semibold">{signOutFailed ? 'Не удалось завершить выход' : 'Выходим из аккаунта'}</h1>
+      {signOutFailed && <button type="button" className="flex min-h-11 items-center gap-2 rounded-md border px-4 text-sm font-medium" onClick={() => void signOut()}>
+        <RotateCw size={16} aria-hidden="true" />Повторить выход
+      </button>}
+    </main>
+  );
+  return <>
+    <FbPixelInit />
+    <ImpersonationBanner />
+    <WorkspacePicker />
+    <RoutePrefetcher />
+    <Router />
+    <UpdatePrompt />
+  </>;
+}
+
+function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+        <WebAnalytics />
+        <AuthProvider>
+          <TooltipProvider>
+            <SessionContent />
+            <Toaster position="bottom-right" />
+          </TooltipProvider>
+        </AuthProvider>
+      </WouterRouter>
+    </QueryClientProvider>
+  );
+}
+
+export default App;

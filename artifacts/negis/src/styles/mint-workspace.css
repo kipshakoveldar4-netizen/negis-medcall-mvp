@@ -1,0 +1,230 @@
+/* The selected Mint Office system is limited to authenticated app surfaces. */
+.negis-app-shell {
+  --negis-ground: #F5F7F6;
+  --negis-bg: #F5F7F6;
+  --negis-surface: #FFFFFF;
+  --negis-surface-2: #F8FAF9;
+  --negis-border: #E3E9E6;
+  --negis-text: #17211C;
+  --negis-text-2: #526159;
+  --negis-muted: #65766C;
+  --negis-shadow-soft: 0 1px 3px rgb(20 35 26 / 4%);
+  --negis-shadow-lift: 0 4px 18px rgb(20 35 26 / 8%);
+  --negis-radius-card: 8px;
+  letter-spacing: 0;
+}
+
+.negis-app-shell .negis-topbar {
+  background: var(--negis-ground);
+  border-bottom: 1px solid var(--negis-border);
+}
+
+.negis-app-shell .negis-main {
+  padding-top: 28px;
+}
+
+.negis-app-shell :is(h1, h2, h3) {
+  font-weight: 500;
+}
+
+.negis-app-shell :is(.neu, .neu-sm, .neu-card, .negis-glass, .negis-glass-hero) {
+  border: 1px solid var(--negis-border);
+  border-radius: 8px;
+  box-shadow: var(--negis-shadow-soft);
+}
+
+.negis-app-shell :is(.neu-pressed, .neu-pressed-sm, .neu-input) {
+  border-radius: 8px;
+}
+
+.negis-app-shell :is(.neu-btn, .neu-btn-primary, .neu-btn-success, .neu-btn-danger) {
+  min-height: 38px;
+  max-width: 100%;
+  padding: 8px 14px;
+  border-radius: 8px;
+  line-height: 1.4;
+  box-shadow: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+
+.negis-app-shell .neu-btn {
+  border: 1px solid var(--negis-border);
+  background: var(--negis-surface);
+  color: var(--negis-text);
+}
+
+.negis-app-shell .neu-btn:hover {
+  background: var(--negis-surface-2);
+  border-color: #B9C8BF;
+}
+
+.negis-app-shell .neu-icon-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--negis-border);
+  box-shadow: none;
+}
+
+.negis-app-shell .badge {
+  border-radius: 5px;
+  padding: 3px 7px;
+  letter-spacing: 0;
+}
+
+.negis-app-shell .medina-sidebar {
+  border: 1px solid var(--negis-dark-line);
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.negis-app-shell .medina-sidebar [data-active] {
+  border-radius: 6px;
+}
+
+.negis-app-shell .medina-sidebar [data-active="false"]:hover {
+  background: var(--negis-dark-line) !important;
+  color: var(--negis-dark-text) !important;
+}
+
+.negis-app-shell .medina-sidebar nav p {
+  font-size: 10px;
+  letter-spacing: 0;
+}
+
+.negis-app-shell .medina-table {
+  overflow-x: auto;
+  border: 1px solid var(--negis-border);
+  border-radius: 8px;
+  background: var(--negis-surface);
+}
+
+.negis-app-shell table :is(th, td) {
+  vertical-align: middle;
+}
+
+.negis-app-shell table th {
+  background: var(--negis-surface-2);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.negis-app-shell table td {
+  font-size: 13px;
+}
+
+.negis-app-shell .mobile-bottom-nav {
+  border-radius: 8px;
+  box-shadow: 0 2px 16px rgb(20 35 26 / 8%);
+}
+
+.negis-app-shell :is(.mobile-bottom-nav-item, .mobile-nav-drawer-item, .mobile-nav-logout, .mobile-nav-sheet) {
+  border-radius: 6px;
+}
+
+.negis-app-shell .mobile-bottom-nav-item.is-active {
+  background: var(--negis-mint);
+  color: var(--negis-mint-ink);
+}
+
+.negis-app-shell .medina-overview-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.negis-app-shell .medina-overview-work {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px;
+}
+
+.negis-app-shell .medina-section-heading {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--negis-border);
+}
+
+.negis-app-shell .medina-overview-metric {
+  min-height: 104px;
+}
+
+/* Entry only: never retain private content on exit or transform fixed dialogs. */
+@keyframes negis-workspace-enter {
+  from { opacity: 0.94; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .negis-app-shell .negis-main {
+    animation: negis-workspace-enter 180ms ease-out;
+  }
+
+  .negis-app-shell :is(.neu-btn, .neu-btn-primary, .neu-btn-success, .neu-btn-danger, .neu-icon-btn, .mortgage-control, .medina-sidebar [data-active], .mobile-bottom-nav-item, .mobile-nav-drawer-item, .mobile-nav-logout) {
+    transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+  }
+
+  .negis-app-shell :is(.neu-input, input, select, textarea) {
+    transition: border-color 160ms ease, box-shadow 160ms ease;
+  }
+
+  .negis-app-shell :is(tbody tr, .medina-overview-work li) {
+    transition: background-color 160ms ease;
+  }
+
+  .negis-app-shell :is(.neu-btn, .neu-btn-primary, .neu-btn-success, .neu-btn-danger, .neu-icon-btn, .mortgage-control):active:not(:disabled) {
+    opacity: 0.84;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .negis-app-shell .negis-main {
+    animation: none;
+  }
+
+  .negis-app-shell *, .negis-app-shell *::before, .negis-app-shell *::after {
+    transition: none !important;
+  }
+}
+
+@media (min-width: 1600px) {
+  .negis-app-shell .medina-overview-metrics {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1023px), (pointer: coarse) {
+  .negis-app-shell :is(.neu-btn, .neu-btn-primary, .neu-btn-success, .neu-btn-danger) {
+    min-height: 44px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .negis-app-shell .mortgage-control {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 767px) {
+  .negis-app-shell .negis-main {
+    padding-top: 20px;
+  }
+
+  .negis-app-shell .medina-overview-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .negis-app-shell .medina-overview-work {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
+  }
+
+  .negis-app-shell .medina-task-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .negis-app-shell .medina-overview-metric {
+    min-height: 100px;
+  }
+}

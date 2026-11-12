@@ -1,0 +1,1078 @@
+import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
+import path from "node:path";
+import { PassThrough } from "node:stream";
+import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// WhatsApp Cloud API inbound webhook (§14 phase 2) — the door, the handshake
+// and the pipeline, driven end-to-end against the real handler with a spying
+// database client. Signatures are real HMAC-SHA256 values computed the way
+// Meta computes them; nothing here is source-pinning. All data is fictional.
+//
+// The processing half (tenancy, ledger, dedup, taxonomy) is the same code the
+// Wazzup adapter runs — lib/crm/inbound-whatsapp.ts — so CW12/CW13/CW14/CW17
+// double as proof that the shared core behaves identically for both callers.
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+const WORKSPACE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const WORKSPACE_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const PHONE_NUMBER_ID = "111000111000111";
+const PHONE_NUMBER_B = "222000222000222";
+const WAMID_1 = "wamid.HBgLNzcwMTAwMDAwMDEVAgARGBIwRkVDQ0NDRTdGN0E1QUYwMDA=";
+const STAGE_NEW = "5ba0e000-0000-4000-8000-000000000001";
+const SOURCE_WHATSAPP = "50c0e000-0000-4000-8000-000000000001";
+const APP_SECRET = "test-app-secret";
+const VERIFY_TOKEN = "test-verify-token";
+
+type QueryLog = { table: string; op: string; filters: Record<string, unknown>; row?: unknown };
+type FixtureRow = Record<string, unknown>;
+type WebhookChange = { field: string; value: Record<string, unknown> };
+
+let networkAttempts = 0;
+const originalFetch = globalThis.fetch;
+globalThis.fetch = async () => {
+  networkAttempts += 1;
+  throw new Error("WhatsApp webhook fixtures must not use the network");
+};
+test.after(() => {
+  globalThis.fetch = originalFetch;
+  assert.equal(networkAttempts, 0, "only the in-memory database client may be used");
+});
+
+type MockResponse = {
+  statusCode: number;
+  body: Record<string, unknown>;
+  text: string;
+  status: (code: number) => MockResponse;
+  setHeader: () => MockResponse;
+  json: (payload: unknown) => MockResponse;
+  send: (payload: unknown) => MockResponse;
+};
+
+function mockResponse(): MockResponse {
+  const res: MockResponse = {
+    statusCode: 0,
+    body: {},
+    text: "",
+    status(code) { res.statusCode = code; return res; },
+    setHeader() { return res; },
+    json(payload) { res.body = (payload ?? {}) as Record<string, unknown>; return res; },
+    send(payload) { res.text = String(payload ?? ""); return res; },
+  };
+  return res;
+}
+
+type SpyOptions = {
+  rows?: Record<string, FixtureRow[]>;
+  errors?: Record<string, string>;
+  throws?: Record<string, object>;
+  /**
+   * Models a database where migration 028 has not been applied: any query
+   * filtering on leads.phone_normalized answers Postgres 42703 the way
+   * PostgREST reports it. Everything else behaves normally.
+   */
+  missingPhoneNormalized?: boolean;
+  /**
+   * A real failure of the exact lookup only: the query filtering on
+   * phone_normalized fails with something that is NOT 42703, while the
+   * fallback scan would succeed. Distinguishes "fall back on a missing
+   * column" from "fall back on anything".
+   */
+  phoneNormalizedLookupError?: string;
+};
+
+function spyClient(options: SpyOptions, log: QueryLog[]) {
+  const tables = options.rows ?? {};
+  let nextId = 0;
+  return {
+    from(table: string) {
+      const entry: QueryLog = { table, op: "select", filters: {} };
+      const predicates: Array<(row: FixtureRow) => boolean> = [];
+      let rowLimit = Infinity;
+      log.push(entry);
+      const settle = (shape: "one" | "list") => {
+        if (options.throws?.[table]) return Promise.reject(options.throws[table]);
+        if (options.phoneNormalizedLookupError && "phone_normalized" in entry.filters) {
+          return Promise.resolve({
+            data: null,
+            error: { code: "08006", message: options.phoneNormalizedLookupError },
+          });
+        }
+        if (options.missingPhoneNormalized && "phone_normalized" in entry.filters) {
+          return Promise.resolve({
+            data: null,
+            error: { code: "42703", message: "column leads.phone_normalized does not exist" },
+          });
+        }
+        const message = options.errors?.[table];
+        if (message) return Promise.resolve({ data: null, error: { message } });
+        const rows = tables[table] ??= [];
+        let matched: FixtureRow[];
+        if (entry.op === "insert") {
+          const row: FixtureRow = {
+            id: `11111111-1111-4111-8111-${String(++nextId).padStart(12, "0")}`,
+            ...(entry.row as FixtureRow),
+          };
+          if (table === "leads") {
+            // The adapter inserts canonical phones; model the generated column
+            // and nullable assignment so later messages can find this new row.
+            row.phone_normalized = row.phone;
+            row.responsible_user_id ??= null;
+          }
+          rows.push(row);
+          matched = [row];
+        } else {
+          matched = rows.filter((row) => predicates.every((matches) => matches(row))).slice(0, rowLimit);
+          if (entry.op === "update") {
+            for (const row of matched) Object.assign(row, entry.row);
+          }
+        }
+        if (shape === "one" && matched.length > 1) {
+          return Promise.resolve({ data: null, error: { code: "PGRST116", message: "Multiple fixture rows matched" } });
+        }
+        return Promise.resolve({ data: shape === "list" ? matched : matched[0] ?? null, error: null });
+      };
+      const builder: Record<string, unknown> = {};
+      Object.assign(builder, {
+        select: () => builder,
+        insert: (row: unknown) => { entry.op = "insert"; entry.row = row; return builder; },
+        update: (row: unknown) => { entry.op = "update"; entry.row = row; return builder; },
+        eq(column: string, value: unknown) {
+          entry.filters[column] = value;
+          predicates.push((row) => row[column] === value);
+          return builder;
+        },
+        neq(column: string, value: unknown) {
+          entry.filters[`neq:${column}`] = value;
+          predicates.push((row) => row[column] != null && row[column] !== value);
+          return builder;
+        },
+        not(column: string, op: string, value: unknown) {
+          assert.equal(op, "is");
+          assert.equal(value, null);
+          entry.filters[`not:${column}`] = op;
+          predicates.push((row) => row[column] != null);
+          return builder;
+        },
+        order(column: string) { entry.filters[`order:${column}`] = true; return builder; },
+        limit: (count: number) => { rowLimit = count; return builder; },
+        single: () => settle("one"),
+        maybeSingle: () => settle("one"),
+        then(onFulfilled: (value: unknown) => unknown) {
+          return settle("list").then(onFulfilled);
+        },
+      });
+      return builder;
+    },
+  };
+}
+
+function sign(rawBody: string, secret: string = APP_SECRET): string {
+  return `sha256=${createHmac("sha256", secret).update(Buffer.from(rawBody, "utf8")).digest("hex")}`;
+}
+
+async function loadHandler(
+  options: SpyOptions = {},
+  env: { appSecret?: string | null; verifyToken?: string | null } = {},
+) {
+  const log: QueryLog[] = [];
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  // The spy must not stringify an injected error on the handler's behalf.
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((arg) => typeof arg === "string" ? arg : "[non-string warning argument]").join(" "));
+  };
+
+  if (env.appSecret === null) delete process.env.WHATSAPP_APP_SECRET;
+  else process.env.WHATSAPP_APP_SECRET = env.appSecret ?? APP_SECRET;
+  if (env.verifyToken === null) delete process.env.WHATSAPP_VERIFY_TOKEN;
+  else process.env.WHATSAPP_VERIFY_TOKEN = env.verifyToken ?? VERIFY_TOKEN;
+  process.env.SUPABASE_URL = "https://project.example.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+
+  const supabaseModule = (await import(
+    pathToFileURL(path.join(repoRoot, "lib", "supabase", "server.ts")).href
+  )) as { setSupabaseServerClientFactoryForTests: (factory: (() => unknown) | null) => void };
+
+  let clientCreations = 0;
+  const client = spyClient(options, log);
+  supabaseModule.setSupabaseServerClientFactoryForTests(() => {
+    clientCreations += 1;
+    if (options.rows === undefined && options.errors === undefined && options.throws === undefined) return null;
+    return client;
+  });
+
+  const module = (await import(
+    pathToFileURL(path.join(repoRoot, "lib", "whatsapp-cloud", "webhook.ts")).href
+  )) as { handleWhatsAppCloudWebhook: (req: unknown, res: MockResponse, raw: Buffer) => Promise<unknown> };
+
+  const call = async (input: {
+    method?: string;
+    rawBody?: string;
+    signature?: string | null;
+    query?: Record<string, unknown>;
+  }) => {
+    log.length = 0;
+    warnings.length = 0;
+    const res = mockResponse();
+    const raw = input.rawBody ?? "";
+    const headers: Record<string, string> = {};
+    if (input.signature !== null && input.signature !== undefined) {
+      headers["x-hub-signature-256"] = input.signature;
+    }
+    await module.handleWhatsAppCloudWebhook(
+      { method: input.method ?? "POST", headers, query: input.query ?? {} },
+      res,
+      Buffer.from(raw, "utf8"),
+    );
+    return { res, log: [...log], warnings: [...warnings] };
+  };
+
+  return {
+    call,
+    get clientCreations() { return clientCreations; },
+    restore: () => {
+      console.warn = originalWarn;
+      supabaseModule.setSupabaseServerClientFactoryForTests(null);
+    },
+  };
+}
+
+async function withHandler<T>(
+  options: SpyOptions,
+  env: { appSecret?: string | null; verifyToken?: string | null },
+  fn: (ctx: Awaited<ReturnType<typeof loadHandler>>) => Promise<T>,
+): Promise<T> {
+  const ctx = await loadHandler(options, env);
+  try {
+    return await fn(ctx);
+  } finally {
+    ctx.restore();
+  }
+}
+
+const numberRow = { phone_number_id: PHONE_NUMBER_ID, workspace_id: WORKSPACE_A, enabled: true };
+
+function inboundPayload(overrides: {
+  messageId?: string;
+  from?: string;
+  text?: string | null;
+  type?: string;
+  phoneNumberId?: string;
+  contactName?: string;
+} = {}): string {
+  const from = overrides.from ?? "77010000001";
+  const type = overrides.type ?? "text";
+  const message: Record<string, unknown> = {
+    from,
+    id: overrides.messageId ?? WAMID_1,
+    timestamp: "1770000000",
+    type,
+  };
+  if (type === "text") message.text = { body: overrides.text ?? "Здравствуйте, хочу записаться" };
+  return JSON.stringify({
+    object: "whatsapp_business_account",
+    entry: [
+      {
+        id: "10000000000000",
+        changes: [
+          {
+            field: "messages",
+            value: {
+              messaging_product: "whatsapp",
+              metadata: { display_phone_number: "77470000000", phone_number_id: overrides.phoneNumberId ?? PHONE_NUMBER_ID },
+              contacts: [{ wa_id: from, profile: { name: overrides.contactName ?? "Тестовый Пациент" } }],
+              messages: [message],
+            },
+          },
+        ],
+      },
+    ],
+  });
+}
+
+function statusesPayload(): string {
+  return JSON.stringify({
+    object: "whatsapp_business_account",
+    entry: [
+      {
+        id: "10000000000000",
+        changes: [
+          {
+            field: "messages",
+            value: {
+              messaging_product: "whatsapp",
+              metadata: { display_phone_number: "77470000000", phone_number_id: PHONE_NUMBER_ID },
+              statuses: [{ id: WAMID_1, status: "delivered", timestamp: "1770000001", recipient_id: "77010000001" }],
+            },
+          },
+        ],
+      },
+    ],
+  });
+}
+
+function leadInserts(log: QueryLog[]): QueryLog[] {
+  return log.filter((entry) => entry.table === "leads" && entry.op === "insert");
+}
+
+function payloadChange(payload: string): WebhookChange {
+  return (JSON.parse(payload) as { entry: Array<{ changes: WebhookChange[] }> }).entry[0].changes[0];
+}
+
+function batchPayload(changes: WebhookChange[]): string {
+  return JSON.stringify({
+    object: "whatsapp_business_account",
+    entry: [{ id: "10000000000000", changes }],
+  });
+}
+
+function ignoredFieldChanges(): WebhookChange[] {
+  const historyMessages = [
+    { from: "77010000001", id: "wamid.fixture.history.existing", timestamp: "1700000000", type: "text", text: { body: "HISTORY_MUST_NOT_OVERWRITE" } },
+    { from: "77010000090", id: "wamid.fixture.history.new", timestamp: "1700000000", type: "text", text: { body: "HISTORY_MUST_NOT_CREATE" } },
+  ];
+  const outboundEchoes = [
+    { from: "77470000000", to: "77010000001", id: "wamid.fixture.echo.existing", timestamp: "1770000000", type: "text", text: { body: "OUTBOUND_MUST_NOT_OVERWRITE" } },
+    { from: "77470000000", to: "77010000091", id: "wamid.fixture.echo.new", timestamp: "1770000000", type: "text", text: { body: "OUTBOUND_MUST_NOT_CREATE" } },
+  ];
+  const metadata = { display_phone_number: "77470000000", phone_number_id: PHONE_NUMBER_ID };
+  // Message-shaped canaries pin the field gate, not direction/timestamp detection.
+  // These synthetic fixtures are not a Coexistence wire-schema acceptance test.
+  return [
+    {
+      field: "history",
+      value: { messaging_product: "whatsapp", metadata, messages: historyMessages,
+        history: [{ threads: historyMessages.map((message) => ({ id: message.from, messages: [message] })) }] },
+    },
+    {
+      field: "smb_message_echoes",
+      value: { messaging_product: "whatsapp", metadata, message_echoes: outboundEchoes, messages: outboundEchoes },
+    },
+    payloadChange(statusesPayload()),
+  ];
+}
+
+// ===========================================================================
+// A. The handshake
+// ===========================================================================
+
+test("CW1 the subscription GET echoes hub.challenge for the exact verify token", async () => {
+  await withHandler({ rows: {} }, {}, async (ctx) => {
+    const { res } = await ctx.call({
+      method: "GET",
+      query: { "hub.mode": "subscribe", "hub.verify_token": VERIFY_TOKEN, "hub.challenge": "1158201444" },
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.text, "1158201444", "Meta requires the challenge echoed verbatim");
+  });
+});
+
+test("CW2 a wrong verify token is refused without detail", async () => {
+  await withHandler({ rows: {} }, {}, async (ctx) => {
+    const { res } = await ctx.call({
+      method: "GET",
+      query: { "hub.mode": "subscribe", "hub.verify_token": "not-the-token", "hub.challenge": "1158201444" },
+    });
+    assert.equal(res.statusCode, 403);
+    assert.equal(res.text, "", "the challenge must never leak on a failed handshake");
+    assert.equal(JSON.stringify(res.body).includes("token"), false, "the reason must not name the mechanism");
+  });
+});
+
+test("CW3 a handshake with no verify token configured fails closed", async () => {
+  await withHandler({ rows: {} }, { verifyToken: null }, async (ctx) => {
+    const { res } = await ctx.call({
+      method: "GET",
+      query: { "hub.mode": "subscribe", "hub.verify_token": "anything", "hub.challenge": "1" },
+    });
+    assert.equal(res.statusCode, 503, "a mis-deploy must be visible in the App Dashboard, not confirmed");
+  });
+});
+
+test("CW4 anything but GET and POST is refused", async () => {
+  await withHandler({ rows: {} }, {}, async (ctx) => {
+    const { res } = await ctx.call({ method: "DELETE", rawBody: "{}" });
+    assert.equal(res.statusCode, 405);
+  });
+});
+
+// ===========================================================================
+// B. The door
+// ===========================================================================
+
+test("CW5 an unconfigured app secret fails closed with 503", async () => {
+  await withHandler({ rows: {} }, { appSecret: null }, async (ctx) => {
+    const body = inboundPayload();
+    const { res } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 503, "Meta keeps retrying while the operator fixes the env");
+  });
+});
+
+test("CW6 a missing signature is a generic 401 and the database is never touched", async () => {
+  await withHandler({ rows: {} }, {}, async (ctx) => {
+    const { res, log } = await ctx.call({ rawBody: inboundPayload(), signature: null });
+    assert.equal(res.statusCode, 401);
+    assert.equal(JSON.stringify(res.body).includes("signature"), false, "the reason must not name the mechanism");
+    assert.equal(log.length, 0, "no query may run before authentication");
+    assert.equal(ctx.clientCreations, 0, "no service-role client before authentication");
+  });
+});
+
+test("CW7 a signature keyed with the wrong secret is refused", async () => {
+  await withHandler({ rows: {} }, {}, async (ctx) => {
+    const body = inboundPayload();
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body, "some-other-secret") });
+    assert.equal(res.statusCode, 401);
+    assert.equal(log.length, 0);
+  });
+});
+
+test("CW8 a valid signature over different bytes is refused — the body cannot be swapped", async () => {
+  await withHandler({ rows: {} }, {}, async (ctx) => {
+    const signedBody = inboundPayload({ text: "оригинал" });
+    const tamperedBody = inboundPayload({ text: "подмена" });
+    const { res } = await ctx.call({ rawBody: tamperedBody, signature: sign(signedBody) });
+    assert.equal(res.statusCode, 401);
+  });
+});
+
+test("CW9 signed garbage is 400, not a crash and not a 500 retry-storm", async () => {
+  await withHandler({ rows: {} }, {}, async (ctx) => {
+    const body = "this is not json";
+    const { res } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 400);
+  });
+});
+
+// ===========================================================================
+// C. The pipeline — the same core the Wazzup adapter runs
+// ===========================================================================
+
+test("CW10 a status update is acknowledged without touching the database", async () => {
+  await withHandler({ rows: {} }, {}, async (ctx) => {
+    const body = statusesPayload();
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 200, "a non-200 would make Meta retry a receipt forever");
+    assert.equal(log.length, 0, "statuses carry nothing to file");
+  });
+});
+
+test("CW11 an unknown phone_number_id is acknowledged and ignored, without disclosure", async () => {
+  await withHandler({ rows: { whatsapp_cloud_numbers: [], whatsapp_cloud_inbound_messages: [], leads: [] } }, {}, async (ctx) => {
+    const body = inboundPayload({ phoneNumberId: "999888777666555" });
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.ignored, 1);
+    assert.equal(leadInserts(log).length, 0, "no lead may be filed for an unmapped number");
+  });
+});
+
+test("CW12 an inbound message becomes a lead in the number's workspace, inside the funnel", async () => {
+  await withHandler({
+    rows: {
+      whatsapp_cloud_numbers: [numberRow],
+      whatsapp_cloud_inbound_messages: [],
+      leads: [],
+      lead_stages: [{ id: STAGE_NEW, workspace_id: WORKSPACE_A, semantic_group: "new", sort_order: 0 }],
+      lead_sources: [{ id: SOURCE_WHATSAPP, workspace_id: WORKSPACE_A, source_key: "whatsapp" }],
+    },
+  }, {}, async (ctx) => {
+    const body = inboundPayload();
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.created, 1);
+
+    const insert = leadInserts(log)[0];
+    assert.ok(insert, "the lead must be inserted");
+    const row = insert.row as Record<string, unknown>;
+    assert.equal(row.workspace_id, WORKSPACE_A, "tenancy comes from the number row, never the payload");
+    assert.equal(row.source, "whatsapp");
+    assert.equal(row.status, "new");
+    assert.equal(row.phone, "+77010000001", "the from digits are stored in canonical form");
+    assert.equal(row.full_name, "Тестовый Пациент", "the profile name travels from contacts[]");
+    assert.ok(String(row.notes).includes("хочу записаться"), "the first message is kept in notes");
+    assert.equal(row.stage_id, STAGE_NEW, "the lead enters the funnel — WZ18 parity through the shared core");
+    assert.equal(row.source_id, SOURCE_WHATSAPP);
+
+    const ledger = log.find((entry) => entry.table === "whatsapp_cloud_inbound_messages" && entry.op === "insert");
+    assert.ok(ledger, "the ledger row must be written");
+    const ledgerRow = ledger.row as Record<string, unknown>;
+    assert.equal(ledgerRow.kind, "created");
+    assert.equal(ledgerRow.message_id, WAMID_1);
+    assert.equal(ledgerRow.channel_id, PHONE_NUMBER_ID, "the ledger records which number the message arrived through");
+  });
+});
+
+test("CW13 a replayed wamid is a no-op", async () => {
+  await withHandler({
+    rows: {
+      whatsapp_cloud_numbers: [numberRow],
+      whatsapp_cloud_inbound_messages: [{ id: "seen-row", message_id: WAMID_1 }],
+      leads: [],
+    },
+  }, {}, async (ctx) => {
+    const body = inboundPayload();
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.ignored, 1);
+    assert.equal(leadInserts(log).length, 0, "Meta retries until it sees 200; a retry must not file twice");
+  });
+});
+
+test("CW14 an open lead with the same phone in another spelling is a repeat, not a duplicate", async () => {
+  await withHandler({
+    rows: {
+      whatsapp_cloud_numbers: [numberRow],
+      whatsapp_cloud_inbound_messages: [],
+      // The operator typed the trunk spelling; the generated column holds what
+      // migration 028's expression makes of it. Meta sends 77010000001.
+      leads: [{
+        id: "22222222-2222-4222-8222-222222222222",
+        workspace_id: WORKSPACE_A,
+        status: "new",
+        phone: "8 701 000-00-01",
+        phone_normalized: "+77010000001",
+      }],
+    },
+  }, {}, async (ctx) => {
+    const body = inboundPayload();
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.repeats, 1);
+    assert.equal(leadInserts(log).length, 0, "the canonical phone comparison must catch the operator spelling");
+
+    const ledger = log.find((entry) => entry.table === "whatsapp_cloud_inbound_messages" && entry.op === "insert");
+    assert.ok(ledger, "the repeat is recorded");
+    assert.equal((ledger.row as Record<string, unknown>).kind, "repeat");
+  });
+});
+
+test("CW30 a signed mixed batch isolates two enabled channels and ignores unknown and disabled numbers", async () => {
+  const disabledNumber = "333000333000333";
+  const unknownNumber = "999000999000999";
+  const stageB = "5ba0e000-0000-4000-8000-000000000002";
+  const sourceB = "50c0e000-0000-4000-8000-000000000002";
+  const rows: Record<string, FixtureRow[]> = {
+    whatsapp_cloud_numbers: [
+      { phone_number_id: PHONE_NUMBER_B, workspace_id: WORKSPACE_B, enabled: true },
+      { phone_number_id: disabledNumber, workspace_id: WORKSPACE_B, enabled: false },
+      { ...numberRow },
+    ],
+    whatsapp_cloud_inbound_messages: [],
+    leads: [],
+    lead_stages: [
+      { id: stageB, workspace_id: WORKSPACE_B, semantic_group: "new", sort_order: 0 },
+      { id: STAGE_NEW, workspace_id: WORKSPACE_A, semantic_group: "new", sort_order: 0 },
+    ],
+    lead_sources: [
+      { id: sourceB, workspace_id: WORKSPACE_B, source_key: "whatsapp" },
+      { id: SOURCE_WHATSAPP, workspace_id: WORKSPACE_A, source_key: "whatsapp" },
+    ],
+  };
+  const channelsBefore = structuredClone(rows.whatsapp_cloud_numbers);
+  const changes = [
+    { phoneNumberId: PHONE_NUMBER_ID, messageId: "wamid.fixture.tenant.a", from: "77010000030", text: "TENANT_A_ONLY", contactName: "Fixture A" },
+    { phoneNumberId: PHONE_NUMBER_B, messageId: "wamid.fixture.tenant.b", from: "77010000030", text: "TENANT_B_ONLY", contactName: "Fixture B" },
+    { phoneNumberId: unknownNumber, messageId: "wamid.fixture.unknown", from: "77010000031" },
+    { phoneNumberId: disabledNumber, messageId: "wamid.fixture.disabled", from: "77010000032" },
+  ].map((message) => payloadChange(inboundPayload(message)));
+  changes[0].value.workspace_id = WORKSPACE_B;
+  changes[1].value.workspace_id = WORKSPACE_A;
+  const body = batchPayload(changes);
+
+  await withHandler({ rows }, {}, async (ctx) => {
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.body, { success: true, created: 2, repeats: 0, ignored: 2 });
+    assert.deepEqual(log.filter((query) => query.table === "whatsapp_cloud_numbers").map((query) => query.filters.phone_number_id),
+      [PHONE_NUMBER_ID, PHONE_NUMBER_B, unknownNumber, disabledNumber]);
+    assert.deepEqual(leadInserts(log).map((query) => query.row), [
+      { workspace_id: WORKSPACE_A, full_name: "Fixture A", phone: "+77010000030", source: "whatsapp", status: "new",
+        stage_id: STAGE_NEW, source_id: SOURCE_WHATSAPP, notes: "WhatsApp: TENANT_A_ONLY" },
+      { workspace_id: WORKSPACE_B, full_name: "Fixture B", phone: "+77010000030", source: "whatsapp", status: "new",
+        stage_id: stageB, source_id: sourceB, notes: "WhatsApp: TENANT_B_ONLY" },
+    ]);
+    assert.equal(rows.leads.length, 2, "the same customer phone must not merge workspaces");
+    assert.notEqual(rows.leads[0].id, rows.leads[1].id);
+    const expectedLedger = [
+      { message_id: "wamid.fixture.tenant.a", channel_id: PHONE_NUMBER_ID, workspace_id: WORKSPACE_A, lead_id: rows.leads[0].id, kind: "created" },
+      { message_id: "wamid.fixture.tenant.b", channel_id: PHONE_NUMBER_B, workspace_id: WORKSPACE_B, lead_id: rows.leads[1].id, kind: "created" },
+    ];
+    assert.deepEqual(log.filter((query) => query.table === "whatsapp_cloud_inbound_messages" && query.op === "insert").map((query) => query.row), expectedLedger);
+    assert.deepEqual(rows.whatsapp_cloud_inbound_messages.map(({ id, ...row }) => row), expectedLedger);
+    assert.equal(log.filter((query) => query.op !== "select").length, 4, "only two local lead/ledger pairs may be written");
+    assert.ok(log.every((query) => query.op !== "update"), "no channel or lead may be updated");
+    assert.deepEqual(rows.whatsapp_cloud_numbers, channelsBefore);
+    assert.deepEqual(log.filter((query) => query.table === "leads" && query.op === "select").map((query) => query.filters.workspace_id),
+      [WORKSPACE_A, WORKSPACE_B]);
+
+    const beforeReplay = structuredClone(rows);
+    const replay = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.deepEqual(replay.res.body, { success: true, created: 0, repeats: 0, ignored: 4 });
+    assert.equal(replay.res.statusCode, 200);
+    assert.ok(replay.log.every((query) => query.op === "select"), "a sequential replay may not write leads or ledger rows");
+    assert.deepEqual(rows, beforeReplay);
+  });
+});
+
+test("CW31 signed same-phone repeats keep each channel's existing lead, notes and assignment", async () => {
+  const rows: Record<string, FixtureRow[]> = {
+    whatsapp_cloud_numbers: [
+      { phone_number_id: PHONE_NUMBER_B, workspace_id: WORKSPACE_B, enabled: true },
+      { ...numberRow },
+    ],
+    whatsapp_cloud_inbound_messages: [],
+    leads: [
+      { id: "lead-b", workspace_id: WORKSPACE_B, phone: "+77010000001", phone_normalized: "+77010000001", status: "new", notes: "B_PRIVATE_NOTE", responsible_user_id: "manager-b" },
+      { id: "lead-a", workspace_id: WORKSPACE_A, phone: "+77010000001", phone_normalized: "+77010000001", status: "new", notes: "A_PRIVATE_NOTE", responsible_user_id: "manager-a" },
+    ],
+  };
+  const before = structuredClone(rows.leads);
+  const body = batchPayload([
+    payloadChange(inboundPayload({ messageId: "wamid.fixture.repeat.a", text: "A_REPEAT" })),
+    payloadChange(inboundPayload({ phoneNumberId: PHONE_NUMBER_B, messageId: "wamid.fixture.repeat.b", text: "B_REPEAT" })),
+  ]);
+  await withHandler({ rows }, {}, async (ctx) => {
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.body, { success: true, created: 0, repeats: 2, ignored: 0 });
+    assert.deepEqual(rows.whatsapp_cloud_inbound_messages.map(({ id, ...row }) => row), [
+      { message_id: "wamid.fixture.repeat.a", channel_id: PHONE_NUMBER_ID, workspace_id: WORKSPACE_A, lead_id: "lead-a", kind: "repeat" },
+      { message_id: "wamid.fixture.repeat.b", channel_id: PHONE_NUMBER_B, workspace_id: WORKSPACE_B, lead_id: "lead-b", kind: "repeat" },
+    ]);
+    assert.ok(log.filter((query) => query.op !== "select").every((query) => query.table === "whatsapp_cloud_inbound_messages" && query.op === "insert"));
+    assert.deepEqual(rows.leads, before, "repeat text cannot change either tenant's notes or responsible manager");
+  });
+});
+
+test("CW32 signed history, outbound phone echoes and receipts alone never reach the database", async () => {
+  const rows: Record<string, FixtureRow[]> = {
+    whatsapp_cloud_numbers: [{ ...numberRow }],
+    whatsapp_cloud_inbound_messages: [],
+    leads: [{ id: "existing-lead", workspace_id: WORKSPACE_A, phone: "+77010000001", phone_normalized: "+77010000001",
+      status: "new", notes: "KEEP_EXISTING_NOTE", responsible_user_id: "existing-manager" }],
+  };
+  const before = structuredClone(rows);
+  const body = batchPayload(ignoredFieldChanges());
+  await withHandler({ rows }, {}, async (ctx) => {
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.body, { success: true, created: 0, repeats: 0, ignored: 0 });
+    assert.equal(ctx.clientCreations, 0, "non-inbound fields must not initialize the database client");
+    assert.deepEqual(log, []);
+    assert.deepEqual(rows, before, "history and outbound echoes cannot create leads, ledger entries or edit existing contacts");
+  });
+});
+
+test("CW33 signed history, outbound echoes and receipts do not contaminate legitimate new and repeat messages", async () => {
+  const rows: Record<string, FixtureRow[]> = {
+    whatsapp_cloud_numbers: [{ ...numberRow }],
+    whatsapp_cloud_inbound_messages: [],
+    leads: [{ id: "existing-lead", workspace_id: WORKSPACE_A, phone: "+77010000001", phone_normalized: "+77010000001",
+      status: "new", notes: "KEEP_EXISTING_NOTE", responsible_user_id: "existing-manager" }],
+  };
+  const before = structuredClone(rows.leads[0]);
+  const [history, echoes, receipts] = ignoredFieldChanges();
+  const body = batchPayload([
+    history,
+    payloadChange(inboundPayload({ messageId: "wamid.fixture.live.repeat", text: "LIVE_REPEAT_MUST_NOT_OVERWRITE" })),
+    echoes,
+    payloadChange(inboundPayload({ messageId: "wamid.fixture.live.new", from: "77010000033", text: "LIVE_NEW_NOTE" })),
+    receipts,
+  ]);
+  await withHandler({ rows }, {}, async (ctx) => {
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.body, { success: true, created: 1, repeats: 1, ignored: 0 });
+    assert.deepEqual(rows.leads[0], before, "ignored fields and a live repeat preserve notes and assignment");
+    assert.equal(rows.leads.length, 2, "neither historical contacts nor the outbound business phone become leads");
+    assert.deepEqual(leadInserts(log).map((query) => query.row), [
+      { workspace_id: WORKSPACE_A, full_name: "Тестовый Пациент", phone: "+77010000033", source: "whatsapp", status: "new", notes: "WhatsApp: LIVE_NEW_NOTE" },
+    ]);
+    assert.equal(rows.leads[1].responsible_user_id, null);
+    assert.deepEqual(rows.whatsapp_cloud_inbound_messages.map(({ id, ...row }) => row), [
+      { message_id: "wamid.fixture.live.repeat", channel_id: PHONE_NUMBER_ID, workspace_id: WORKSPACE_A, lead_id: "existing-lead", kind: "repeat" },
+      { message_id: "wamid.fixture.live.new", channel_id: PHONE_NUMBER_ID, workspace_id: WORKSPACE_A, lead_id: rows.leads[1].id, kind: "created" },
+    ]);
+    assert.equal(log.filter((query) => query.op !== "select").length, 3, "only one lead and two live-message ledger entries may be written");
+    assert.ok(log.every((query) => query.op !== "update"));
+  });
+});
+
+// ===========================================================================
+// Dedup lookup: exact where possible, scanning only where it must be
+//
+// The shared core (lib/crm/inbound-whatsapp.ts) is the same code the Wazzup
+// adapter runs, and WZ20/WZ21/WZ22 pin this behaviour there. It is pinned
+// again here because the Cloud adapter is the second caller and doubled the
+// traffic through it: a regression reached by this door has to fail a Cloud
+// fixture, not only a Wazzup one.
+//
+// The scan these replace was a dedup rule only while a workspace stayed under
+// 1000 open leads — PostgREST returned an arbitrary window with no ORDER BY,
+// the returning patient's lead could sit outside it, and a duplicate was
+// filed. Confirmed by review on 2026-08-03.
+// ===========================================================================
+
+test("CW23 the repeat check is an indexed equality on the canonical phone", async () => {
+  await withHandler({
+    rows: {
+      whatsapp_cloud_numbers: [numberRow],
+      whatsapp_cloud_inbound_messages: [],
+      leads: [{ id: "22222222-2222-4222-8222-222222222222", workspace_id: WORKSPACE_A, status: "new", phone_normalized: "+77010000001" }],
+    },
+  }, {}, async (ctx) => {
+    const body = inboundPayload();
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.repeats, 1);
+
+    const lookup = log.find((entry) => entry.table === "leads" && entry.op === "select");
+    assert.ok(lookup, "the lead lookup must run");
+    assert.equal(lookup.filters.phone_normalized, "+77010000001", "the query must carry the canonical phone");
+    assert.equal(lookup.filters.workspace_id, WORKSPACE_A, "and stay inside the number's workspace");
+    assert.equal(lookup.filters["neq:status"], "lost", "open leads only");
+    // The old path read a 1000-row window and searched it in JS. If that is
+    // still what runs, the phone never reaches the query at all.
+    assert.equal(
+      log.filter((entry) => entry.table === "leads" && entry.op === "select").length,
+      1,
+      "one exact lookup, not a scan followed by a client-side search",
+    );
+  });
+});
+
+test("CW24 a database without migration 028 still dedups, through the scanning fallback", async () => {
+  // A deploy can reach production before the migration is applied by hand. A
+  // hard dependency would answer 503 to every inbound message in that gap —
+  // on a live number that is a Meta retry loop and lost patients.
+  await withHandler({
+    rows: {
+      whatsapp_cloud_numbers: [numberRow],
+      whatsapp_cloud_inbound_messages: [],
+      leads: [{ id: "22222222-2222-4222-8222-222222222222", workspace_id: WORKSPACE_A, status: "new", phone: "8 701 000-00-01" }],
+    },
+    missingPhoneNormalized: true,
+  }, {}, async (ctx) => {
+    const body = inboundPayload();
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.repeats, 1, "the repeat must still be recognised without the column");
+    assert.equal(leadInserts(log).length, 0, "and no duplicate lead may be filed");
+
+    const selects = log.filter((entry) => entry.table === "leads" && entry.op === "select");
+    assert.equal(selects.length, 2, "the exact lookup is attempted first, then the fallback scan");
+    assert.equal(selects[1].filters["not:phone"], "is", "the fallback is the old phone-scanning query");
+  });
+});
+
+test("CW25 a real lead-lookup failure is still a 503 — the fallback is not a catch-all", async () => {
+  // The exact lookup fails with a connection error while the scan WOULD
+  // succeed and find the repeat. A handler that falls back on any error
+  // answers 200 here and silently downgrades to the defective path on every
+  // transient failure; the correct answer is 503, and Meta retries.
+  await withHandler({
+    rows: {
+      whatsapp_cloud_numbers: [numberRow],
+      whatsapp_cloud_inbound_messages: [],
+      leads: [{ id: "22222222-2222-4222-8222-222222222222", workspace_id: WORKSPACE_A, status: "new", phone: "8 701 000-00-01" }],
+    },
+    phoneNormalizedLookupError: "connection refused",
+  }, {}, async (ctx) => {
+    const body = inboundPayload();
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 503, "an outage must not be mistaken for a missing column");
+    assert.equal(leadInserts(log).length, 0, "and nothing is filed on the way out");
+  });
+});
+
+test("CW15 a database outage answers 503 so Meta retries", async () => {
+  await withHandler({
+    rows: { whatsapp_cloud_numbers: [numberRow], leads: [] },
+    errors: { whatsapp_cloud_inbound_messages: "connection refused" },
+  }, {}, async (ctx) => {
+    const body = inboundPayload();
+    const { res } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 503, "a 200 here would drop the message forever");
+  });
+});
+
+test("CW16 a disabled number is ignored the same way as an unknown one", async () => {
+  await withHandler({
+    rows: {
+      whatsapp_cloud_numbers: [{ ...numberRow, enabled: false }],
+      whatsapp_cloud_inbound_messages: [],
+      leads: [],
+    },
+  }, {}, async (ctx) => {
+    const body = inboundPayload();
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.ignored, 1);
+    assert.equal(leadInserts(log).length, 0);
+  });
+});
+
+test("CW17 a reshaped funnel costs the classification, never the lead — WZ19 parity", async () => {
+  await withHandler({
+    rows: {
+      whatsapp_cloud_numbers: [numberRow],
+      whatsapp_cloud_inbound_messages: [],
+      leads: [],
+      lead_stages: [],
+      lead_sources: [],
+    },
+  }, {}, async (ctx) => {
+    const body = inboundPayload();
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.created, 1);
+    const row = leadInserts(log)[0]?.row as Record<string, unknown>;
+    assert.ok(row, "the lead must still be inserted");
+    assert.equal(row.stage_id, undefined, "an unresolved stage is left unset, not invented");
+    assert.equal(row.source_id, undefined);
+  });
+});
+
+test("CW18 a non-text message still files the lead — the contact is the value, not the media", async () => {
+  await withHandler({
+    rows: { whatsapp_cloud_numbers: [numberRow], whatsapp_cloud_inbound_messages: [], leads: [] },
+  }, {}, async (ctx) => {
+    const body = inboundPayload({ type: "image" });
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.created, 1);
+    const row = leadInserts(log)[0]?.row as Record<string, unknown>;
+    assert.equal(row.notes, null, "no text body — no invented notes");
+    assert.equal(row.phone, "+77010000001");
+  });
+});
+
+// ===========================================================================
+// D. The entry point reads the bytes Meta signed — not what a parser rebuilt
+//
+// The adversarial review caught the original entry point trusting
+// `config.api.bodyParser = false`, a Next.js convention @vercel/node ignores:
+// the platform helpers had already buffered the body and installed req.body
+// as a lazy JSON getter, the entry read it first, and the HMAC was computed
+// over JSON.stringify(JSON.parse(bytes)) — which differs from Meta's bytes on
+// any \uXXXX-escaped Cyrillic, i.e. on essentially all real traffic of this
+// CRM. These tests drive the REAL entry point in a faithful model of each
+// environment. What the runtime actually does is pinned from its source
+// (@vercel/node dist: addHelpers → readBody → restoreBody replays the exact
+// bytes through a PassThrough redirected to req.on("data"/"end")).
+// ===========================================================================
+
+async function loadEntryPoint() {
+  const module = (await import(
+    pathToFileURL(path.join(repoRoot, "api", "webhooks", "whatsapp.ts")).href
+  )) as { default: (req: unknown, res: MockResponse & { end?: (body: string) => void }) => Promise<unknown> };
+  return module.default;
+}
+
+/** A request the way the Vercel helpers leave it: raw bytes replayed through
+ * a PassThrough behind req.on("data"/"end"), req.body a LAZY getter. */
+function helpersShapedRequest(rawBytes: Buffer, headers: Record<string, string>) {
+  const stream = new PassThrough();
+  let lazyGetterTouched = false;
+  const req = Object.assign(stream, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    query: {},
+  });
+  Object.defineProperty(req, "body", {
+    configurable: true,
+    get() {
+      lazyGetterTouched = true;
+      return JSON.parse(rawBytes.toString("utf8"));
+    },
+  });
+  stream.write(rawBytes);
+  stream.end();
+  return { req, wasLazyGetterTouched: () => lazyGetterTouched };
+}
+
+function entryResponse() {
+  const res = mockResponse() as MockResponse & { end: (body: string) => void };
+  res.end = (payload: string) => {
+    try { res.body = JSON.parse(payload); } catch { res.text = payload; }
+    return res;
+  };
+  return res;
+}
+
+test("CW20 under Vercel helpers the signature is verified over Meta's bytes, not a re-serialization", async () => {
+  await withHandler({
+    rows: { whatsapp_cloud_numbers: [numberRow], whatsapp_cloud_inbound_messages: [], leads: [] },
+  }, {}, async () => {
+    const entry = await loadEntryPoint();
+
+    // Meta-style bytes: \uXXXX-escaped Cyrillic and an escaped slash. A
+    // JSON.parse → JSON.stringify round-trip of these bytes produces
+    // DIFFERENT bytes (raw UTF-8, bare slash), so a handler that verifies
+    // the round-trip would answer 401 to a perfectly signed delivery.
+    const rawBytes = Buffer.from(
+      JSON.stringify(JSON.parse(inboundPayload({ text: "Здравствуйте, хочу записаться" })))
+        .replace(/[-￿]/g, (ch) => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"))
+        .replace(/\//g, "\\/"),
+      "utf8",
+    );
+    assert.notEqual(
+      JSON.stringify(JSON.parse(rawBytes.toString("utf8"))),
+      rawBytes.toString("utf8"),
+      "the fixture must be a payload whose round-trip differs — otherwise this test proves nothing",
+    );
+
+    const { req, wasLazyGetterTouched } = helpersShapedRequest(rawBytes, {
+      "x-hub-signature-256": `sha256=${createHmac("sha256", APP_SECRET).update(rawBytes).digest("hex")}`,
+    });
+    const res = entryResponse();
+    await entry(req, res);
+
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.created, 1, "the signed Cyrillic delivery must file its lead");
+    assert.equal(wasLazyGetterTouched(), false, "req.body is a lazy parse of the wrong bytes and must never be read");
+  });
+});
+
+test("CW21 the dev middleware shape (plain body value, consumed stream) neither hangs nor crashes", async () => {
+  await withHandler({ rows: {} }, {}, async () => {
+    const entry = await loadEntryPoint();
+
+    // vite.config's middleware consumes the stream WITHOUT restoring it and
+    // assigns req.body as a plain value property. The entry must take the
+    // fallback instead of waiting forever on an "end" that already fired.
+    const stream = new PassThrough();
+    stream.end();
+    const req = Object.assign(stream, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      query: {},
+      body: { object: "whatsapp_business_account", entry: [] },
+    });
+    const res = entryResponse();
+
+    const outcome = await Promise.race([
+      entry(req, res).then(() => "settled"),
+      new Promise((resolve) => setTimeout(() => resolve("hung"), 2000)),
+    ]);
+    assert.equal(outcome, "settled", "a consumed stream with a value body is the dev shape and must settle");
+    assert.equal(res.statusCode, 401, "no signature over the fallback bytes — still a closed door");
+  });
+});
+
+test("CW22 a body over the limit is answered 413 — and the limit clears a maximal legitimate batch", async () => {
+  await withHandler({ rows: {} }, {}, async () => {
+    const entry = await loadEntryPoint();
+
+    const oversized = Buffer.alloc(4 * 1024 * 1024 + 1024, 0x61);
+    const { req } = helpersShapedRequest(oversized, {});
+    const res = entryResponse();
+    await entry(req, res);
+    assert.equal(res.statusCode, 413);
+  });
+});
+
+test("CW19 neither the phone nor the message text reaches the logs", async () => {
+  await withHandler({
+    rows: { whatsapp_cloud_numbers: [numberRow], leads: [] },
+    errors: { whatsapp_cloud_inbound_messages: "connection refused" },
+  }, {}, async (ctx) => {
+    const body = inboundPayload({ text: "секретный текст пациента" });
+    const { warnings } = await ctx.call({ rawBody: body, signature: sign(body) });
+    const joined = warnings.join("\n");
+    assert.ok(joined.length > 0, "the failure itself must be logged");
+    assert.equal(joined.includes("77010000001"), false, "the phone is patient data");
+    assert.equal(joined.includes("секретный"), false, "the text is patient data");
+    assert.equal(joined.includes("Тестовый"), false, "the name is patient data");
+  });
+});
+
+for (const { id, stage, table, expectedTables } of [
+  {
+    id: "CW26", stage: "ledger", table: "whatsapp_cloud_inbound_messages",
+    expectedTables: ["whatsapp_cloud_inbound_messages"],
+  },
+  {
+    id: "CW27", stage: "channel", table: "whatsapp_cloud_numbers",
+    expectedTables: ["whatsapp_cloud_inbound_messages", "whatsapp_cloud_numbers"],
+  },
+  {
+    id: "CW28", stage: "lead", table: "leads",
+    expectedTables: ["whatsapp_cloud_inbound_messages", "whatsapp_cloud_numbers", "leads"],
+  },
+]) {
+  test(`${id} a ${stage} lookup error cannot disclose synthetic private data in warnings or the retry response`, async () => {
+    const privateData = {
+      detail: `SYNTHETIC_${id}_DATABASE_DETAIL`,
+      phone: "77010000026",
+      contactName: "SYNTHETIC_CW_CONTACT_NAME",
+      text: "SYNTHETIC_CW_MESSAGE_TEXT",
+      email: "synthetic-cw-contact@example.invalid",
+      token: "SYNTHETIC_CW_TOKEN_DO_NOT_USE",
+      service_role_key: "SYNTHETIC_CW_KEY_DO_NOT_USE",
+    };
+    await withHandler({
+      rows: { whatsapp_cloud_numbers: [numberRow], whatsapp_cloud_inbound_messages: [], leads: [] },
+      errors: { [table]: JSON.stringify(privateData) },
+    }, {}, async (ctx) => {
+      const body = inboundPayload({ from: privateData.phone, contactName: privateData.contactName, text: privateData.text });
+      const { res, log, warnings } = await ctx.call({ rawBody: body, signature: sign(body) });
+
+      assert.deepEqual(log.map((entry) => entry.table), expectedTables, "the fixture must reach the intended failing lookup");
+      assert.equal(leadInserts(log).length, 0, "a failed lookup must leave the retry without a new lead");
+      assert.equal(res.statusCode, 503, "Meta must retry the database failure");
+      assert.deepEqual(res.body, { success: false, error: "Service unavailable" });
+      assert.equal(res.text, "");
+
+      const disclosed = `${warnings.join("\n")}\n${JSON.stringify(res.body)}`;
+      for (const marker of [
+        ...Object.values(privateData), ...Object.keys(privateData),
+        APP_SECRET, VERIFY_TOKEN, "test-service-role-key", PHONE_NUMBER_ID, WAMID_1, WORKSPACE_A, "77470000000",
+      ]) {
+        assert.equal(disclosed.includes(marker), false, `warnings and the retry response must omit ${marker}`);
+      }
+      assert.deepEqual(warnings, ["[whatsapp-cloud] webhook processing failed"], "only the fixed failure scope may be logged");
+    });
+  });
+}
+
+test("CW29 a database-rejected object is neither stringified nor JSON-serialized by the catch", async () => {
+  let stringifications = 0;
+  let serializations = 0;
+  const injectedError = {
+    message: "SYNTHETIC_CW_OBJECT_DATABASE_DETAIL",
+    phone: "77010000029",
+    contactName: "SYNTHETIC_CW_OBJECT_CONTACT_NAME",
+    text: "SYNTHETIC_CW_OBJECT_MESSAGE_TEXT",
+    email: "synthetic-cw-object@example.invalid",
+    token: "SYNTHETIC_CW_OBJECT_TOKEN_DO_NOT_USE",
+    service_role_key: "SYNTHETIC_CW_OBJECT_KEY_DO_NOT_USE",
+    toString() { stringifications += 1; return this.message; },
+    toJSON() { serializations += 1; return this.message; },
+  };
+  await withHandler({
+    rows: { whatsapp_cloud_numbers: [numberRow], whatsapp_cloud_inbound_messages: [], leads: [] },
+    throws: { whatsapp_cloud_numbers: injectedError },
+  }, {}, async (ctx) => {
+    const body = inboundPayload({ from: injectedError.phone, contactName: injectedError.contactName, text: injectedError.text });
+    const { res, log, warnings } = await ctx.call({ rawBody: body, signature: sign(body) });
+
+    assert.deepEqual(log.map((entry) => entry.table), ["whatsapp_cloud_inbound_messages", "whatsapp_cloud_numbers"]);
+    assert.equal(res.statusCode, 503, "an arbitrary database rejection must still allow Meta to retry");
+    assert.deepEqual(res.body, { success: false, error: "Service unavailable" });
+    assert.equal(res.text, "");
+    assert.equal(stringifications, 0, "the catch must not call String(error), toString or implicit coercion");
+    assert.equal(serializations, 0, "the catch must not JSON.stringify the injected error");
+    assert.deepEqual(warnings, ["[whatsapp-cloud] webhook processing failed"]);
+  });
+});

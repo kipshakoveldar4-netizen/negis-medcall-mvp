@@ -1,0 +1,167 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+type UsageModule = {
+  billableVideoSeconds: (value: unknown) => number;
+  quotaForPlan: (plan: "basic" | "standard" | "pro" | null, kind: "text_request" | "image" | "video_seconds") => number | null;
+  reserveContentGeneration: (input: {
+    workspaceId: string;
+    staffUserId: string;
+    requestKey: string;
+    operation: "content_package" | "generated_image";
+    kind: "text_request" | "image";
+    units: number;
+  }) => Promise<{ allowed: boolean; tracked: boolean; warning?: string }>;
+  summarizeUsageRows: (rows: Array<{ kind?: unknown; units?: unknown; status?: unknown }>) => Record<string, number>;
+};
+
+const usage = await import(pathToFileURL(path.join(repoRoot, "lib", "content-studio", "usage.ts")).href) as UsageModule;
+const supabaseServer = await import(pathToFileURL(path.join(repoRoot, "lib", "supabase", "server.ts")).href) as {
+  setSupabaseServerClientFactoryForTests: (factory: (() => unknown) | null) => void;
+};
+const migration = await readFile(path.join(repoRoot, "migrations", "051_content_generation_usage.sql"), "utf8");
+const route = await readFile(path.join(repoRoot, "api", "content-studio", "[...path].ts"), "utf8");
+const page = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "ContentStudio.tsx"), "utf8");
+const platformServer = await readFile(path.join(repoRoot, "lib", "crm", "platform.ts"), "utf8");
+const platformCard = await readFile(path.join(repoRoot, "artifacts", "medina-control", "src", "screens", "ClinicCard.tsx"), "utf8");
+
+test("CU1 media quotas come from the commercial plan, while text is only accounted", () => {
+  assert.equal(usage.quotaForPlan("basic", "image"), 0);
+  assert.equal(usage.quotaForPlan("standard", "image"), 60);
+  assert.equal(usage.quotaForPlan("pro", "image"), 150);
+  assert.equal(usage.quotaForPlan("standard", "video_seconds"), 0);
+  assert.equal(usage.quotaForPlan("pro", "video_seconds"), 180);
+  assert.equal(usage.quotaForPlan("pro", "text_request"), null);
+  assert.equal(usage.quotaForPlan(null, "image"), 0);
+});
+
+test("CU2 video usage has a bounded deterministic unit", () => {
+  assert.equal(usage.billableVideoSeconds("12"), 12);
+  assert.equal(usage.billableVideoSeconds("") , 8);
+  assert.equal(usage.billableVideoSeconds("0"), 8);
+  assert.equal(usage.billableVideoSeconds("999"), 8);
+  assert.equal(usage.billableVideoSeconds("not-a-number"), 8);
+});
+
+test("CU3 reserved, successful and uncertain calls consume quota; known failures do not", () => {
+  assert.deepEqual(
+    usage.summarizeUsageRows([
+      { kind: "image", units: 1, status: "reserved" },
+      { kind: "image", units: 2, status: "succeeded" },
+      { kind: "image", units: 4, status: "unknown" },
+      { kind: "image", units: 8, status: "failed" },
+      { kind: "video_seconds", units: 12, status: "succeeded" },
+      { kind: "text_request", units: 3, status: "succeeded" },
+      { kind: "other", units: 100, status: "succeeded" },
+    ]),
+    { text_request: 3, image: 7, video_seconds: 12 },
+  );
+});
+
+test("CU4 migration serializes reservations and keeps receipts server-only", () => {
+  assert.match(migration, /create table if not exists public\.content_generation_usage/i);
+  assert.match(migration, /pg_advisory_xact_lock/i);
+  assert.match(migration, /unique \(workspace_id, request_key\)/i);
+  assert.match(migration, /status in \('reserved', 'succeeded', 'failed', 'unknown'\)/i);
+  assert.match(migration, /revoke all on table public\.content_generation_usage from public, anon, authenticated/i);
+  assert.match(migration, /grant select, insert, update on table public\.content_generation_usage to service_role/i);
+  assert.doesNotMatch(migration, /\b(prompt|raw_response|access_token|service_role_key|public_url)\s+(text|json|jsonb)/i);
+});
+
+test("CU5 paid media is reserved before provider calls and completion is durable", () => {
+  const imageReservation = route.indexOf('operation: "generated_image"');
+  const imageProvider = route.indexOf("image = await generateImage");
+  const videoReservation = route.indexOf('operation: "generated_video"');
+  const videoProvider = route.indexOf("job = await createVideoJob");
+  const videoAdmission = route.indexOf("await admitGeneratedVideoWorkflow");
+  const videoDispatch = route.indexOf("await beginGeneratedVideoDispatch");
+  assert.ok(imageReservation > 0 && imageReservation < imageProvider);
+  assert.ok(videoReservation > 0 && videoReservation < videoProvider);
+  assert.ok(videoAdmission > 0 && videoAdmission < videoReservation, "private capacity must be reserved before paid quota");
+  assert.ok(videoDispatch > videoReservation && videoDispatch < videoProvider, "only the accepted dispatch nonce can call the provider");
+  assert.ok(route.indexOf("await linkGeneratedVideoProvider") > videoProvider, "the accepted provider job must be durably linked");
+  assert.match(route, /completeContentGeneration/);
+  assert.match(route, /generation_quota_exceeded/);
+  assert.match(route, /x-idempotency-key/);
+  assert.match(page, /X-Idempotency-Key/);
+  assert.match(route, /usage:\s*\{[\s\S]*?kind:\s*"browser"[\s\S]*?view_ai_content/);
+});
+
+test("CU6 Content Studio shows the plan balance without exposing technical receipts", () => {
+  assert.match(page, /Лимит креативов/);
+  assert.match(page, /Изображения:/);
+  assert.match(page, /Видео:/);
+  assert.match(page, /Лимит обновляется в начале месяца/);
+  assert.match(page, /\/api\/content-studio\/usage/);
+  assert.doesNotMatch(page, /content_generation_usage|usageId|request_key/);
+});
+
+test("CU7 platform owner sees workspace totals without prompts or generation payloads", () => {
+  const clinicHandler = platformServer.slice(
+    platformServer.indexOf("async function handleClinicCard"),
+    platformServer.indexOf("export async function handlePlatformOverview"),
+  );
+  assert.match(clinicHandler, /getContentUsageSummary\(workspaceId\)/);
+  assert.match(clinicHandler, /contentUsage,/);
+  assert.match(platformCard, /Расход AI-контента/);
+  assert.match(platformCard, /Текстовые запросы/);
+  assert.match(platformCard, /Изображения/);
+  assert.match(platformCard, /Оплачиваемые секунды генерации/);
+  assert.match(platformCard, /не хранит prompts, готовый контент, ссылки, ответы провайдера или ключи/);
+  const responseShape = clinicHandler.slice(clinicHandler.lastIndexOf("return sendJson(res, 200"));
+  assert.doesNotMatch(responseShape, /prompt|raw_response|public_url|access_token|service_role_key/i);
+});
+
+test("CU8 paid media fails closed when its usage receipt cannot be written", async () => {
+  const input = {
+    workspaceId: "11111111-1111-4111-8111-111111111111",
+    staffUserId: "22222222-2222-4222-8222-222222222222",
+    requestKey: "33333333-3333-4333-8333-333333333333",
+    operation: "generated_image" as const,
+    kind: "image" as const,
+    units: 1,
+  };
+
+  try {
+    supabaseServer.setSupabaseServerClientFactoryForTests(() => null);
+    await assert.rejects(() => usage.reserveContentGeneration(input), /не списывать средства без квитанции/i);
+
+    const chain: Record<string, unknown> = {};
+    chain.select = () => chain;
+    chain.eq = () => chain;
+    chain.order = () => chain;
+    chain.limit = async () => ({ data: [{ plan: "pro" }], error: null });
+    const missingFoundation = {
+      from: () => chain,
+      rpc: async () => ({ data: null, error: { code: "PGRST202", message: "reserve_content_generation_usage missing" } }),
+    };
+    supabaseServer.setSupabaseServerClientFactoryForTests(() => missingFoundation);
+    await assert.rejects(() => usage.reserveContentGeneration(input), /не списывать средства без квитанции/i);
+
+    const text = await usage.reserveContentGeneration({
+      ...input,
+      operation: "content_package",
+      kind: "text_request",
+    });
+    assert.equal(text.allowed, true);
+    assert.equal(text.tracked, false);
+    assert.match(text.warning || "", /не подключён/i);
+    assert.equal(
+      (page.match(/!generationUsage\.trackingAvailable/g) || []).length,
+      2,
+      "both paid media buttons must stay disabled while tracking is unavailable",
+    );
+    assert.equal(
+      (page.match(/generationUsageLoading \|\|\s*!generationUsage/g) || []).length,
+      2,
+      "both paid media buttons must stay disabled before a usage check succeeds",
+    );
+  } finally {
+    supabaseServer.setSupabaseServerClientFactoryForTests(null);
+  }
+});

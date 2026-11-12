@@ -1,0 +1,375 @@
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { getSupabaseServerClient } from "../supabase/server";
+import { isSyntheticEmail, loginFromEmail } from "../auth/staff-logins";
+import { isVertical, type Vertical } from "../vertical/terms";
+import { onboardingSettings, readOnboardingPurpose, type WorkspacePurpose } from "./workspace-purpose";
+import { acceptUrl, createInvitationToken, escapeLikePattern, expiryFromNow, normalizeEmail, sendSupabaseInviteEmail } from "./staff-invitations";
+
+// Подключение клиники с портала Medina Control.
+//
+// Портальная форма заменяет цепочку «Invite user в Supabase → provision-скрипт
+// с ноутбука → тариф», но НЕ меняет её principles:
+//
+//   — ни одной выдуманной строки: пространство, две настройки и приглашение
+//     владельца — ровно то, что создавал provision-workspace, и ничего сверх;
+//   — пароль не проходит ни через этот код, ни через портал: владелец получает
+//     ссылку-приглашение и задаёт пароль сам на странице /join. Письмо шлёт
+//     Supabase и только как best effort — ссылка возвращается порталу, и её
+//     можно передать любым каналом;
+//   — ниша обязательна и умолчания у неё нет: она меняет правила проверки
+//     рекламы, и выбрать её молча значило бы выбрать за клиента.
+//
+// Первый владелец нового пространства — единственный случай, когда роль owner
+// назначается приглашением: правило «owner нельзя выдать через общий маршрут»
+// охраняет существующие клиники от своих же админов, а здесь пространства ещё
+// нет и выдаёт роль сама платформа.
+
+type JsonRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): JsonRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as JsonRecord;
+}
+
+function readString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function sendJson(res: VercelResponse, status: number, body: JsonRecord) {
+  res.status(status).json(body);
+}
+
+export type OnboardingRejection = { status: number; error: string; code: string; details?: string[] };
+
+export type OnboardingRequest = {
+  name: string;
+  purpose: WorkspacePurpose;
+  vertical: Vertical | null;
+  ownerEmail: string;
+  ownerName: string;
+  timeZone: string;
+};
+
+/** Всё, что решается без базы. Отдельной функцией — ради проверок без сети. */
+export function validateOnboardingRequest(body: JsonRecord): OnboardingRequest | OnboardingRejection {
+  const name = readString(body.name);
+  const vertical = readString(body.vertical).toLowerCase();
+  const purpose = readOnboardingPurpose(body.purpose);
+  const ownerEmail = normalizeEmail(body.ownerEmail);
+  const ownerName = readString(body.ownerName);
+  const timeZone = readString(body.timeZone);
+
+  const details: string[] = [];
+  if (name.length < 2 || name.length > 120) details.push("Название — от 2 до 120 символов.");
+  if (!purpose) details.push("Назначение пространства не распознано.");
+  if (purpose === "clinic_services" && !isVertical(vertical)) details.push("Ниша обязательна: beauty (салон), dental (стоматология) или clinic (клиника).");
+  if (purpose === "marketing" && vertical) details.push("Для маркетингового пространства медицинская ниша не задаётся.");
+  if (purpose === "mortgage_leads" && (vertical || (body.vertical !== undefined && typeof body.vertical !== "string"))) {
+    details.push("Для ипотечных заявок медицинская ниша не задаётся.");
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ownerEmail)) details.push("Почта владельца не похожа на адрес.");
+  if (!timeZone) details.push("Часовой пояс обязателен: без него «сегодня» считается неверно часть суток.");
+  else {
+    try {
+      new Intl.DateTimeFormat("en-CA", { timeZone });
+    } catch {
+      details.push(`Часовой пояс «${timeZone}» не распознан. Пример: Asia/Almaty.`);
+    }
+  }
+
+  if (!purpose || details.length > 0) {
+    return { status: 400, error: "Форма заполнена не до конца", code: "invalid_onboarding", details };
+  }
+
+  // Nonmedical purposes have no vertical; they do not override ad policy.
+  return { name, purpose, vertical: purpose === "clinic_services" && isVertical(vertical) ? vertical : null, ownerEmail, ownerName: ownerName || ownerEmail, timeZone };
+}
+
+/**
+ * POST /api/crm/platform-invitation-reissue — новое приглашение владельца
+ * СУЩЕСТВУЮЩЕГО пространства. Ссылка теряется, мессенджер портит фрагмент,
+ * семь дней истекают — без перевыпуска живое приглашение было тупиком:
+ * с портала его было не заменить, а повторная форма создавала вторую клинику.
+ *
+ * Прежние непогашенные приглашения владельца отзываются в тот же ход: два
+ * живых токена на одну почту — это два пути в одно пространство, и след
+ * от потерянного никто бы не отозвал.
+ */
+export async function handlePlatformInvitationReissue(req: VercelRequest, res: VercelResponse) {
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendJson(res, 503, { success: false, error: "Хранилище не настроено", code: "storage_not_configured" });
+  }
+
+  const body = asRecord(req.body);
+  const workspaceId = readString(body.workspaceId);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(workspaceId)) {
+    return sendJson(res, 400, { success: false, error: "Нужна клиника", code: "workspace_required" });
+  }
+
+  const { data: workspaceRow, error: workspaceError } = await supabase
+    .from("workspaces")
+    .select("id, name, owner_email")
+    .eq("id", workspaceId)
+    .maybeSingle();
+  if (workspaceError) {
+    return sendJson(res, 502, { success: false, error: "Не удалось прочитать клинику", code: "unavailable" });
+  }
+  if (!workspaceRow) {
+    return sendJson(res, 404, { success: false, error: "Клиники нет", code: "not_found" });
+  }
+  const workspace = asRecord(workspaceRow);
+  const ownerEmail = normalizeEmail(workspace.owner_email);
+  if (!ownerEmail) {
+    return sendJson(res, 409, {
+      success: false,
+      error: "У пространства не записана почта владельца",
+      code: "owner_email_missing",
+    });
+  }
+
+  // Владелец уже внутри? Тогда приглашение не нужно и только запутает.
+  const { data: existingMember } = await supabase
+    .from("staff_users")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("role", "owner")
+    .maybeSingle();
+  if (existingMember) {
+    return sendJson(res, 409, {
+      success: false,
+      error: "Владелец уже принял приглашение",
+      code: "owner_already_member",
+      details: ["Пространство живое: приглашать владельца второй раз не нужно."],
+    });
+  }
+
+  const now = new Date().toISOString();
+  const { error: revokeError } = await supabase
+    .from("staff_invitations")
+    .update({ revoked_at: now })
+    .eq("workspace_id", workspaceId)
+    .eq("role", "owner")
+    .is("accepted_at", null)
+    .is("revoked_at", null);
+  if (revokeError) {
+    return sendJson(res, 502, {
+      success: false,
+      error: "Не удалось отозвать прежнее приглашение",
+      code: "unavailable",
+      details: ["Новое не выписано: старая ссылка осталась единственной действующей."],
+    });
+  }
+
+  const { token, tokenHash } = createInvitationToken();
+  const { data: invitationRow, error: invitationError } = await supabase
+    .from("staff_invitations")
+    .insert({
+      workspace_id: workspaceId,
+      email: ownerEmail,
+      role: "owner",
+      token_hash: tokenHash,
+      expires_at: expiryFromNow(),
+      invited_by_staff_user_id: null,
+    })
+    .select("id, expires_at")
+    .single();
+  if (invitationError || !invitationRow) {
+    // Код отличается от отказа на шаге revoke намеренно: там старая ссылка
+    // осталась единственной действующей, здесь действующих нет вовсе — клиент
+    // по этому коду убирает с экрана показанную ранее ссылку.
+    return sendJson(res, 502, {
+      success: false,
+      error: "Прежнее приглашение отозвано, а новое не выписалось",
+      code: "reissue_incomplete",
+      details: ["Действующих ссылок у владельца сейчас нет — повторите перевыпуск."],
+    });
+  }
+
+  const link = acceptUrl(req, token);
+  const email = await sendSupabaseInviteEmail(ownerEmail, link);
+
+  return sendJson(res, 201, {
+    success: true,
+    data: {
+      workspaceId,
+      name: readString(workspace.name),
+      ownerEmail,
+      ownerLogin: isSyntheticEmail(ownerEmail) ? loginFromEmail(ownerEmail) : "",
+      ownerLoginOnly: isSyntheticEmail(ownerEmail),
+      invitationExpiresAt: readString(asRecord(invitationRow).expires_at),
+      acceptUrl: link,
+      emailSent: email.sent,
+      ...(email.reason ? { emailStatus: email.reason } : {}),
+    },
+  });
+}
+
+/** POST /api/crm/platform-onboarding — за requirePlatformOwner в маршрутизаторе. */
+export async function handlePlatformOnboarding(req: VercelRequest, res: VercelResponse) {
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendJson(res, 503, { success: false, error: "Хранилище не настроено", code: "storage_not_configured" });
+  }
+
+  const body = asRecord(req.body);
+  if (body.ownerLogin !== undefined || isSyntheticEmail(body.ownerEmail)) {
+    return sendJson(res, 400, {
+      success: false,
+      error: "Новое приглашение требует настоящую почту владельца. Для логина используйте подключение с паролем.",
+      code: "invalid_onboarding",
+    });
+  }
+  const validated = validateOnboardingRequest(body);
+  if ("status" in validated) {
+    return sendJson(res, validated.status, {
+      success: false,
+      error: validated.error,
+      code: validated.code,
+      ...(validated.details ? { details: validated.details } : {}),
+    });
+  }
+
+  // Один клиент — одно подключение за раз. Живое приглашение владельца на эту
+  // почту означает, что пространство уже создано и ждёт: второе рядом с ним —
+  // почти наверняка двойной клик или забытая вчерашняя попытка.
+  const { data: pendingRows, error: pendingError } = await supabase
+    .from("staff_invitations")
+    .select("workspace_id, expires_at, accepted_at, revoked_at")
+    .eq("role", "owner")
+    .ilike("email", escapeLikePattern(validated.ownerEmail))
+    .is("accepted_at", null)
+    .is("revoked_at", null)
+    .gt("expires_at", new Date().toISOString());
+  if (pendingError) {
+    return sendJson(res, 502, { success: false, error: "Не удалось проверить существующие приглашения", code: "unavailable" });
+  }
+  if (Array.isArray(pendingRows) && pendingRows.length > 0) {
+    const existingWorkspaceId = readString(asRecord(pendingRows[0]).workspace_id);
+    const { data: existingWorkspace } = await supabase
+      .from("workspaces")
+      .select("name")
+      .eq("id", existingWorkspaceId)
+      .maybeSingle();
+    return sendJson(res, 409, {
+      success: false,
+      error: "Эта почта уже подключается",
+      code: "invitation_already_pending",
+      details: [
+        `Владельцу уже отправлено приглашение${existingWorkspace ? ` в «${readString(asRecord(existingWorkspace).name)}»` : ""}, и оно ещё действует.`,
+        "Второе пространство для той же почты создаётся только после того, как первое приглашение принято или истекло.",
+      ],
+      // Форма предлагает перевыпуск: ссылка теряется, мессенджер её портит,
+      // семь дней истекают — и без этого поля живое приглашение было тупиком.
+      data: { existingWorkspaceId },
+    });
+  }
+
+  // У этой почты уже есть клиника? Молчаливый дубль был главным источником
+  // путаницы: повтор формы после истёкшего приглашения, после потерянного
+  // ответа сети или после парольного подключения создавал вторую клинику
+  // без единого слова. Легитимный кейс «одна почта — два салона» остаётся:
+  // явный флаг подтверждения пропускает мимо проверки.
+  if (body.confirmAdditionalWorkspace !== true) {
+    const { data: ownedRows, error: ownedError } = await supabase
+      .from("workspaces")
+      .select("id, name")
+      .ilike("owner_email", escapeLikePattern(validated.ownerEmail));
+    if (ownedError) {
+      return sendJson(res, 502, { success: false, error: "Не удалось проверить существующие клиники", code: "unavailable" });
+    }
+    if (Array.isArray(ownedRows) && ownedRows.length > 0) {
+      const names = ownedRows.map((row) => readString(asRecord(row).name)).filter(Boolean);
+      return sendJson(res, 409, {
+        success: false,
+        error: "У этой почты уже есть клиника",
+        code: "owner_already_has_workspace",
+        details: [
+          `За почтой уже числится: ${names.map((name) => `«${name}»`).join(", ")}.`,
+          "Если вы ждали это подключение — возможно, оно уже состоялось: проверьте карточку клиники, приглашение перевыпускается оттуда.",
+          "Если владельцу нужна вторая точка — подтвердите создание кнопкой ниже.",
+        ],
+        data: { existingWorkspaceId: readString(asRecord(ownedRows[0]).id) },
+      });
+    }
+  }
+
+  const { data: workspaceRow, error: workspaceError } = await supabase
+    .from("workspaces")
+    .insert({ name: validated.name, owner_email: validated.ownerEmail })
+    .select("id")
+    .single();
+  if (workspaceError || !workspaceRow) {
+    return sendJson(res, 502, { success: false, error: "Не удалось создать пространство", code: "unavailable" });
+  }
+  const workspaceId = readString(asRecord(workspaceRow).id);
+
+  // Дальше каждый отказ называет, что УЖЕ создано: полусозданная клиника —
+  // это состояние, которое владелец платформы должен видеть, а не угадывать.
+  const { error: settingsError } = await supabase.from("workspace_settings").insert(onboardingSettings(workspaceId, validated));
+  if (settingsError) {
+    return sendJson(res, 502, {
+      success: false,
+      error: "Пространство создано, но настройки не записались",
+      code: "partial_onboarding",
+      details: [
+        `Пространство ${workspaceId} уже существует — не создавайте второе.`,
+        "Не записаны профиль пространства и часовой пояс; приглашение владельцу не отправлялось.",
+        "Приглашение в это пространство выписывается кнопкой ниже; профиль и часовой пояс останутся незаполненными.",
+      ],
+      // Кнопка перевыпуска работает по id — без него совет был невыполним.
+      data: { existingWorkspaceId: workspaceId },
+    });
+  }
+
+  const { token, tokenHash } = createInvitationToken();
+  const { data: invitationRow, error: invitationError } = await supabase
+    .from("staff_invitations")
+    .insert({
+      workspace_id: workspaceId,
+      email: validated.ownerEmail,
+      role: "owner",
+      token_hash: tokenHash,
+      expires_at: expiryFromNow(),
+      // Приглашает платформа, а не сотрудник пространства — его ещё нет.
+      invited_by_staff_user_id: null,
+    })
+    .select("id, expires_at")
+    .single();
+  if (invitationError || !invitationRow) {
+    // Прежний совет «отправьте эту же форму ещё раз» создавал ровно тот дубль,
+    // от которого предостерегала строка выше: форма всегда начинает с insert
+    // нового пространства. Правильный инструмент — перевыпуск по id.
+    return sendJson(res, 502, {
+      success: false,
+      error: "Пространство создано, но приглашение не выписалось",
+      code: "partial_onboarding",
+      details: [
+        `Пространство ${workspaceId} с настройками уже существует — не создавайте второе.`,
+        "Перевыпустите приглашение кнопкой ниже — оно уйдёт в уже созданное пространство.",
+      ],
+      data: { existingWorkspaceId: workspaceId },
+    });
+  }
+
+  const link = acceptUrl(req, token);
+  const email = await sendSupabaseInviteEmail(validated.ownerEmail, link);
+
+  return sendJson(res, 201, {
+    success: true,
+    data: {
+      workspaceId,
+      name: validated.name,
+      purpose: validated.purpose,
+      vertical: validated.vertical,
+      ownerEmail: validated.ownerEmail,
+      timeZone: validated.timeZone,
+      invitationExpiresAt: readString(asRecord(invitationRow).expires_at),
+      // Показывается один раз: в базе лежит только хэш. Если письмо не ушло —
+      // ссылку передают руками, любым каналом.
+      acceptUrl: link,
+      emailSent: email.sent,
+      ...(email.reason ? { emailStatus: email.reason } : {}),
+    },
+  });
+}

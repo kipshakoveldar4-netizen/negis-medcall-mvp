@@ -1,0 +1,708 @@
+import assert from "node:assert/strict";
+import { withAppointmentCreateRpcSpy, appointmentSpyRows, appointmentSpyBody } from "./appointment-create-rpc-spy.js";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// CRM — two appointments for one doctor at one time.
+//
+// The rule existed only in the browser, over whatever array the page happened
+// to hold (AppointmentsPage findConflict). That is wrong twice over. It is
+// wrong at scale, because the list read has no limit and is therefore capped
+// by whatever PostgREST is configured with — a setting this repository does
+// not define — so past that point the conflicting appointment is simply not in
+// the window and the clinic double-books with no warning. And it is wrong at
+// any scale, because two registrars on two devices each hold their own array:
+// neither can see the booking the other made a second ago.
+//
+// This read is advisory; the database capacity trigger is authoritative under
+// concurrency. No allowConflict flag may bypass either capacity rule.
+//
+// The spy here filters for real (eq/gte/lt), unlike the shared one: the whole
+// point of these tests is the range query and the overlap arithmetic, and a
+// stub that answers every query with every row would prove nothing.
+//
+// Nothing here touches production.
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const routerPath = path.join(repoRoot, "api", "crm", "[...path].ts");
+const serverPath = path.join(repoRoot, "lib", "crm", "server.ts");
+const pagePath = path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+
+const WORKSPACE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const WORKSPACE_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const USER_A = "11111111-1111-4111-8111-111111111111";
+const STAFF_A = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const EXISTING_ID = "abababab-abab-4bab-8bab-abababababab";
+const OTHER_ID = "bcbcbcbc-bcbc-4cbc-8cbc-bcbcbcbcbcbc";
+const TOKEN = "header.payload.signature";
+
+const DOCTOR = "д-р Сауле";
+/** 10:00 UTC, one hour. */
+const SLOT_START = "2026-09-01T10:00:00.000Z";
+const SLOT_END = "2026-09-01T11:00:00.000Z";
+
+type QueryLog = { table: string; op: string; filters: Record<string, unknown> };
+
+type Filter = { column: string; op: "eq" | "gte" | "lt"; value: unknown };
+
+function occupiedRow(over: Record<string, unknown> = {}) {
+  return {
+    id: EXISTING_ID,
+    workspace_id: WORKSPACE_A,
+    client_name: "Лаура Ким",
+    doctor_name: DOCTOR,
+    starts_at: SLOT_START,
+    duration_minutes: 60,
+    status: "scheduled",
+    ...over,
+  };
+}
+
+/** A spy that actually applies eq/gte/lt, so the range query is really exercised. */
+function spyClient(
+  rows: Record<string, unknown[]>,
+  log: QueryLog[],
+  failTables: Set<string>,
+  failReadsOn: Set<string>,
+) {
+  return {
+    from(table: string) {
+      const entry: QueryLog = { table, op: "select", filters: {} };
+      log.push(entry);
+      const applied: Filter[] = [];
+      const builder: Record<string, unknown> = {};
+      const chain = () => builder;
+      // failTables kills the table outright. failReadsOn kills only reads, which
+      // is what a statement timeout or a lost index actually looks like — and it
+      // is the only way to test that the guard degrades rather than that the
+      // whole write path fails.
+      const failure = failTables.has(table) ? { message: `relation ${table} unavailable`, code: "42P01" } : null;
+      const readFailure = failure
+        ?? (failReadsOn.has(table) ? { message: `canceling statement due to statement timeout on ${table}`, code: "57014" } : null);
+
+      const matching = () =>
+        (rows[table] ?? []).map((r) => r as Record<string, unknown>).filter((row) =>
+          applied.every((f) => {
+            const value = row[f.column];
+            if (f.op === "eq") return /^(?:id|workspace_id|doctor_id|auth_user_id)$/.test(f.column)
+              ? String(value ?? "").toLowerCase() === String(f.value ?? "").toLowerCase()
+              : value === f.value;
+            const left = String(value ?? "");
+            const right = String(f.value ?? "");
+            return f.op === "gte" ? left >= right : left < right;
+          }),
+        );
+
+      Object.assign(builder, {
+        select: () => chain(),
+        insert: (row: unknown) => { entry.op = "insert"; entry.filters.__row = row; return chain(); },
+        update: (row: unknown) => { entry.op = "update"; entry.filters.__row = row; return chain(); },
+        upsert: (row: unknown) => { entry.op = "upsert"; entry.filters.__row = row; return chain(); },
+        order: () => chain(),
+        limit: () => chain(),
+        single: () => chain(),
+        maybeSingle: () => Promise.resolve({ data: matching()[0] ?? null, error: readFailure }),
+        eq(column: string, value: unknown) { applied.push({ column, op: "eq", value }); entry.filters[column] = value; return chain(); },
+        gte(column: string, value: unknown) { applied.push({ column, op: "gte", value }); entry.filters[`${column}__gte`] = value; return chain(); },
+        lt(column: string, value: unknown) { applied.push({ column, op: "lt", value }); entry.filters[`${column}__lt`] = value; return chain(); },
+        in(column: string, value: unknown) { entry.filters[column] = value; return chain(); },
+        then(resolve: (value: { data: unknown; error: unknown; count?: number }) => void) {
+          const found = matching();
+          // A write chain resolves through here too; only reads may be failed
+          // selectively, so an insert still lands while its guard cannot run.
+          resolve({ data: found, error: entry.op === "select" ? readFailure : failure, count: found.length });
+        },
+      });
+      return builder;
+    },
+  };
+}
+
+type MockResponse = {
+  statusCode: number;
+  body: Record<string, unknown>;
+  status: (code: number) => MockResponse;
+  setHeader: () => MockResponse;
+  json: (payload: unknown) => MockResponse;
+};
+
+function mockResponse(): MockResponse {
+  const res: MockResponse = {
+    statusCode: 0,
+    body: {},
+    status(code) { res.statusCode = code; return res; },
+    setHeader() { return res; },
+    json(payload) { res.body = (payload ?? {}) as Record<string, unknown>; return res; },
+  };
+  return res;
+}
+
+async function loadRouter(options: {
+  appointments?: unknown[];
+  /** Строки справочника мастеров: у них живёт ёмкость. */
+  doctors?: unknown[];
+  failTables?: string[];
+  failReadsOn?: string[];
+} = {}) {
+  const log: QueryLog[] = [];
+  process.env.SUPABASE_URL = "https://project.example.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+
+  globalThis.fetch = (async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ id: USER_A, email: "a@example.test" }),
+  })) as unknown as typeof globalThis.fetch;
+
+  const supabaseModule = (await import(
+    pathToFileURL(path.join(repoRoot, "lib", "supabase", "server.ts")).href
+  )) as { setSupabaseServerClientFactoryForTests: (factory: (() => unknown) | null) => void };
+
+  const rows: Record<string, unknown[]> = {
+    // auth_user_id is part of the fixture because this spy filters for real:
+    // the membership lookup is `.eq("auth_user_id", …).eq("status", "active")`
+    // (lib/auth/server.ts), and a row without it is simply not a member here.
+    staff_users: [{ id: STAFF_A, auth_user_id: USER_A, workspace_id: WORKSPACE_A, role: "owner", status: "active" }],
+    appointments: options.appointments ?? [],
+    clinic_doctors: options.doctors ?? [],
+  };
+  supabaseModule.setSupabaseServerClientFactoryForTests(() =>
+    withAppointmentCreateRpcSpy(spyClient(appointmentSpyRows(rows), log, new Set(options.failTables ?? []), new Set(options.failReadsOn ?? []))));
+
+  const routerModule = (await import(pathToFileURL(routerPath).href)) as {
+    default: (req: unknown, res: MockResponse) => Promise<unknown>;
+  };
+
+  return async (input: { method?: string; body?: unknown }) => {
+    log.length = 0;
+    const res = mockResponse();
+    await routerModule.default(
+      {
+        method: input.method ?? "POST",
+        headers: { authorization: `Bearer ${TOKEN}` },
+        query: { path: ["appointments"], workspaceId: WORKSPACE_A },
+        body: appointmentSpyBody("appointments", input.method, input.body),
+      },
+      res,
+    );
+    return { res, log: [...log] };
+  };
+}
+
+const booking = (over: Record<string, unknown> = {}) => ({
+  client: "Мария Ли",
+  phone: "+7 701 245 18 44",
+  doctor: DOCTOR,
+  starts_at: SLOT_START,
+  durationMinutes: 60,
+  status: "scheduled",
+  ...over,
+});
+
+const writes = (log: QueryLog[]) =>
+  log.filter((e) => e.table === "appointments" && (e.op === "insert" || e.op === "update"));
+
+/* ── The refusal ── */
+
+test("BC1 a second booking in an occupied slot is refused, and nothing is written", async () => {
+  const call = await loadRouter({ appointments: [occupiedRow()] });
+  const { res, log } = await call({ body: booking() });
+
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+  assert.equal(res.body.code, "appointment_conflict");
+  assert.equal(writes(log).length, 0, "the refusal must come before the write, not after it");
+});
+
+test("BC2 the refusal names the slot, so the operator can decide rather than guess", async () => {
+  const call = await loadRouter({ appointments: [occupiedRow()] });
+  const { res } = await call({ body: booking() });
+
+  const conflict = res.body.conflict as Record<string, unknown>;
+  assert.equal(conflict.startsAt, SLOT_START);
+  assert.equal(conflict.clientName, "Лаура Ким", "who occupies the slot is the whole content of the decision");
+  assert.equal(conflict.doctorName, DOCTOR);
+  assert.match(String(res.body.error), /[А-Яа-я]/, "the message the operator sees stays in Russian");
+});
+
+test("BC3 даже явный флаг обхода больше не пропускает: владелец закрыл двойную запись", async () => {
+  // Раньше allowConflict был осознанной перезаписью с журналом. Владелец
+  // отменил: «если запись есть на это время — уже не могли сделать». Флаг из
+  // тела теперь мёртв, и это проверяется именно присланным true: молча
+  // ожившая ветка сняла бы запрет без единого красного теста.
+  const call = await loadRouter({ appointments: [occupiedRow()] });
+  const { res, log } = await call({ body: booking({ allowConflict: true }) });
+
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+  assert.equal(writes(log).length, 0, "занятый слот не перезаписывается никаким флагом");
+});
+
+test("BC4 absence of an override is not consent", async () => {
+  const call = await loadRouter({ appointments: [occupiedRow()] });
+  // Every falsy spelling a caller might send by accident.
+  for (const value of [false, "false", "", 0, null]) {
+    const { res } = await call({ body: booking({ allowConflict: value }) });
+    assert.equal(res.statusCode, 409, `allowConflict=${JSON.stringify(value)} must not be read as permission`);
+  }
+});
+
+/* ── What is not a conflict ── */
+
+test("BC5 another doctor at the same hour is not a conflict", async () => {
+  const call = await loadRouter({ appointments: [occupiedRow()] });
+  const { res } = await call({ body: booking({ doctor: "д-р Айжан" }) });
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+});
+
+test("BC6 a cancelled or missed visit does not hold its slot", async () => {
+  for (const status of ["cancelled", "no_show"]) {
+    const call = await loadRouter({ appointments: [occupiedRow({ status })] });
+    const { res } = await call({ body: booking() });
+    assert.equal(res.statusCode, 201, `a ${status} appointment must free the time`);
+  }
+});
+
+test("BC7 booking a cancelled visit into a busy slot is not blocked either", async () => {
+  const call = await loadRouter({ appointments: [occupiedRow()] });
+  const { res } = await call({ body: booking({ status: "cancelled" }) });
+  assert.equal(res.statusCode, 201, "a cancelled appointment occupies nothing, so it can be recorded anywhere");
+});
+
+test("BC8 back-to-back appointments touch but do not overlap", async () => {
+  const call = await loadRouter({ appointments: [occupiedRow()] });
+  // The existing visit ends exactly when this one starts.
+  const { res } = await call({ body: booking({ starts_at: SLOT_END }) });
+  assert.equal(res.statusCode, 201, "an end and a start at the same instant are not an overlap");
+});
+
+test("BC9 a long visit that began earlier is still found", async () => {
+  // Starts three hours before the candidate and runs four hours. A check that
+  // only looked at the candidate's own hour would miss it entirely.
+  const call = await loadRouter({
+    appointments: [occupiedRow({ starts_at: "2026-09-01T07:00:00.000Z", duration_minutes: 240 })],
+  });
+  const { res } = await call({ body: booking() });
+  assert.equal(res.statusCode, 409, "the lookback window has to be wider than one slot");
+});
+
+test("BC10 another clinic's schedule is invisible", async () => {
+  const call = await loadRouter({ appointments: [occupiedRow({ workspace_id: WORKSPACE_B })] });
+  const { res, log } = await call({ body: booking() });
+
+  assert.equal(res.statusCode, 201, "a booking in another clinic must not block this one");
+  const check = log.find((e) => e.table === "appointments" && e.op === "select");
+  assert.ok(check, "the check must run");
+  assert.equal(check.filters.workspace_id, WORKSPACE_A, "and it is scoped like every other read");
+});
+
+/* ── Editing ── */
+
+test("BC11 an appointment does not conflict with itself", async () => {
+  const call = await loadRouter({ appointments: [occupiedRow()] });
+  const { res } = await call({
+    method: "PATCH",
+    body: { id: EXISTING_ID, updates: { service: "Чистка лица" } },
+  });
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+});
+
+test("BC12 moving an appointment onto a colleague's slot is refused", async () => {
+  const call = await loadRouter({
+    appointments: [
+      occupiedRow(),
+      // The one being moved: same doctor, an hour later.
+      occupiedRow({ id: OTHER_ID, client_name: "Мария Ли", starts_at: SLOT_END }),
+    ],
+  });
+  const { res, log } = await call({
+    method: "PATCH",
+    body: { id: OTHER_ID, updates: { starts_at: SLOT_START } },
+  });
+
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+  assert.equal((res.body.conflict as Record<string, unknown>).id, EXISTING_ID);
+  assert.equal(writes(log).length, 0);
+});
+
+test("BC13 a patch that carries only a status is judged on the merged row, not the patch alone", async () => {
+  // The patch has no doctor and no time; both come from the stored row. A check
+  // reading the patch alone would silently pass everything.
+  const call = await loadRouter({
+    appointments: [
+      occupiedRow(),
+      occupiedRow({ id: OTHER_ID, client_name: "Мария Ли", status: "cancelled" }),
+    ],
+  });
+  const { res } = await call({
+    method: "PATCH",
+    body: { id: OTHER_ID, updates: { status: "confirmed" } },
+  });
+
+  assert.equal(
+    res.statusCode,
+    409,
+    "reviving a cancelled visit into a slot someone else now holds is exactly the case a status-only patch hides",
+  );
+});
+
+/* ── Degradation ── */
+
+test("BC14 when only the guard's read fails, the clinic still books and the reason reaches the operator log", async () => {
+  // The first version of this test killed the whole appointments table, so the
+  // 502 it asserted came from the pre-existing write-failure path and it would
+  // have passed with the guard deleted entirely. Review caught that. Here only
+  // the SELECT fails — a statement timeout, a lost index — which is the shape
+  // this degradation actually takes.
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    const call = await loadRouter({ appointments: [occupiedRow()], failReadsOn: ["appointments"] });
+    const { res, log } = await call({ body: booking() });
+
+    // Refusing every booking because an advisory check is unavailable would be
+    // worse than the state before this existed. The booking goes through.
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    assert.equal(writes(log).length, 1, "the clinic is not blocked by its own guard");
+  } finally {
+    console.warn = realWarn;
+  }
+
+  assert.ok(
+    warnings.some((line) => line.includes("conflict check unavailable")),
+    "a guarantee that silently disappears is worse than none: the operator log has to say so",
+  );
+  assert.ok(
+    !warnings.join("\n").includes("Лаура"),
+    "and it must not carry patient data into the log",
+  );
+});
+
+test("BC17 confirming an arrival does not re-judge an appointment that has not moved", async () => {
+  // The regression this branch created and review caught. A registrar puts an
+  // urgent case over a busy hour on purpose — allowed, BC3 — and then the
+  // patient arrives. Pressing «Пришёл» sends a full PATCH with no override, and
+  // the first version answered 409 from the NEIGHBOUR: the buttons stopped
+  // working forever on both rows, with no explanation and no way around. The
+  // same blow landed on every appointment already in production, none of which
+  // had ever passed this check.
+  const call = await loadRouter({
+    appointments: [
+      occupiedRow(),
+      occupiedRow({ id: OTHER_ID, client_name: "Мария Ли", status: "scheduled" }),
+    ],
+  });
+  const { res, log } = await call({
+    method: "PATCH",
+    body: { id: OTHER_ID, updates: { status: "arrived" } },
+  });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(
+    log.filter((e) => e.table === "appointments" && e.op === "select" && "doctor_name" in e.filters).length,
+    0,
+    "an appointment staying where it is takes nothing new; there is nothing to judge and no query to run",
+  );
+});
+
+test("BC18 a status the product does not know still holds its slot", async () => {
+  // The browser normalises anything unknown to «scheduled» and paints it as
+  // booked; the first version of the server read the same row as free. Client
+  // and server disagreed, and the unsafe reading was the default. The column
+  // has no CHECK, and clearing the field writes NULL.
+  for (const status of ["ожидает", "", "новая"]) {
+    const call = await loadRouter({ appointments: [occupiedRow({ status })] });
+    const { res } = await call({ body: booking() });
+    assert.equal(res.statusCode, 409, `status ${JSON.stringify(status)} must keep holding the slot`);
+  }
+});
+
+test("BC19 clearing the doctor is judged on the cleared value, not on the one being removed", async () => {
+  // buildPatchRow spells «clear this field» as null — the same null it uses for
+  // «not in the patch» — so a merge through ?? judged the removal by the doctor
+  // being removed and refused a change that would have freed the slot.
+  const call = await loadRouter({
+    appointments: [occupiedRow(), occupiedRow({ id: OTHER_ID, client_name: "Мария Ли" })],
+  });
+  const { res, log } = await call({
+    method: "PATCH",
+    body: { id: OTHER_ID, updates: { doctor: "" } },
+  });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const update = log.find((e) => e.table === "appointments" && e.op === "update");
+  assert.equal((update?.filters.__row as Record<string, unknown>).doctor_name, null);
+});
+
+test("BC20 the column and the arithmetic agree on how long a visit is", async () => {
+  // readNumber("") is 0, which is finite, so the old `?? 60` never caught it:
+  // the row stored 0 while the check treated the visit as an hour. The card
+  // said «0 мин» and the refusal said the hour was taken.
+  const call = await loadRouter();
+  const { res, log } = await call({ body: booking({ durationMinutes: "" }) });
+
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  const insert = log.find((e) => e.table === "appointments" && e.op === "insert");
+  assert.equal(
+    (insert?.filters.__row as Record<string, unknown>).duration_minutes,
+    60,
+    "what the check assumes is what the column holds",
+  );
+});
+
+test("BC21 an appointment does not conflict with itself because of letter case", async () => {
+  // Postgres compares uuid canonically and renders it lower-case; a caller
+  // passing the same id upper-cased would have failed to match itself here.
+  const call = await loadRouter({ appointments: [occupiedRow()] });
+  const { res } = await call({
+    method: "PATCH",
+    body: { id: EXISTING_ID.toUpperCase(), updates: { starts_at: SLOT_START } },
+  });
+  assert.notEqual(res.statusCode, 409, "the row must recognise itself whatever case the id arrived in");
+});
+
+test("BC22 обход мёртв целиком: ни записи, ни строки overbooked в журнале", async () => {
+  // Прежний BC22 требовал след от сознательной перезаписи. Перезаписи больше
+  // нет — и след не должен рождаться: строка overbooked в журнале при
+  // отказанной записи означала бы, что кусок старой ветки ожил.
+  const call = await loadRouter({ appointments: [occupiedRow()] });
+  const { res, log } = await call({ body: booking({ allowConflict: true }) });
+
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+  const journalRows = log
+    .filter((e) => e.table === "audit_logs" && e.op === "insert")
+    .map((e) => e.filters.__row as Record<string, unknown>);
+  assert.ok(
+    !journalRows.some((row) => row.action === "overbooked"),
+    "отказ не оставляет строку о «сознательной перезаписи», которой не было",
+  );
+});
+
+test("BC-MS combined service duration protects the next appointment on create and edit", async () => {
+  const serviceItems = [
+    { serviceId: "", name: "Первая процедура", priceMinor: 500000, durationMinutes: 30 },
+    { serviceId: "", name: "Вторая процедура", priceMinor: 200000, durationMinutes: 30 },
+  ];
+  const next = occupiedRow({ id: "a0000000-0000-4000-8000-000000000009", starts_at: "2026-09-01T10:45:00.000Z" });
+  const call = await loadRouter({ appointments: [next] });
+  const blocked = await call({ body: booking({ durationMinutes: 1, serviceItems }) });
+  assert.equal(blocked.res.statusCode, 409, JSON.stringify(blocked.res.body));
+  assert.equal(writes(blocked.log).length, 0);
+
+  const allowed = await call({ body: booking({ serviceItems: serviceItems.slice(0, 1) }) });
+  assert.equal(allowed.res.statusCode, 201, JSON.stringify(allowed.res.body));
+  const edit = await loadRouter({ appointments: [occupiedRow({ duration_minutes: 30 }), next] });
+  const extended = await edit({ method: "PATCH", body: { id: EXISTING_ID, updates: { serviceItems } } });
+  assert.equal(extended.res.statusCode, 409, JSON.stringify(extended.res.body));
+  assert.equal(writes(extended.log).length, 0);
+});
+
+/* ── Source pins ── */
+
+test("BC15 the server is the authority, and the browser is only a fast pre-filter", async () => {
+  const server = await readFile(serverPath, "utf8");
+  // Проверка безусловна на обоих пишущих путях: у неё больше нет выключателя.
+  assert.ok(
+    server.includes("await assertNoAppointmentConflict(supabase, workspaceId, {"),
+    "create path runs the check",
+  );
+  assert.ok(
+    server.includes('if (patchedEntity === "appointment") {'),
+    "patch path runs the check unconditionally",
+  );
+  assert.ok(
+    !server.includes("allowsAppointmentConflict("),
+    "флага обхода не существует: молча оживить его нельзя",
+  );
+  assert.ok(
+    server.includes('code: "appointment_conflict"'),
+    "the refusal carries a code the browser can act on, not just a message",
+  );
+
+  const page = await readFile(pagePath, "utf8");
+  assert.ok(
+    page.includes("class SlotTakenError"),
+    "the page must tell a busy slot apart from a database failure — they need different screens",
+  );
+  const submit = page.slice(page.indexOf("const submitForm"), page.indexOf("const renderDay"));
+  // Открывающая скобка без закрывающей — намеренно. Проверяется то, ради чего
+  // строка здесь стоит: создание ЖДЁТ сервер и несёт решение оператора об
+  // обходе. Точный список аргументов к этому смыслу отношения не имеет, а
+  // пинать литерал целиком значит красить набор в красный на каждой правке
+  // сигнатуры — что и случилось, когда у графика врача появился свой обход.
+  assert.ok(
+    submit.includes("await createAppointment(appointment, allowConflict"),
+    "creating must await the server: an optimistic create cannot ask the operator anything",
+  );
+  // Как и выше: скобка не закрыта намеренно, аргументы describeConflict — не
+  // предмет этого пина (словарь ниши добавил terms, и точный литерал сломался
+  // бы снова на любой следующей правке сигнатуры).
+  assert.ok(
+    submit.includes("setConflictMessage(describeConflict(error") && submit.split("setConflictMessage(describeConflict(error").length === 3,
+    "both the create and the edit path must reopen the same decision in the modal",
+  );
+});
+
+test("BC16 кнопки «Сохранить всё равно» при занятом времени не существует", async () => {
+  const page = await readFile(pagePath, "utf8");
+  // Кнопка была единственным местом, где оператор давал обход. Вместе с
+  // серверной веткой ушла и она; баннер остаётся и говорит, что делать.
+  assert.ok(
+    !page.includes("onClick={() => void submitForm(true)}"),
+    "обход из формы отправить нечем",
+  );
+  assert.ok(page.includes("Выберите другое время"), "отказ говорит, что делать дальше");
+});
+
+// —— Ёмкость мастера ————————————————————————————————————————————————————
+
+/** Строка справочника с заданной ёмкостью. */
+function doctorRow(capacity: number) {
+  return { id: "d0000000-0000-4000-8000-000000000001", workspace_id: WORKSPACE_A, full_name: DOCTOR, capacity, is_active: true };
+}
+
+test("BC23 без справочника ёмкость равна единице — поведение клиник не меняется", async () => {
+  // Свободно введённое имя мастера, которого в справочнике нет, не должно
+  // молча получать неограниченную ёмкость.
+  const call = await loadRouter({ appointments: [occupiedRow()], doctors: [] });
+  const { res } = await call({ body: booking() });
+
+  assert.equal(res.statusCode, 409, "занятый слот по-прежнему занят");
+});
+
+test("BC24 ёмкость два пускает второго клиента и отказывает третьему", async () => {
+  // Мастер ведёт двоих параллельно: одному нанесена краска, второму делают
+  // укладку. Это рутина салона, а не перезапись.
+  const second = await loadRouter({ appointments: [occupiedRow()], doctors: [doctorRow(2)] });
+  const allowed = await second({ body: booking() });
+  assert.equal(allowed.res.statusCode, 201, JSON.stringify(allowed.res.body));
+
+  const third = await loadRouter({
+    appointments: [occupiedRow(), occupiedRow({ id: "a0000000-0000-4000-8000-000000000009", client_name: "Второй" })],
+    doctors: [doctorRow(2)],
+  });
+  const refused = await third({ body: booking() });
+  assert.equal(refused.res.statusCode, 409, "третий сверх ёмкости — уже настоящее пересечение");
+});
+
+test("BC25 переполнение ёмкости — это отказ, а не тихая запись", async () => {
+  const call = await loadRouter({
+    appointments: [occupiedRow(), occupiedRow({ id: "a0000000-0000-4000-8000-000000000009", client_name: "Второй" })],
+    doctors: [doctorRow(2)],
+  });
+  const { res, log } = await call({ body: booking() });
+
+  assert.equal(res.statusCode, 409);
+  assert.equal(writes(log).length, 0, "ничего не записано");
+  const conflict = res.body.conflict as Record<string, unknown>;
+  assert.ok(conflict && conflict.clientName, "отказ по-прежнему называет, кто занимает слот");
+});
+
+test("BC26 отказ чтения справочника не поднимает ёмкость", async () => {
+  // Единственное место, где сбой чтения мог бы РАЗРЕШИТЬ запись, которую
+  // правило обязано отклонить. Умолчание при сбое — единица.
+  const call = await loadRouter({
+    appointments: [occupiedRow()],
+    doctors: [doctorRow(4)],
+    failReadsOn: ["clinic_doctors"],
+  });
+  const { res } = await call({ body: booking() });
+
+  assert.equal(res.statusCode, 409, "не прочитали ёмкость — значит не знаем, значит нельзя");
+});
+
+test("BC27 a long group visit can bridge adjacent appointments at capacity two", async () => {
+  const call = await loadRouter({ appointments: [occupiedRow(), occupiedRow({ id: OTHER_ID, starts_at: SLOT_END })], doctors: [doctorRow(2)] });
+  const { res } = await call({ body: booking({ durationMinutes: 120 }) });
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+});
+
+test("BC28 peak occupancy, not the first intersecting client, determines the refusal", async () => {
+  const call = await loadRouter({
+    appointments: [occupiedRow({ duration_minutes: 15 }), occupiedRow({ id: OTHER_ID, starts_at: SLOT_END }),
+      occupiedRow({ id: "a0000000-0000-4000-8000-000000000009", starts_at: SLOT_END })],
+    doctors: [doctorRow(2)],
+  });
+  const { res, log } = await call({ body: booking({ durationMinutes: 120 }) });
+  assert.equal(res.statusCode, 409);
+  assert.ok([OTHER_ID, "a0000000-0000-4000-8000-000000000009"].includes(String((res.body.conflict as Record<string, unknown>).id)));
+  assert.equal(writes(log).length, 0);
+});
+
+test("BC29 shrinking an occupied legacy group interval does not book a new place", async () => {
+  const call = await loadRouter({ appointments: [occupiedRow({ duration_minutes: 120 }), occupiedRow({ id: OTHER_ID })], doctors: [doctorRow(1)] });
+  const { res } = await call({ method: "PATCH", body: { id: EXISTING_ID, updates: { durationMinutes: 60 } } });
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+});
+
+test("BC30 full namesake group does not consume another explicit doctor's capacity", async () => {
+  const doctor = doctorRow(2);
+  const namesakeId = "d0000000-0000-4000-8000-000000000002";
+  const call = await loadRouter({
+    appointments: [occupiedRow({ doctor_id: namesakeId }), occupiedRow({ id: OTHER_ID, doctor_id: namesakeId })],
+    doctors: [doctor, { ...doctor, id: namesakeId, full_name: "Renamed doctor" }],
+  });
+  const { res, log } = await call({ body: booking({ doctorId: doctor.id }) });
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  assert.equal(writes(log).length, 1);
+});
+
+test("BC31 explicit identity still finds a full group after its labels change or disappear", async () => {
+  const doctor = doctorRow(2);
+  for (const label of ["Previous doctor name", ""]) {
+    const call = await loadRouter({
+      appointments: [occupiedRow({ doctor_id: doctor.id, doctor_name: label }),
+        occupiedRow({ id: OTHER_ID, doctor_id: doctor.id, doctor_name: label })],
+      doctors: [doctor],
+    });
+    const { res, log } = await call({ body: booking({ doctorId: doctor.id.toUpperCase() }) });
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+    assert.equal(writes(log).length, 0);
+    const check = log.find(e => e.table === "appointments" && "starts_at__gte" in e.filters);
+    assert.equal(check?.filters.workspace_id, WORKSPACE_A);
+    assert.equal(check?.filters.doctor_name, undefined, "an old name filter must not hide the same UUID");
+  }
+});
+
+test("BC32 normalized legacy labels still share the explicit group's capacity", async () => {
+  const doctor = doctorRow(2);
+  const call = await loadRouter({
+    appointments: [occupiedRow({ doctor_id: null, doctor_name: `  ${DOCTOR.toUpperCase()}  ` }),
+      occupiedRow({ id: OTHER_ID, doctor_id: doctor.id, doctor_name: "Old label" })],
+    doctors: [doctor],
+  });
+  const { res, log } = await call({ body: booking({ doctorId: doctor.id }) });
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+  assert.equal(writes(log).length, 0);
+});
+
+test("BC33 a legacy candidate still counts linked appointments with the same normalized name", async () => {
+  const call = await loadRouter({ appointments: [occupiedRow({ doctor_id: doctorRow(1).id, doctor_name: ` ${DOCTOR.toUpperCase()} ` })] });
+  const { res } = await call({ body: booking() });
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+});
+
+test("BC-R отказ сервера называется человеку, а не заменяется советом невпопад", async () => {
+  const page = await readFile(pagePath, "utf8");
+
+  // Мастер салона прислал скриншот: «Не удалось создать запись. Проверьте
+  // расписание перед повтором» — общий текст на ЛЮБОЙ отказ, кроме занятого
+  // слота и нерабочего времени. Настоящая причина приходила в ответе сервера, а
+  // экран отправлял её в console.warn, которого на телефоне не видно. Человек
+  // оставался с советом, не имеющим отношения к делу.
+  assert.ok(!/Проверьте расписание перед повтором/.test(page), "совет невпопад убран");
+  assert.ok(/class ServerRefusalError/.test(page), "отказ несёт код и детали сервера");
+  assert.ok(/function refusalText/.test(page), "и переводится в человеческий текст");
+  assert.ok(
+    /toast\.error\(createAttempt\.current\?\.uncertain[\s\S]{0,180}:\s*refusalText\(error\)\)/.test(page),
+    "тост показывает причину, если исход попытки не остаётся неопределённым",
+  );
+
+  // Обрыв связи по-прежнему не выдаётся за «ничего не сохранилось»: вставка
+  // могла пройти до разрыва.
+  assert.ok(/связь оборвалась/.test(page) && /могла сохраниться/.test(page), "обрыв описан честно");
+
+  // Специальные отказы остаются со своими экранами, а не растворяются в общем.
+  assert.ok(/SlotTakenError/.test(page) && /OutsideScheduleError/.test(page));
+});

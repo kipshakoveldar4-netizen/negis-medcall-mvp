@@ -1,0 +1,391 @@
+import { useEffect, useRef, useState } from "react";
+import { Link, useLocation } from "wouter";
+import { KeyRound, LogIn, ShieldCheck } from "lucide-react";
+import { toast } from "sonner";
+import { apiUrl, CrmApiError, crmErrorMessage, crmFetch } from "@/lib/api";
+import { getSupabaseAccessToken } from "@/lib/serverAuth";
+import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
+import { isSyntheticEmail, loginOrEmailToAuthEmail } from "../../../../lib/auth/staff-logins";
+import { isStaffRole, roleLabels } from "@/lib/permissions";
+import { WORKSPACE_SELECTOR_KEY } from "@/lib/demoStorage";
+import { PENDING_INVITE_KEY } from "@/pages/JoinWorkspace";
+import { isWorkspacePurpose, type WorkspacePurpose } from "../../../../lib/crm/workspace-purpose";
+import { workspaceEntryRoute } from "@/lib/workspaceRoutes";
+
+type StaffUser = {
+  id?: string;
+  name?: string;
+  email?: string;
+  role?: string;
+  status?: string;
+  workspaceId?: string;
+  workspace_id?: string;
+};
+
+async function safeJson(response: globalThis.Response) {
+  const text = await response.text();
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text) as {
+      success?: boolean;
+      data?: Record<string, unknown>;
+      error?: string;
+      details?: string[];
+    };
+  } catch {
+    return null;
+  }
+}
+
+function firstStaffUser(value: unknown): StaffUser | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const items = Array.isArray(record.staff)
+    ? record.staff
+    : Array.isArray(record.items)
+      ? record.items
+      : [];
+  const staff = items[0];
+  if (!staff || typeof staff !== "object" || Array.isArray(staff)) return null;
+  return staff as StaffUser;
+}
+
+function saveStaffSession(staff: StaffUser, email: string, supabaseUserId?: string) {
+  const workspaceId = staff.workspaceId || staff.workspace_id || "demo-workspace";
+  const normalized = {
+    id: staff.id || supabaseUserId || "demo-staff-user",
+    name: staff.name || email,
+    email,
+    role: isStaffRole(staff.role) ? staff.role : "admin",
+    status: staff.status || "active",
+    workspaceId,
+  };
+
+  localStorage.setItem("negis_staff_user", JSON.stringify(normalized));
+  localStorage.setItem(
+    "negis_staff_session",
+    JSON.stringify({
+      mode: "staff",
+      authenticated: true,
+      createdAt: new Date().toISOString(),
+      email,
+      workspaceId,
+      supabaseUserId,
+    }),
+  );
+}
+
+export default function Login() {
+  const [, setLocation] = useLocation();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const loginAttempt = useRef<{ alive: boolean; actorId: string; signOutRevision: number } | null>(null);
+  useEffect(() => () => {
+    if (loginAttempt.current) loginAttempt.current.alive = false;
+    loginAttempt.current = null;
+  }, []);
+  // «Забыли пароль» прямо на входе. Приглашённый владелец, чей аккаунт
+  // существовал без пароля, упирался здесь в «Invalid login credentials» и
+  // тупик: восстановление жило только в модале лендинга, о котором со
+  // страницы входа не догадаться.
+  const [resetSending, setResetSending] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
+
+  const sendPasswordReset = async () => {
+    if (resetSending) return;
+    if (!email.trim()) {
+      toast.error("Введите логин или почту выше.");
+      return;
+    }
+    // У логина почты нет по построению: письмо ушло бы в служебный домен, то
+    // есть никуда, а плашка «письмо уже в пути» стала бы прямой ложью. В сеть
+    // не идём вовсе — сразу говорим, что делать.
+    // Служебный адрес «собаку» содержит, поэтому проверять надо ЕГО, а не
+    // наличие «@»: человек, увидевший свой полный адрес где-то в переписке,
+    // иначе получал бы «письмо уже в пути» и ждал бы его вечно.
+    if (!email.includes("@") || isSyntheticEmail(email)) {
+      toast.error(
+        "У логина нет почты, письмом пароль не восстановить. Попросите администратора клиники: «Настройки» → «Сотрудники» → «Новый пароль». Он передаст его лично.",
+      );
+      return;
+    }
+    setResetSending(true);
+    try {
+      await supabase.auth.resetPasswordForEmail(email.trim(), {
+        redirectTo: `${window.location.origin}/reset-password`,
+      });
+      // Один ответ на любой исход: существование аккаунта — не для угадывания.
+      setResetSent(true);
+    } catch {
+      setResetSent(true);
+    } finally {
+      setResetSending(false);
+    }
+  };
+
+  const submit = async () => {
+    if (loginAttempt.current) return;
+    // Одно поле на два вида входа: с «@» — почта, без — логин, который
+    // превращается в служебный адрес ТЕМ ЖЕ модулем, что применил сервер при
+    // заведении. Две копии транслитерации дали бы «неверный логин или пароль»,
+    // неотличимое от неверного пароля.
+    const normalizedEmail = loginOrEmailToAuthEmail(email);
+    if (!normalizedEmail || !password) {
+      toast.error("Введите логин или почту и пароль");
+      return;
+    }
+
+    const attempt = { alive: true, actorId: "", signOutRevision: getSignOutRevision() };
+    loginAttempt.current = attempt;
+    const current = () => loginAttempt.current === attempt && attempt.alive
+      && !isSignOutPending() && getSignOutRevision() === attempt.signOutRevision;
+    const currentActor = async () => {
+      if (!current() || !attempt.actorId) return false;
+      const token = await getSupabaseAccessToken(attempt.actorId);
+      return current() && Boolean(token);
+    };
+    const serviceError = "Сервис авторизации не ответил. Попробуйте войти ещё раз через минуту.";
+    let subscription: { unsubscribe(): void } | null = null;
+    setLoading(true);
+    try {
+      if (!hasSupabaseFrontendEnv) {
+        saveStaffSession(
+          {
+            id: "demo-staff-user",
+            name: email.trim() || normalizedEmail,
+            email: normalizedEmail,
+            role: "admin",
+            status: "active",
+            workspaceId: "demo-workspace",
+          },
+          normalizedEmail,
+        );
+        toast.success("Вход выполнен без подключения к базе");
+        setLocation("/dashboard");
+        return;
+      }
+
+      // Observe the whole attempt, including A -> B -> A between awaited reads.
+      subscription = sessionAuth.onAuthStateChange((event, session) => {
+        if (event === "INITIAL_SESSION") return;
+        const nextActor = session?.user.id || "";
+        if (event === "SIGNED_OUT") attempt.alive = false;
+        else if (nextActor) {
+          if (!attempt.actorId) attempt.actorId = nextActor;
+          else if (nextActor !== attempt.actorId) attempt.alive = false;
+        }
+      }).data.subscription;
+      const originalPassword = password;
+      setPassword("");
+      const { data, error } = await sessionAuth.signInWithPassword({
+        email: normalizedEmail,
+        password: originalPassword,
+      }, { isCurrent: current });
+
+      if (error) {
+        throw new Error(error.message);
+      }
+      const actorId = data.session?.user.id || "";
+      if (!actorId) throw new Error(serviceError);
+      if (attempt.actorId && attempt.actorId !== actorId) return;
+      attempt.actorId = actorId;
+      if (!await currentActor()) return;
+
+      // Security-2B: the staff lookup by email is gone — it answered for any
+      // address in any workspace. Membership now comes from the verified session
+      // via /api/crm/auth-context, which AuthContext resolves on the next render.
+      const requestOptions = { expectedUserId: actorId, dispatchGuard: current, cache: "no-store" as const };
+      const contextResponse = await crmFetch("/api/crm/auth-context", requestOptions);
+      if (!await currentActor()) return;
+
+      // Сеть моргнула или сервис недоступен — это НЕ «аккаунт не связан с
+      // клиникой»: прежний код выбрасывал из сессии по любому сбою чтения и
+      // ставил ложный диагноз.
+      if (!contextResponse.ok) {
+        throw new Error(contextResponse.status >= 500 ? serviceError : crmErrorMessage(contextResponse.status));
+      }
+      const context = await (contextResponse.json() as Promise<{
+        success?: boolean; data?: { memberships?: unknown[] };
+      }>).catch(() => null);
+      if (!await currentActor()) return;
+      if (context?.success !== true || !Array.isArray(context.data?.memberships)) throw new Error(serviceError);
+      const memberships = context.data.memberships;
+      if (!memberships.every((entry) => !!entry && typeof entry === "object" && !Array.isArray(entry)
+        && "workspaceId" in entry && typeof entry.workspaceId === "string" && Boolean(entry.workspaceId.trim())
+        && "role" in entry && isStaffRole(entry.role)
+        && "purpose" in entry && isWorkspacePurpose(entry.purpose))) throw new Error(serviceError);
+
+      if (memberships.length === 0) {
+        // Приглашённый входит ИМЕННО без членства: оно появляется только при
+        // принятии приглашения, для которого нужна живая сессия. Разлогин здесь
+        // замыкал круг — /join → «войти» → вход → разлогин → /join.
+        let pendingInvite = "";
+        try {
+          pendingInvite = window.sessionStorage.getItem(PENDING_INVITE_KEY)?.trim() || "";
+        } catch {
+          // Нет хранилища — обычная ветка ниже.
+        }
+        if (pendingInvite) {
+          toast.success("Вход выполнен — возвращаемся к приглашению");
+          setLocation("/join");
+          return;
+        }
+
+        // Заявитель по коду клиники — тот же случай: членство появится, когда
+        // админ одобрит заявку, а до тех пор его нет ПО ЗАМЫСЛУ. Разлогин здесь
+        // не только ставил ложный диагноз «всё сломалось», но и убивал сессию,
+        // без которой человек не мог посмотреть статус своей заявки.
+        // Проверка стоит ДО signOut намеренно — маршрут заявок требует JWT.
+        const joinResponse = await crmFetch("/api/crm/join-request", requestOptions);
+        if (!await currentActor()) return;
+        if (!joinResponse.ok) throw new Error(joinResponse.status >= 500 ? serviceError : crmErrorMessage(joinResponse.status));
+        const joinBody = await (joinResponse.json() as Promise<{
+          success?: boolean; data?: { requests?: { status?: string }[] };
+        }>).catch(() => null);
+        if (!await currentActor()) return;
+        if (joinBody?.success !== true || !Array.isArray(joinBody.data?.requests)) throw new Error(serviceError);
+        const requests = joinBody.data.requests;
+        if (!requests.every((request) => !!request && typeof request.status === "string")) throw new Error(serviceError);
+        if (requests.some((request) => request.status === "pending" || request.status === "rejected")) {
+          setLocation("/join-request");
+          return;
+        }
+
+        if (!current()) return;
+        toast.error(
+          "Аккаунт не привязан к клинике. Если вам присылали ссылку-приглашение — откройте её ещё раз. Если у вас есть код клиники — подайте заявку на странице «Есть код клиники?». Иначе попросите администратора клиники выслать приглашение.",
+        );
+        await sessionAuth.signOut({ isCurrent: current });
+        return;
+      }
+
+      toast.success("Вход выполнен");
+      const selectedWorkspaceId = localStorage.getItem(WORKSPACE_SELECTOR_KEY);
+      const selectedMembership = memberships
+        .filter((entry): entry is { workspaceId: string; role: string; purpose: WorkspacePurpose } =>
+          !!entry && typeof entry === "object" && "workspaceId" in entry && "role" in entry && "purpose" in entry
+          && typeof entry.workspaceId === "string" && typeof entry.role === "string" && isWorkspacePurpose(entry.purpose))
+        .find((entry) => entry.workspaceId === selectedWorkspaceId || memberships.length === 1);
+      setLocation(workspaceEntryRoute(selectedMembership?.purpose ?? null, selectedMembership?.role ?? null));
+    } catch (error) {
+      if (current()) toast.error(error instanceof CrmApiError ? crmErrorMessage(error)
+        : error instanceof Error ? error.message : "Не удалось войти");
+    } finally {
+      subscription?.unsubscribe();
+      if (loginAttempt.current === attempt) {
+        loginAttempt.current = null;
+        setLoading(false);
+      }
+    }
+  };
+
+  return (
+    <main
+      className="min-h-screen px-5 py-10"
+      style={{
+        background:
+          "radial-gradient(circle at 16% 0%, rgba(13,148,136,0.10), transparent 30%), radial-gradient(circle at 86% 4%, rgba(15,118,110,0.08), transparent 28%), #EEF4F8",
+      }}
+    >
+      <div className="mx-auto flex min-h-[calc(100vh-80px)] max-w-5xl items-center justify-center">
+        <section className="grid w-full overflow-hidden rounded-[28px] border border-white/70 bg-white/70 shadow-[18px_24px_70px_rgba(88,104,124,0.18)] backdrop-blur-xl lg:grid-cols-[1fr_420px]">
+          <div className="hidden p-10 lg:block">
+            <div className="flex h-full flex-col justify-between rounded-[24px] bg-[#0F172A] p-8 text-white">
+              <div>
+                <div className="mb-8 inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em]">
+                  <ShieldCheck size={14} />
+                  Staff access
+                </div>
+                <h1 className="max-w-md text-3xl font-semibold leading-tight">Medina OS для команды</h1>
+                <p className="mt-4 max-w-md text-sm leading-6 text-white/70">
+                  Войдите логином, который выдал администратор, или своей почтой. Забыли пароль от почты — восстановите прямо отсюда; у логина пароль задаёт администратор.
+                </p>
+              </div>
+              <p className="text-xs text-white/50">Без настроек Supabase вход работает без подключения к базе.</p>
+            </div>
+          </div>
+
+          <div className="p-7 sm:p-10">
+            <div className="mb-8">
+              <Link href="/">
+                <span className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--negis-primary)" }}>Medina OS</span>
+              </Link>
+              <h2 className="mt-5 text-2xl font-black text-[#0F172A]">Вход</h2>
+              <p className="mt-2 text-sm leading-6 text-[#64748B]">
+                Логин (например aigul.botanova) или почта — что вам выдали. Забыли пароль: у почты письмо придёт по кнопке ниже, у логина новый задаёт администратор клиники.
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <label className="block">
+                <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Логин или почта</span>
+                {/* type="text", а не "email": браузер отверг бы «aigul» своей
+                    проверкой ещё до отправки, и вся ветка входа по логину была
+                    бы мертва. autoCapitalize и autoCorrect выключены — иначе
+                    iOS превратит «aigul» в «Aigul». */}
+                <input
+                  className="neu-input w-full"
+                  type="text"
+                  autoComplete="username"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="aigul.botanova или employee@clinic.kz"
+                />
+              </label>
+
+              <label className="block">
+                <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Пароль</span>
+                <input
+                  className="neu-input w-full"
+                  type="password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder="Временный пароль"
+                  autoComplete="current-password"
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void submit();
+                  }}
+                />
+              </label>
+
+              <button type="button" className="neu-btn-primary w-full justify-center py-3" onClick={submit} disabled={loading}>
+                <LogIn size={17} />
+                {loading ? "Проверяем..." : "Войти"}
+              </button>
+
+              {resetSent ? (
+                <p className="rounded-2xl bg-[#ECFDF5] p-4 text-sm leading-6 text-emerald-800">
+                  Если у этой почты есть аккаунт — письмо уже в пути. Откройте его и задайте пароль, затем вернитесь и войдите.
+                  Пришли по ссылке-приглашению? После входа откройте её ещё раз.
+                </p>
+              ) : (
+                <button type="button" className="neu-btn w-full justify-center" onClick={() => void sendPasswordReset()} disabled={resetSending}>
+                  <KeyRound size={15} />
+                  {resetSending ? "Отправляем письмо…" : "Забыли пароль?"}
+                </button>
+              )}
+
+              {/* Третья дверь. Клиники в списке не показываются — их называет
+                  код, который сотруднику продиктовали свои же. */}
+              <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/join-request")}>
+                Есть код клиники? Подать заявку
+              </button>
+              <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/operator")}>
+                Кабинет оператора колл-центра
+              </button>
+              <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/contributors")}>
+                Кабинет блогера и партнёра
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  );
+}

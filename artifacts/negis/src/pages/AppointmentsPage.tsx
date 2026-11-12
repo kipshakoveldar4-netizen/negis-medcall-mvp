@@ -1,0 +1,3456 @@
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useLocation } from "wouter";
+import {
+  CalendarCheck,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Clock3,
+  ListChecks,
+  MessageCircle,
+  PhoneCall,
+  Plus,
+  RotateCw,
+  Search,
+  Stethoscope,
+  UserCheck,
+  X,
+} from "lucide-react";
+import { toast } from "sonner";
+import { PageLayout } from "@/components/layout/PageLayout";
+import { MetricCard } from "@/components/ui/metric-card";
+import { apiUrl, crmFetch } from "@/lib/api";
+import { editAppointmentClient, matchesAppointmentClientHistory, selectAppointmentClient } from "@/lib/appointmentClient";
+import { AppointmentAttemptRestoreError, canReleaseAppointmentAttempt, clearPersistedAppointmentCreateAttempt, confirmedAppointmentCreate, isCurrentAppointmentAttempt, mergeCreatedAppointment, newAppointmentCreateAttempt, persistAppointmentCreateAttempt, restoreAppointmentCreateAttempt, sameAppointmentCreateIntent, type AppointmentCreateAttempt } from "@/lib/appointmentCreateAttempt";
+import { isRealWorkspace, readWorkspaceId as readCurrentWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
+import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
+import { clinicToday, dayKeyInZone, isOnClinicDay } from "@/lib/clinicDay";
+import { requireWorkspaceTimeZone, workspaceDateTimeToIso, workspaceLocalDateTime } from "@/lib/clinicDateTime";
+import { useAuth } from "@/contexts/AuthContext";
+import { MasterDayGrid } from "@/components/crm/master-day-grid";
+import { AppointmentExtraServices } from "@/components/crm/appointment-extra-services";
+import { appointmentPriceFromInput, normalizeAppointmentServices, readAppointmentServices, summarizeAppointmentServices, type AppointmentServiceItem } from "../../../../lib/crm/appointment-services";
+import { findAppointmentCapacityConflict } from "../../../../lib/crm/appointment-capacity";
+import { formatArrivalPrice } from "../../../../lib/crm/operator-contracts";
+import { formatSlot, freeSlots, groupSlots, minuteOfClinicDay, occupiedGridSlots, workingIntervals } from "@/lib/dayGrid";
+import { capitalize, termsFor, type Terms } from "../../../../lib/vertical/terms";
+import { leadStageDefinitionFromUnknown } from "@/lib/leadPipeline";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
+
+type AppointmentStatus = "scheduled" | "confirmed" | "arrived" | "no_show" | "cancelled";
+type CalendarView = "grid" | "day" | "week" | "month" | "list";
+
+type Appointment = {
+  id: string;
+  editVersion?: string;
+  /** Ссылка на карточку клиента. Пустая строка — визит без привязки. */
+  clientId: string;
+  client: string;
+  phone: string;
+  whatsapp: string;
+  service: string;
+  /** Ссылка на строку справочника услуг. Пустая — услуга набрана текстом. */
+  serviceId: string;
+  serviceItems: AppointmentServiceItem[];
+  doctor: string;
+  /** Ссылка на строку справочника врачей. Пустая — врач набран текстом. */
+  doctorId: string;
+  startsAt: string;
+  durationMinutes: number;
+  /** Цена записи в тиынах; null — «цена не называлась», не ноль. */
+  priceMinor: number | null;
+  arrivalSaleId?: string;
+  status: AppointmentStatus;
+  notes: string;
+  source: string;
+};
+
+type AppointmentForm = {
+  editVersion: string;
+  clientId: string;
+  client: string;
+  phone: string;
+  whatsapp: string;
+  service: string;
+  serviceId: string;
+  additionalServices: AppointmentServiceItem[];
+  doctor: string;
+  doctorId: string;
+  date: string;
+  time: string;
+  durationMinutes: number;
+  /** Цена в ТЕНГЕ, строкой из поля ввода; пустая — «цена не называлась». */
+  priceTenge: string;
+  status: AppointmentStatus;
+  notes: string;
+  source: string;
+};
+
+type AppointmentMutationScope = {
+  workspaceId: string;
+  actorId: string;
+  role: string | null;
+  epoch: number;
+  active: boolean;
+  deniedIds: Set<string>;
+  deniedCreateKeys: Set<string>;
+};
+
+class AppointmentAccessRefusalError extends Error {
+  constructor() { super("Запись больше недоступна. Обновите список."); }
+}
+
+class AppointmentCreateRecoveryError extends Error {}
+
+type ApiResponse =
+  | { success: true; mode?: string; warning?: string; data?: Record<string, unknown> }
+  | { success: false; error: string; details?: string[]; code?: string };
+
+const APPOINTMENT_PREFILL_KEY = "negis_appointment_prefill";
+const DEAL_PREFILL_KEY = "negis_deal_prefill";
+
+function appointmentAttemptStorage(): Storage | null {
+  if (typeof window === "undefined") return null;
+  try { return window.sessionStorage; }
+  catch { return null; }
+}
+
+/** Строка справочника услуг — ровно те поля, которые нужны форме записи. */
+type CatalogService = {
+  id: string;
+  name: string;
+  /** Пусто у общей услуги салона; иначе это личный прайс мастера. */
+  doctorId: string;
+  durationMinutes: number | null;
+  /** Цена из прайса в тиынах — чтобы список услуг читался как у запись.кз. */
+  basePriceMinor: number | null;
+  sortOrder: number;
+  isActive: boolean;
+};
+
+/** Existing patient shown by the name typeahead in the booking form. */
+type ClientSearchResult = {
+  id: string;
+  name: string;
+  phone: string;
+  whatsapp: string;
+};
+
+/**
+ * Справочник услуг для формы записи.
+ *
+ * doctorId сужает прайс до услуг ЭТОГО мастера плюс общих услуг клиники.
+ * Кто хозяин услуги, знает сервер, поэтому сужает он, а не клиентский фильтр:
+ * иначе экран решал бы за прайс, чего в нём нет.
+ *
+ * Отказ здесь — не ошибка экрана: у роли может не быть права на чтение
+ * каталога, а до применения миграции 032 его вовсе нет. В обоих случаях
+ * правильный ответ один — пустой список, и поле «Услуга» остаётся тем же
+ * текстовым вводом, что и раньше.
+ *
+ * Но наружу уходит ещё и признак «ответ получен»: пустой прайс мастера и
+ * несостоявшийся запрос выглядят одинаково, а значат противоположное. Во
+ * втором случае сужать список нельзя — экран соврал бы, что у мастера нет
+ * услуг, и увёл бы у оператора уже сделанный выбор.
+ */
+async function loadCatalogServices(doctorId = ""): Promise<{ services: CatalogService[]; ok: boolean }> {
+  if (!isRealWorkspace()) return { services: [], ok: false };
+  try {
+    const workspaceId = readCurrentWorkspaceId();
+    const scope = doctorId ? `&doctorId=${encodeURIComponent(doctorId)}` : "";
+    const response = await crmFetch(`/api/crm/clinic-services?workspaceId=${encodeURIComponent(workspaceId)}${scope}`);
+    const text = await response.text();
+    const body = text ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: Record<string, unknown> }) : null;
+    if (!response.ok || body?.success !== true || body.mode !== "supabase") return { services: [], ok: false };
+    const raw = body.data?.services ?? body.data?.items;
+    const list = Array.isArray(raw) ? raw : [];
+    const services = list
+      .map((item) => {
+        const record = asRecord(item);
+        const duration = record.durationMinutes ?? record.duration_minutes;
+        const price = record.basePriceMinor ?? record.base_price_minor;
+        return {
+          id: readString(record.id),
+          name: readString(record.name),
+          doctorId: readString(record.doctorId) || readString(record.doctor_id),
+          durationMinutes: duration === null || duration === undefined || duration === "" ? null : readNumber(duration, 0) || null,
+          // 0 — осознанное «бесплатно» из прайса, его нельзя ронять в null.
+          basePriceMinor: price === null || price === undefined || price === "" ? null : readNumber(price, 0),
+          sortOrder: readNumber(record.sortOrder ?? record.sort_order, 0),
+          isActive:
+            record.isActive === undefined && record.is_active === undefined
+              ? true
+              : Boolean(record.isActive ?? record.is_active),
+        };
+      })
+      .filter((service) => service.id && service.name);
+    return { services, ok: true };
+  } catch {
+    return { services: [], ok: false };
+  }
+}
+
+/** Значение поля «Услуга», когда в каталоге нужной строки нет. */
+const OTHER_SERVICE_OPTION = "__other__";
+
+/** Строка справочника врачей — то, что нужно форме записи. */
+type DirectoryDoctor = { id: string; fullName: string; specialty: string; capacity: number; sortOrder: number; isActive: boolean };
+
+/** Строка графика врача. Минуты — от полуночи по времени клиники. */
+type DoctorShift = {
+  doctorId: string;
+  weekday: number | null;
+  onDate: string;
+  onDateEnd: string;
+  isWorking: boolean;
+  startMinute: number | null;
+  endMinute: number | null;
+};
+
+/**
+ * Справочник врачей и график для формы записи.
+ *
+ * Флаг «включено» здесь сохраняется, в отличие от загрузчика услуг: форма по
+ * нему выбирает между списком и текстовым полем, и «справочник выключен» не
+ * имеет права выглядеть как «врачей нет».
+ */
+async function loadDirectory<T>(path: string, listKey: string, availableKey: string, map: (record: Record<string, unknown>) => T): Promise<{ items: T[]; available: boolean; timeZone: string; resolved: boolean }> {
+  if (!isRealWorkspace()) return { items: [], available: false, timeZone: "", resolved: true };
+  try {
+    const workspaceId = readCurrentWorkspaceId();
+    const response = await crmFetch(`${path}?workspaceId=${encodeURIComponent(workspaceId)}`);
+    const text = await response.text();
+    const body = text ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: Record<string, unknown> }) : null;
+    if (!response.ok || body?.success !== true || body.mode !== "supabase") return { items: [], available: false, timeZone: "", resolved: false };
+    if (path === "/api/crm/doctor-schedule" && typeof body.data?.timeZone !== "string") {
+      throw new Error("Schedule response has no confirmed time zone");
+    }
+    const raw = body.data?.[listKey] ?? body.data?.items;
+    const list = Array.isArray(raw) ? raw : [];
+    const timeZone = readString(body.data?.timeZone);
+    if (timeZone) requireWorkspaceTimeZone(timeZone);
+    return {
+      items: list.map((item) => map(asRecord(item))),
+      available: body.data?.[availableKey] !== false,
+      timeZone,
+      resolved: true,
+    };
+  } catch {
+    return { items: [], available: false, timeZone: "", resolved: false };
+  }
+}
+
+function directoryDoctorFromApi(record: Record<string, unknown>): DirectoryDoctor {
+  return {
+    id: readString(record.id),
+    fullName: readString(record.fullName) || readString(record.full_name),
+    specialty: readString(record.specialty),
+    capacity: readNumber(record.capacity, 1),
+    sortOrder: readNumber(record.sortOrder ?? record.sort_order, 0),
+    isActive:
+      record.isActive === undefined && record.is_active === undefined
+        ? true
+        : Boolean(record.isActive ?? record.is_active),
+  };
+}
+
+function doctorShiftFromApi(record: Record<string, unknown>): DoctorShift {
+  const minute = (value: unknown) =>
+    value === null || value === undefined || value === "" ? null : readNumber(value, 0);
+  return {
+    doctorId: readString(record.doctorId) || readString(record.doctor_id),
+    weekday: minute(record.weekday),
+    onDate: readString(record.onDate) || readString(record.on_date),
+    onDateEnd: readString(record.onDateEnd) || readString(record.on_date_end),
+    isWorking:
+      record.isWorking === undefined && record.is_working === undefined
+        ? true
+        : Boolean(record.isWorking ?? record.is_working),
+    startMinute: minute(record.startMinute ?? record.start_minute),
+    endMinute: minute(record.endMinute ?? record.end_minute),
+  };
+}
+
+/** Пояс ноутбука оператора. Ровно для того, чтобы сказать о расхождении. */
+function readDeviceTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    return "";
+  }
+}
+
+const WEEKDAY_SHORT = ["", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+
+function formatShiftMinute(minute: number): string {
+  const normalized = ((minute % 1440) + 1440) % 1440;
+  return `${String(Math.floor(normalized / 60)).padStart(2, "0")}:${String(normalized % 60).padStart(2, "0")}`;
+}
+
+/**
+ * Что сказать оператору про график выбранного врача на выбранный день.
+ *
+ * Третья строка обязательна: это единственное место, где продукт признаёт,
+ * что для этого врача правило не работает вовсе.
+ */
+function shiftsForDate(shifts: DoctorShift[], dateKey: string, isoWeekday: number): DoctorShift[] {
+  const covering = shifts.filter(
+    (shift) => shift.onDate && shift.onDate <= dateKey && dateKey <= (shift.onDateEnd || shift.onDate),
+  );
+  // Исключение на дату замещает недельный образец целиком — как на сервере.
+  return covering.length > 0 ? covering : shifts.filter((shift) => shift.weekday === isoWeekday);
+}
+
+function previousDateKey(dateKey: string): string {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const previous = new Date(Date.UTC(year, month - 1, day - 1));
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${previous.getUTCFullYear()}-${pad(previous.getUTCMonth() + 1)}-${pad(previous.getUTCDate())}`;
+}
+
+/**
+ * Что сказать оператору про график выбранного врача на выбранный день.
+ *
+ * Повторяет решение сервера, включая ночной хвост предыдущего дня: подсказка,
+ * расходящаяся с правилом, хуже отсутствующей — она обещает отказ там, где его
+ * не будет, и наоборот.
+ *
+ * Строка «График не задан» обязательна: это единственное место, где продукт
+ * признаёт, что для этого врача правило не работает вовсе.
+ */
+function describeDoctorDay(shifts: DoctorShift[], doctorId: string, dateKey: string, terms: Terms): string {
+  if (!doctorId || !dateKey) return "";
+  const [year, month, day] = dateKey.split("-").map(Number);
+  if (!year || !month || !day) return "";
+  const isoWeekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay() || 7;
+  const mine = shifts.filter((shift) => shift.doctorId === doctorId);
+  if (mine.length === 0) return "График не задан — запись не ограничивается.";
+
+  const today = shiftsForDate(mine, dateKey, isoWeekday);
+  const yesterdayWeekday = isoWeekday === 1 ? 7 : isoWeekday - 1;
+  const yesterday = shiftsForDate(mine, previousDateKey(dateKey), yesterdayWeekday);
+
+  const toInterval = (shift: DoctorShift) =>
+    `${formatShiftMinute(shift.startMinute as number)}–${formatShiftMinute(shift.endMinute as number)}`;
+  const working = (rows: DoctorShift[]) =>
+    rows.filter((shift) => shift.isWorking && shift.startMinute !== null && shift.endMinute !== null);
+
+  const intervals = working(today).map(toInterval);
+  // Смена, начавшаяся вчера вечером, доживает до утра — правило её учитывает,
+  // и подсказка обязана тоже.
+  const overnight = working(yesterday)
+    .filter((shift) => (shift.endMinute as number) > 1440)
+    .map((shift) => `с вечера до ${formatShiftMinute(shift.endMinute as number)}`);
+
+  const parts = [...intervals, ...overnight];
+  if (parts.length === 0) return `${WEEKDAY_SHORT[isoWeekday]}: выходной (время ${terms.orgGenitive})`;
+  return `${WEEKDAY_SHORT[isoWeekday]}: ${parts.join(", ")} (время ${terms.orgGenitive})`;
+}
+const activeStatuses: AppointmentStatus[] = ["scheduled", "confirmed", "arrived"];
+const statusOptions: AppointmentStatus[] = ["scheduled", "confirmed", "arrived", "no_show", "cancelled"];
+const viewLabels: Record<CalendarView, string> = {
+  day: "День",
+  grid: "Календарь",
+  week: "Неделя",
+  month: "Месяц",
+  list: "Список",
+};
+
+const statusButtonLabels: Array<{ status: AppointmentStatus; label: string }> = [
+  { status: "confirmed", label: "Подтвердить" },
+  { status: "arrived", label: "Пришёл" },
+  { status: "no_show", label: "Не пришёл" },
+  { status: "cancelled", label: "Отменить" },
+];
+
+/**
+ * Какие переходы осмысленны из каждого статуса.
+ *
+ * Прежде каждая карточка носила все четыре кнопки: день с восемью записями —
+ * сорок восемь кнопок, и «Подтвердить» на уже пришедшем визите. «Не пришёл»
+ * остаётся обратимым в «Пришёл» — клиент, опоздавший на полчаса, случается.
+ */
+const allowedStatusMoves: Record<AppointmentStatus, AppointmentStatus[]> = {
+  scheduled: ["confirmed", "arrived", "no_show", "cancelled"],
+  confirmed: ["arrived", "no_show", "cancelled"],
+  arrived: [],
+  no_show: ["arrived"],
+  cancelled: [],
+};
+
+const todayKeyAtLoad = toDateKey(new Date());
+
+const appointmentsSeed: Appointment[] = [
+  makeSeedAppointment("apt-1", todayKeyAtLoad, "10:00", "Айнур Садыкова", "+7 701 245 18 44", "Ботокс", "д-р Сауле", "confirmed", "Просит напомнить за час", "Instagram"),
+  makeSeedAppointment("apt-2", todayKeyAtLoad, "11:30", "Мадина Ержан", "+7 777 311 09 18", "Консультация", "д-р Айжан", "scheduled", "Первичный визит", "ИИ таргетолог"),
+  makeSeedAppointment("apt-3", todayKeyAtLoad, "14:00", "Ольга Петрова", "+7 705 812 44 02", "Чистка лица", "д-р Сауле", "arrived", "Повторная процедура", "WhatsApp"),
+  makeSeedAppointment("apt-4", addDaysKey(todayKeyAtLoad, 1), "16:30", "Дана Мухамед", "+7 707 901 33 70", "Лазерная процедура", "д-р Наргиз", "scheduled", "Уточнить противопоказания", "Рекомендация"),
+];
+
+export function getAppointmentStatusLabel(status: string): string {
+  const labels: Record<AppointmentStatus, string> = {
+    scheduled: "Запланировано",
+    confirmed: "Подтверждено",
+    arrived: "Пришёл",
+    no_show: "Не пришёл",
+    cancelled: "Отменено",
+  };
+  return labels[normalizeStatus(status)] ?? "Запланировано";
+}
+
+export function getAppointmentStatusClass(status: string): string {
+  const classes: Record<AppointmentStatus, string> = {
+    scheduled: "bg-blue-50 text-blue-700",
+    confirmed: "bg-emerald-50 text-emerald-700",
+    arrived: "bg-teal-50 text-teal-700",
+    no_show: "bg-amber-50 text-amber-700",
+    cancelled: "bg-rose-50 text-rose-700",
+  };
+  return classes[normalizeStatus(status)] ?? classes.scheduled;
+}
+
+function makeSeedAppointment(
+  id: string,
+  date: string,
+  time: string,
+  client: string,
+  phone: string,
+  service: string,
+  doctor: string,
+  status: AppointmentStatus,
+  notes: string,
+  source: string,
+): Appointment {
+  return {
+    id,
+    clientId: "",
+    client,
+    phone,
+    whatsapp: phone,
+    service,
+    // Демо-записи не ссылаются ни на каталог, ни на справочник врачей.
+    serviceId: "",
+    serviceItems: [],
+    doctor,
+    doctorId: "",
+    startsAt: toStartsAt(date, time),
+    durationMinutes: 60,
+    priceMinor: null,
+    status,
+    notes,
+    source,
+  };
+}
+
+function normalizeStatus(status: string | undefined): AppointmentStatus {
+  if (status === "confirmed" || status === "arrived" || status === "no_show" || status === "cancelled") return status;
+  return "scheduled";
+}
+
+function pad(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+function toDateKey(date: Date): string {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function toTimeKey(date: Date): string {
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function toLocalDate(dateKey: string, timeKey = "09:00"): Date {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const [hour, minute] = timeKey.split(":").map(Number);
+  return new Date(year, month - 1, day, hour, minute, 0, 0);
+}
+
+function toStartsAt(dateKey: string, timeKey: string, timeZone = "", unchangedIso?: string): string {
+  if (timeZone) return workspaceDateTimeToIso(`${dateKey}T${timeKey}`, timeZone, unchangedIso);
+  return toLocalDate(dateKey, timeKey).toISOString();
+}
+
+function dateKeyFromStartsAt(startsAt: string, timeZone = ""): string {
+  const date = new Date(startsAt);
+  if (Number.isNaN(date.getTime())) return todayKeyAtLoad;
+  if (timeZone) return workspaceLocalDateTime(startsAt, timeZone).slice(0, 10);
+  return toDateKey(date);
+}
+
+/**
+ * Номер дня недели по ISO: 1 — понедельник, 7 — воскресенье.
+ *
+ * Дата берётся как календарный день, а не как мгновение: «2026-08-20» —
+ * это день, и переводить его между поясами нельзя, иначе колонка графика
+ * съедет на соседние сутки у оператора в другом поясе.
+ */
+function isoWeekdayOf(dateKey: string): number {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  if (!year || !month || !day) return 1;
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  return weekday === 0 ? 7 : weekday;
+}
+
+function timeKeyFromStartsAt(startsAt: string, timeZone = ""): string {
+  const date = new Date(startsAt);
+  if (Number.isNaN(date.getTime())) return "09:00";
+  if (timeZone) return workspaceLocalDateTime(startsAt, timeZone).slice(11, 16);
+  return toTimeKey(date);
+}
+
+function addDaysKey(dateKey: string, days: number): string {
+  const date = toLocalDate(dateKey);
+  date.setDate(date.getDate() + days);
+  return toDateKey(date);
+}
+
+function startOfWeekKey(dateKey: string): string {
+  const date = toLocalDate(dateKey);
+  const day = date.getDay() || 7;
+  date.setDate(date.getDate() - day + 1);
+  return toDateKey(date);
+}
+
+function formatDateLabel(dateKey: string): string {
+  return new Intl.DateTimeFormat("ru-RU", { weekday: "long", day: "numeric", month: "long" }).format(toLocalDate(dateKey));
+}
+
+function formatShortDate(dateKey: string): string {
+  return new Intl.DateTimeFormat("ru-RU", { weekday: "short", day: "numeric", month: "short" }).format(toLocalDate(dateKey));
+}
+
+function generateSlots(): string[] {
+  const slots: string[] = [];
+  for (let minutes = 9 * 60; minutes <= 21 * 60; minutes += 30) {
+    slots.push(`${pad(Math.floor(minutes / 60))}:${pad(minutes % 60)}`);
+  }
+  return slots;
+}
+
+
+function readString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function readNumber(value: unknown, fallback: number): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function appointmentFromApi(value: unknown): Appointment {
+  const record = asRecord(value);
+  const startsAt = readString(record.startsAt) || readString(record.starts_at) || readString(record.time) || new Date().toISOString();
+  const phone = readString(record.phone) || readString(record.client_phone) || readString(record.clientPhone);
+
+  return {
+    id: readString(record.id) || `appointment-${Date.now()}`,
+    ...(readString(record.editVersion ?? record.edit_version) ? { editVersion: readString(record.editVersion ?? record.edit_version) } : {}),
+    clientId: readString(record.clientId) || readString(record.client_id),
+    client: readString(record.client) || readString(record.client_name) || readString(record.clientName) || "Клиент",
+    phone,
+    whatsapp: readString(record.whatsapp) || phone,
+    service: readString(record.service) || "Консультация",
+    serviceId: readString(record.serviceId) || readString(record.service_id),
+    serviceItems: readAppointmentServices(record.serviceItems ?? record.service_items),
+    // Никакого имени по умолчанию. Запись без врача рисовалась как «д-р Сауле» —
+    // именем, которого в базе нет, и оператор не мог отличить её от настоящей.
+    doctor: readString(record.doctor) || readString(record.doctor_name) || readString(record.doctorName),
+    doctorId: readString(record.doctorId) || readString(record.doctor_id),
+    startsAt,
+    durationMinutes: readNumber(record.durationMinutes ?? record.duration_minutes, 60),
+    priceMinor: (() => { const raw = record.priceMinor ?? record.price_minor; return raw === null || raw === undefined || raw === "" ? null : readNumber(raw, 0); })(),
+    status: normalizeStatus(readString(record.status)),
+    arrivalSaleId: readString(record.arrivalSaleId) || readString(record.arrival_sale_id),
+    notes: readString(record.notes),
+    source: readString(record.source),
+  };
+}
+
+function clientSearchResultFromApi(value: unknown): ClientSearchResult | null {
+  const record = asRecord(value);
+  const id = readString(record.id);
+  const name = readString(record.name) || readString(record.full_name) || readString(record.fullName);
+  if (!id || !name) return null;
+  return {
+    id,
+    name,
+    phone: readString(record.phone),
+    whatsapp: readString(record.whatsapp),
+  };
+}
+
+function isUuidText(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function appointmentToApi(appointment: Appointment): Record<string, unknown> {
+  return {
+    id: appointment.id,
+    clientId: appointment.clientId ?? "",
+    client: appointment.client,
+    clientName: appointment.client,
+    phone: appointment.phone,
+    clientPhone: appointment.phone,
+    whatsapp: appointment.whatsapp,
+    service: appointment.service,
+    // Всегда, а не по условию: пустая строка — это осознанная отвязка, и
+    // старая запись, которая её пришлёт, запишет null поверх null.
+    serviceId: appointment.serviceId || "",
+    ...(appointment.serviceItems?.length ? { serviceItems: appointment.serviceItems } : {}),
+    doctor: appointment.doctor,
+    doctorName: appointment.doctor,
+    // Всегда, как и serviceId: пустая строка — осознанная отвязка.
+    doctorId: appointment.doctorId || "",
+    starts_at: appointment.startsAt,
+    startsAt: appointment.startsAt,
+    duration_minutes: appointment.durationMinutes,
+    priceMinor: appointment.priceMinor,
+    price_minor: appointment.priceMinor,
+    durationMinutes: appointment.durationMinutes,
+    status: appointment.status,
+    notes: appointment.notes,
+    source: appointment.source,
+  };
+}
+
+async function safeJson(response: globalThis.Response): Promise<ApiResponse | null> {
+  const text = await response.text();
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text) as ApiResponse;
+  } catch {
+    return null;
+  }
+}
+
+/** «24.08» — коротко: год в архиве почти всегда текущий, а место в строке дорого. */
+function formatVisitDay(startsAt: string, timeZone = ""): string {
+  const parsed = new Date(startsAt);
+  if (Number.isNaN(parsed.getTime())) return "—";
+  return parsed.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", ...(timeZone ? { timeZone } : {}) });
+}
+
+function defaultForm(date: string, time = "09:00"): AppointmentForm {
+  return {
+    editVersion: "",
+    clientId: "",
+    client: "",
+    phone: "",
+    whatsapp: "",
+    service: "Консультация",
+    serviceId: "",
+    additionalServices: [],
+    // Пусто, а не первый из выдуманных: регистратор, не тронувший поле,
+    // заводил настоящий визит на несуществующего врача.
+    doctor: "",
+    doctorId: "",
+    date,
+    time,
+    durationMinutes: 60,
+    priceTenge: "",
+    status: "scheduled",
+    notes: "",
+    source: "Ресепшн",
+  };
+}
+
+function formFromAppointment(appointment: Appointment, timeZone = ""): AppointmentForm {
+  const first = appointment.serviceItems?.[0];
+  return {
+    editVersion: appointment.editVersion || "",
+    clientId: appointment.clientId || "",
+    client: appointment.client,
+    phone: appointment.phone,
+    whatsapp: appointment.whatsapp || appointment.phone,
+    service: first?.name ?? appointment.service,
+    serviceId: first?.serviceId ?? appointment.serviceId ?? "",
+    additionalServices: appointment.serviceItems?.slice(1) ?? [],
+    doctor: appointment.doctor,
+    doctorId: appointment.doctorId || "",
+    date: dateKeyFromStartsAt(appointment.startsAt, timeZone),
+    time: timeKeyFromStartsAt(appointment.startsAt, timeZone),
+    durationMinutes: first?.durationMinutes ?? appointment.durationMinutes,
+    priceTenge: (first ? first.priceMinor : appointment.priceMinor) == null ? "" : String((first ? first.priceMinor! : appointment.priceMinor!) / 100),
+    status: appointment.status,
+    notes: appointment.notes,
+    source: appointment.source || "Ресепшн",
+  };
+}
+
+function formServiceItems(form: AppointmentForm): AppointmentServiceItem[] {
+  return [{ serviceId: form.serviceId, name: form.service.trim(), priceMinor: appointmentPriceFromInput(form.priceTenge), durationMinutes: form.durationMinutes }, ...form.additionalServices];
+}
+
+function appointmentFromForm(form: AppointmentForm, existingId?: string, timeZone = "", unchangedIso?: string): Appointment {
+  const serviceItems = normalizeAppointmentServices(formServiceItems(form));
+  const total = summarizeAppointmentServices(serviceItems);
+  return {
+    id: existingId || `appointment-${Date.now()}`,
+    ...(existingId && form.editVersion ? { editVersion: form.editVersion } : {}),
+    clientId: form.clientId || "",
+    client: form.client.trim(),
+    phone: form.phone.trim(),
+    whatsapp: (form.whatsapp || form.phone).trim(),
+    service: total.service,
+    serviceId: total.serviceId,
+    serviceItems,
+    doctor: form.doctor.trim(),
+    doctorId: form.doctorId || "",
+    startsAt: toStartsAt(form.date, form.time, timeZone, unchangedIso),
+    // Неизвестная цена хотя бы одной услуги оставляет итог неизвестным.
+    priceMinor: total.priceMinor,
+    durationMinutes: total.durationMinutes,
+    status: form.status,
+    notes: form.notes.trim(),
+    source: form.source.trim(),
+  };
+}
+
+/**
+ * Отказ «слот занят» — не то же, что отказ базы: его показывают в модалке
+ * рядом с кнопкой «Сохранить всё равно», а не тостом поверх закрытой формы.
+ */
+class SlotTakenError extends Error {
+  readonly conflict: { startsAt: string; clientName: string; doctorName: string };
+
+  constructor(conflict: { startsAt: string; clientName: string; doctorName: string }) {
+    super("appointment_conflict");
+    this.name = "SlotTakenError";
+    this.conflict = conflict;
+  }
+}
+
+/**
+ * Отказ сервера с ПРИЧИНОЙ.
+ *
+ * Мастер салона прислал скриншот: «Не удалось создать запись. Проверьте
+ * расписание перед повтором» — наш общий текст на любой отказ, кроме занятого
+ * слота и нерабочего времени. Настоящая причина при этом приходила в ответе, а
+ * экран выбрасывал её в console.warn, которого на телефоне не видно. Человек
+ * оставался с советом, не имеющим отношения к делу.
+ */
+class ServerRefusalError extends Error {
+  readonly code: string;
+  readonly details: string[];
+
+  constructor(code: string, message: string, details: string[]) {
+    super(message);
+    this.name = "ServerRefusalError";
+    this.code = code;
+    this.details = details;
+  }
+}
+
+/** Коды сервера, у которых есть человеческий русский текст. */
+const APPOINTMENT_ERROR_TEXTS: Record<string, string> = {
+  workspace_access_denied: "Нет доступа к этой клинике. Выйдите и войдите заново.",
+  authentication_required: "Сессия истекла — войдите заново.",
+  storage_not_configured: "Сервис временно недоступен. Попробуйте через минуту.",
+  unavailable: "База не ответила. Попробуйте ещё раз через минуту.",
+  validation_error: "Проверьте поля формы: что-то заполнено не так.",
+  permission_denied: "Вашей роли это действие недоступно.",
+  appointment_edit_conflict: "Запись уже изменилась. Обновите список и заново откройте запись перед повтором.",
+  appointment_edit_version_required: "Обновите список и заново откройте запись перед сохранением.",
+  appointment_edit_version_unavailable: "Не удалось подтвердить версию записи. Сохранение временно недоступно.",
+  appointment_patch_conflict: "Запись уже изменилась. Обновите список и заново откройте запись перед повтором.",
+};
+
+function refusalText(error: unknown): string {
+  if (error instanceof ServerRefusalError) {
+    const known = APPOINTMENT_ERROR_TEXTS[error.code];
+    if (known) return known;
+    // Детали сервера бывают техническими, но они КОНКРЕТНЫ — лучше показать их,
+    // чем совет невпопад.
+    const detail = error.details.filter(Boolean).join(", ") || error.message;
+    return detail ? `Не удалось создать запись: ${detail}` : "Не удалось создать запись.";
+  }
+  // Сюда попадает и обрыв связи, брошенный до ответа, когда вставка уже могла
+  // пройти, — поэтому не утверждаем, что на сервере ничего не осталось.
+  return "Не удалось создать запись — связь оборвалась. Обновите список перед повтором: запись могла сохраниться.";
+}
+
+function conflictFromBody(body: unknown): SlotTakenError | null {
+  const record = asRecord(body);
+  if (readString(record.code) !== "appointment_conflict") return null;
+  const conflict = asRecord(record.conflict);
+  return new SlotTakenError({
+    startsAt: readString(conflict.startsAt),
+    clientName: readString(conflict.clientName),
+    doctorName: readString(conflict.doctorName),
+  });
+}
+
+/**
+ * Отказ «врач не работает в это время» — свой класс, свой разбор и свой текст.
+ *
+ * Интервалы печатаются РОВНО так, как их прислал сервер: он уже перевёл их во
+ * время клиники. Пересчитать их здесь значило бы показать время в поясе
+ * ноутбука оператора — и два регистратора прочитали бы разное время в одном
+ * и том же отказе про одну и ту же запись.
+ */
+class OutsideScheduleError extends Error {
+  readonly schedule: { doctorName: string; localTime: string; weekdayLabel: string; intervals: string[] };
+
+  constructor(schedule: OutsideScheduleError["schedule"]) {
+    super("outside_doctor_schedule");
+    this.name = "OutsideScheduleError";
+    this.schedule = schedule;
+  }
+}
+
+function scheduleRefusalFromBody(body: unknown): OutsideScheduleError | null {
+  const record = asRecord(body);
+  if (readString(record.code) !== "outside_doctor_schedule") return null;
+  const schedule = asRecord(record.schedule);
+  const intervals = Array.isArray(schedule.intervals) ? schedule.intervals.map((item) => readString(item)) : [];
+  return new OutsideScheduleError({
+    doctorName: readString(schedule.doctorName),
+    localTime: readString(schedule.localTime),
+    weekdayLabel: readString(schedule.weekdayLabel),
+    intervals: intervals.filter(Boolean),
+  });
+}
+
+function describeSchedule(error: OutsideScheduleError, terms: Terms): string {
+  const who = error.schedule.doctorName || capitalize(terms.specialist);
+  const when = [error.schedule.weekdayLabel, error.schedule.localTime].filter(Boolean).join(", ");
+  const hours = error.schedule.intervals.length > 0
+    ? `Часы ${terms.dutyGenitive}: ${error.schedule.intervals.join(", ")}.`
+    : `В этот день ${terms.dutyGenitive} нет.`;
+  return `${who} не работает в это время${when ? ` (${when}, время ${terms.orgGenitive})` : ""}. ${hours} Записать всё равно?`;
+}
+
+function describeConflict(error: SlotTakenError, terms: Terms, timeZone = ""): string {
+  const at = error.conflict.startsAt ? timeKeyFromStartsAt(error.conflict.startsAt, timeZone) : "";
+  const who = error.conflict.clientName || `другой ${terms.customer}`;
+  return `У ${terms.specialistGenitive} уже есть запись на это время: ${who}${at ? `, ${at}` : ""}. Выберите другое время или другого ${terms.specialistGenitive}.`;
+}
+
+function appointmentInterval(appointment: Appointment) {
+  const start = new Date(appointment.startsAt).getTime();
+  const minutes = Number.isFinite(appointment.durationMinutes) && appointment.durationMinutes > 0 ? appointment.durationMinutes : 60;
+  return {
+    start,
+    end: start + minutes * 60_000,
+  };
+}
+
+/**
+ * Попадает ли запись в календарный день клиники.
+ *
+ * Форма, карточки и фильтры используют один пояс. Голая дата уже обозначает
+ * календарный день и не должна смещаться вместе с часовым поясом устройства.
+ */
+function isOnDay(appointment: Appointment, dateKey: string, timeZone: string): boolean {
+  return isOnClinicDay(appointment.startsAt, dateKey, timeZone);
+}
+
+function isWithinWeek(appointment: Appointment, weekStart: string, timeZone: string): boolean {
+  const instant = Date.parse(appointment.startsAt);
+  // Прежняя версия на нечитаемой дате подставляла todayKeyAtLoad и молча
+  // относила такую запись к сегодняшней неделе. Нечитаемая дата — это «не
+  // знаю», а не «сегодня».
+  if (!Number.isFinite(instant)) return false;
+
+  const appointmentDate = dayKeyInZone(instant, timeZone);
+  const start = toLocalDate(weekStart).getTime();
+  const end = toLocalDate(addDaysKey(weekStart, 7)).getTime();
+  const current = toLocalDate(appointmentDate).getTime();
+  return current >= start && current < end;
+}
+
+function statusBadge(status: AppointmentStatus) {
+  return <span className={`rounded-full px-3 py-1 text-xs font-bold ${getAppointmentStatusClass(status)}`}>{getAppointmentStatusLabel(status)}</span>;
+}
+
+function Detail({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-[11px] font-bold uppercase tracking-[0.10em] text-[#94A3B8]">{label}</p>
+      <div className="mt-1 break-words text-sm font-semibold text-[#334155]">{children}</div>
+    </div>
+  );
+}
+
+function SelectField({
+  label,
+  value,
+  onChange,
+  children,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  children: ReactNode;
+}) {
+  return (
+    <label className="block min-w-0">
+      <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">{label}</span>
+      <select className="neu-input w-full" value={value} onChange={(event) => onChange(event.target.value)}>
+        {children}
+      </select>
+    </label>
+  );
+}
+
+function TextField({
+  label,
+  value,
+  onChange,
+  type = "text",
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  type?: string;
+  placeholder?: string;
+}) {
+  return (
+    <label className="block min-w-0">
+      <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">{label}</span>
+      <input className="neu-input w-full" type={type} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
+    </label>
+  );
+}
+
+function AppointmentCard({
+  appointment,
+  timeZone,
+  onEdit,
+  onStatus,
+  onSale,
+}: {
+  appointment: Appointment;
+  timeZone: string;
+  onEdit: (appointment: Appointment) => void;
+  onStatus: (appointment: Appointment, status: AppointmentStatus) => void;
+  onSale: (appointment: Appointment) => void;
+}) {
+  const { vertical } = useAuth();
+  const terms = termsFor(vertical);
+  const startTime = timeKeyFromStartsAt(appointment.startsAt, timeZone);
+  const whatsapp = appointment.whatsapp || appointment.phone;
+  const moves = allowedStatusMoves[appointment.status] || [];
+
+  return (
+    <article
+      className="neu-sm cursor-pointer p-4"
+      role="button"
+      tabIndex={0}
+      onClick={() => onEdit(appointment)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") onEdit(appointment);
+      }}
+    >
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <p className="text-lg font-black text-[#1A56DB]">{startTime}</p>
+          <h3 className="mt-1 break-words text-base font-black text-[#0F172A]">{appointment.client}</h3>
+          <p className="mt-1 text-sm text-[#64748B]">{formatPhone(appointment.phone)}</p>
+        </div>
+        {statusBadge(appointment.status)}
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        <Detail label="Услуги">{appointment.service}</Detail>
+        <Detail label={capitalize(terms.specialist)}>{appointment.doctor}</Detail>
+        <Detail label="Длительность">{appointment.durationMinutes} мин</Detail>
+        {appointment.priceMinor !== null ? (
+          <Detail label="Цена"><span className="tabular-nums">{formatArrivalPrice(String(appointment.priceMinor), "KZT")}</span></Detail>
+        ) : null}
+        <Detail label="Источник">{appointment.source || "Ресепшн"}</Detail>
+      </div>
+
+      {appointment.notes ? <p className="mt-3 rounded-xl bg-[#F8FAFC] px-3 py-2 text-sm text-[#64748B]">{appointment.notes}</p> : null}
+
+      <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3" onClick={(event) => event.stopPropagation()}>
+        {statusButtonLabels
+          .filter(({ status }) => moves.includes(status))
+          .map(({ status, label }) => (
+            <button key={status} type="button" className="neu-btn px-3 py-2 text-xs" onClick={() => onStatus(appointment, status)}>
+              {label}
+            </button>
+          ))}
+        {appointment.arrivalSaleId ? (
+          <span className="px-3 py-2 text-xs">Продажа оформлена</span>
+        ) : appointment.status === "arrived" ? (
+          <button type="button" className="neu-btn-primary px-3 py-2 text-xs" onClick={() => onSale(appointment)}>
+            Оформить продажу
+          </button>
+        ) : null}
+        <a className="neu-btn px-3 py-2 text-xs" href={toWhatsappHref(whatsapp, `Здравствуйте, ${appointment.client}! Напоминаем о записи ${startTime}.`)} target="_blank" rel="noreferrer">
+          <MessageCircle size={14} />
+          WhatsApp
+        </a>
+        <a className="neu-btn px-3 py-2 text-xs" href={toTelHref(appointment.phone)}>
+          <PhoneCall size={14} />
+          Позвонить
+        </a>
+      </div>
+    </article>
+  );
+}
+
+export function AppointmentsPage() {
+  const { vertical, userRole, user, clinicId, isLoading, isSigningOut, isDemoMode, isImpersonation } = useAuth();
+  const terms = termsFor(vertical);
+  const [, setLocation] = useLocation();
+  // Заявка, из которой пришла эта запись: после успешного создания она сама
+  // переводится в «Записана», и регистратор не ищет её руками.
+  const prefillLeadRef = useRef("");
+  const [selectedDate, setSelectedDate] = useState(todayKeyAtLoad);
+  // Общая картина дня — владельцу и администратору. Ресепшн работает в
+  // прежних видах: ему ничего не отнимаем, но и новый экран не навязываем.
+  // Ресепшн и управляющий читают все записи клиники тем же правом, что и
+  // владелец, — сервер не сужает их до «своих». Закрывать им сетку значило
+  // бы прятать то, что список и так показывает, только в неудобном виде.
+  const seesWholeClinic =
+    userRole === "owner" || userRole === "admin" || userRole === "manager" || userRole === "receptionist";
+  // Роли с полным чтением клиники попадают сразу в сетку по мастерам:
+  // «нажал кнопку — и в календаре». Мастеру сетка недоступна, ему день.
+  const [view, setView] = useState<CalendarView>(() =>
+    userRole === "owner" || userRole === "admin" || userRole === "manager" || userRole === "receptionist"
+      ? "grid"
+      : "day",
+  );
+  const [doctorFilter, setDoctorFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [serviceFilter, setServiceFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState<AppointmentForm>(() => defaultForm(todayKeyAtLoad));
+  const [clinicTimeZone, setClinicTimeZone] = useState("");
+  const [clinicTimeZoneReady, setClinicTimeZoneReady] = useState(() => !isRealWorkspace());
+  const totalDurationMinutes = form.durationMinutes + form.additionalServices.reduce((sum, item) => sum + item.durationMinutes, 0);
+  const totalPriceMinor = useMemo(() => {
+    try { return summarizeAppointmentServices(formServiceItems(form)).priceMinor; }
+    catch { return null; }
+  }, [form]);
+  const [clientMatches, setClientMatches] = useState<ClientSearchResult[]>([]);
+  const [clientSearchLoading, setClientSearchLoading] = useState(false);
+  const [clientSearchAttempted, setClientSearchAttempted] = useState(false);
+  const [clientSearchFailed, setClientSearchFailed] = useState(false);
+  const [remoteVisitHistory, setRemoteVisitHistory] = useState<Appointment[]>([]);
+  const [visitHistoryLoading, setVisitHistoryLoading] = useState(false);
+  const [visitHistoryFailed, setVisitHistoryFailed] = useState(false);
+
+
+  // Ref заявки живёт только в той сессии модалки, которую открыл префилл:
+  // модалка, закрытая без сохранения, обязана разрядить его — иначе следующая
+  // созданная запись, про совсем другого клиента, перевела бы ЧУЖУЮ заявку в
+  // «Записана». На монтировании модалка закрыта и ref пуст — стирать нечего;
+  // префилл заряжает ref и открывает модалку строго после этого эффекта.
+  useEffect(() => {
+    if (!modalOpen && !createAttempt.current?.uncertain) prefillLeadRef.current = "";
+  }, [modalOpen]);
+  const [conflictMessage, setConflictMessage] = useState("");
+  // Создание теперь ждёт сервер, а модалка остаётся открытой всё это время.
+  // Без этого второй клик по «Создать запись» или «Сохранить всё равно»
+  // отправлял второй POST: при allowConflict сервер не проверяет ничего, а
+  // toRow не переносит клиентский id — получались две одинаковые записи.
+  const [saving, setSaving] = useState(false);
+  const submitLock = useRef(false);
+  const createAttempt = useRef<AppointmentCreateAttempt | null>(null);
+  const restoredCreateScope = useRef("");
+  const [unconfirmedCreate, setUnconfirmedCreate] = useState(false);
+  const [createRecoveryError, setCreateRecoveryError] = useState("");
+  const [createRecoveryRead, setCreateRecoveryRead] = useState(0);
+
+  useEffect(() => {
+    if (!saving && !unconfirmedCreate) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [saving, unconfirmedCreate]);
+
+  const closeAppointmentForm = () => {
+    if (!submitLock.current && !createAttempt.current?.uncertain) setModalOpen(false);
+  };
+
+  const [catalog, setCatalog] = useState<CatalogService[]>([]);
+  // Прайс, суженный под выбранного в форме мастера. Отдельное состояние, а не
+  // замена catalog: тот питает фильтр списка записей, и сужать его под форму
+  // значило бы прятать из фильтра услуги, которые в записях уже стоят.
+  const [doctorCatalog, setDoctorCatalog] = useState<{ doctorId: string; services: CatalogService[]; canPrune: boolean } | null>(null);
+  // Подпись под полем «Услуга»: почему выбор сбросился или почему прайс не сузился.
+  const [serviceScopeNotice, setServiceScopeNotice] = useState("");
+  /**
+   * Поиск по услугам в форме — просьба владельца: «чтобы не перебирать и так
+   * большой список». Пустой запрос — прежний выпадающий список; с запросом
+   * вместо него результаты кнопками, до двенадцати: больше — сужайте запрос.
+   */
+  const [serviceSearch, setServiceSearch] = useState("");
+  // Поиск специалиста отделён от поиска услуги: имя мастера не является
+  // услугой и прежде неизбежно давало «ничего не нашлось» в соседнем поле.
+  const [doctorSearch, setDoctorSearch] = useState("");
+  // Мастер, под которого прайс уже сужен в ЭТОЙ сессии модалки. Отличает смену
+  // мастера оператором от первого открытия карточки: на открытии снимать связь
+  // с услугой нельзя — это молча переписало бы уже сохранённую запись.
+  const scopedDoctorRef = useRef<string | null>(null);
+  const [directory, setDirectory] = useState<{ items: DirectoryDoctor[]; available: boolean }>({ items: [], available: false });
+
+  // Сетка без единой карточки мастера — заглушка «Справочник пуст», хотя
+  // записи дня существуют (свободным вводом имён). Пока справочник пуст,
+  // честнее открыть день. Эффект не спорит с человеком: выбранный руками
+  // вид не трогается, переключение происходит один раз на загрузке.
+  const emptyDirectoryHandled = useRef(false);
+  useEffect(() => {
+    if (emptyDirectoryHandled.current) return;
+    if (!directory.available) return;
+    emptyDirectoryHandled.current = true;
+    if (directory.items.filter((doctor) => doctor.isActive).length === 0) {
+      setView((current) => (current === "grid" ? "day" : current));
+    }
+  }, [directory]);
+  const [shifts, setShifts] = useState<DoctorShift[]>([]);
+  // Прочитать график не удалось — это НЕ то же самое, что «пояс не задан».
+  // Утверждать второе, когда верно первое, — ровно та подмена, которую этот
+  // продукт ловит у себя везде остальное.
+  const [scheduleReadable, setScheduleReadable] = useState(true);
+  const [scheduleMessage, setScheduleMessage] = useState("");
+  const deviceTimeZone = useMemo(() => readDeviceTimeZone(), []);
+
+  /**
+   * Сегодняшний день клиники — состояние, а не константа модуля.
+   *
+   * Прежде «сегодня» вычислялось один раз при загрузке страницы, поэтому
+   * вкладка, оставленная на ночь, бесконечно показывала вчерашнее «Сегодня
+   * записей». Минутный тик стоит ничего и переводит счётчик ровно в полночь
+   * клиники, а не в полночь ноутбука.
+   */
+  const [todayKey, setTodayKey] = useState(() => clinicToday(""));
+
+  useEffect(() => {
+    const tick = () => setTodayKey(clinicToday(clinicTimeZone));
+    tick();
+    const timer = window.setInterval(tick, 60_000);
+    return () => window.clearInterval(timer);
+  }, [clinicTimeZone]);
+
+  // Пояс приезжает вместе со списком, то есть уже после первого рендера, а
+  // выбранный день до этого момента — день устройства. Как только пояс известен,
+  // открытый день переводится на сутки клиники — но только если оператор ещё
+  // ничего не выбрал сам. Иначе экран отнимал бы у него выбор на каждой
+  // загрузке.
+  useEffect(() => {
+    if (!clinicTimeZone || createAttempt.current) return;
+    setSelectedDate((current) => (current === todayKeyAtLoad ? clinicToday(clinicTimeZone) : current));
+  }, [clinicTimeZone]);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Весь прайс клиники: он питает фильтр списка записей, поэтому под
+    // выбранного в форме мастера не сужается — иначе из фильтра пропали бы
+    // услуги, которые в записях уже есть.
+    void loadCatalogServices().then((result) => {
+      if (!cancelled) setCatalog(result.services);
+    });
+    void loadDirectory("/api/crm/clinic-doctors", "doctors", "directoryAvailable", directoryDoctorFromApi).then((result) => {
+      if (!cancelled) setDirectory(result);
+    });
+    void loadDirectory("/api/crm/doctor-schedule", "shifts", "scheduleAvailable", doctorShiftFromApi).then((result) => {
+      if (cancelled) return;
+      setShifts(result.items);
+      // Пояс приходит вместе с графиком: маршрут настроек доступен только
+      // владельцу и администратору, и регистратор получил бы оттуда отказ.
+      setClinicTimeZone(result.timeZone);
+      setClinicTimeZoneReady(result.resolved);
+      setScheduleReadable(result.available);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Справочники могли измениться, пока страница записи оставалась открытой
+  // (например, администратор добавил нового мастера в другой вкладке). Каждое
+  // открытие формы перечитывает мастеров и прайс, не требуя перезагрузки CRM.
+  useEffect(() => {
+    if (!modalOpen) return;
+    let cancelled = false;
+    void loadCatalogServices().then((result) => {
+      if (!cancelled && result.ok) setCatalog(result.services);
+    });
+    void loadDirectory("/api/crm/clinic-doctors", "doctors", "directoryAvailable", directoryDoctorFromApi).then((result) => {
+      if (!cancelled) setDirectory(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [modalOpen]);
+
+  /**
+   * Прайс сужается под выбранного мастера.
+   *
+   * Список перезапрашивается с doctorId, а не фильтруется здесь: у услуги есть
+   * хозяин, и какая из них общая, а какая чужая, знает только сервер. Мастер не
+   * выбран — поведение прежнее, весь прайс клиники.
+   */
+  useEffect(() => {
+    if (!modalOpen) {
+      // Закрытая модалка стирает память о мастере: следующее открытие снова
+      // считается первым, и выбор услуги на нём не трогается.
+      scopedDoctorRef.current = null;
+      setServiceScopeNotice("");
+      return;
+    }
+
+    const doctorId = form.doctorId;
+    // null — прайс в этой сессии модалки ещё не сужали, значит это открытие
+    // карточки, а не смена мастера оператором.
+    const previous = scopedDoctorRef.current;
+    const changedByOperator = previous !== null && previous !== doctorId;
+
+    if (!doctorId) {
+      scopedDoctorRef.current = "";
+      setDoctorCatalog(null);
+      setServiceScopeNotice("");
+      return;
+    }
+
+    let cancelled = false;
+    void loadCatalogServices(doctorId).then((result) => {
+      // Ответ про прошлого мастера, пришедший вторым, переписал бы список уже
+      // выбранного: эффект гасит собственные догоняющие ответы.
+      if (cancelled) return;
+      if (!result.ok) {
+        // Keep the last known personal subset. Showing the entire clinic price
+        // after a failed refresh would put colleagues' services under the
+        // selected master, which is worse than an incomplete list.
+        setDoctorCatalog(null);
+        setServiceScopeNotice("Не удалось обновить прайс мастера — показаны только уже загруженные его услуги");
+        return;
+      }
+      // Отметка ставится только на применённом списке: пока сужение не
+      // доехало, следующий запуск обязан считать мастера всё ещё прежним.
+      scopedDoctorRef.current = doctorId;
+      setDoctorCatalog({ doctorId, services: result.services, canPrune: changedByOperator });
+      setServiceScopeNotice("");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [modalOpen, form.doctorId]);
+
+  // Закрыли модалку — забыли всё, что знали про прайс мастера.
+  //
+  // Иначе следующее открытие начинается с чужим сужением и с уже взведённым
+  // canPrune: карточка сохранённой записи, открытая на правку, молча теряла
+  // связь с услугой — «сброс вслух» срабатывал там, где оператор ничего не
+  // менял. Ссылка scopedDoctorRef обнуляется вместе с состоянием, иначе она
+  // соврёт следующему запуску, что мастера уже применяли.
+  useEffect(() => {
+    if (modalOpen) return;
+    setDoctorCatalog(null);
+    setServiceScopeNotice("");
+    scopedDoctorRef.current = "";
+  }, [modalOpen]);
+
+  /**
+   * Услуга, выбранная под прошлого мастера, могла не пережить сужение прайса.
+   *
+   * Пустое поле без объяснения оператор прочитал бы как сбой экрана, поэтому
+   * связь снимается вслух — подписью под полем. Сверка идёт с ПОЛНЫМ ответом
+   * сервера, а не с активными строками: услуга этого же мастера, уехавшая в
+   * архив, связи не теряет — её показывает отдельный вариант списка.
+   */
+  useEffect(() => {
+    if (!doctorCatalog || !doctorCatalog.canPrune) return;
+    if (doctorCatalog.doctorId !== form.doctorId) return;
+    if (!form.serviceId) return;
+    // The scoped endpoint also returns clinic-wide rows for older consumers.
+    // After an operator changes the master, only a row explicitly owned by the
+    // newly selected master may keep the appointment link.
+    if (doctorCatalog.services.some(
+      (service) => service.id === form.serviceId && service.doctorId === form.doctorId,
+    )) {
+      setServiceScopeNotice("");
+      return;
+    }
+    setServiceScopeNotice(
+      form.service
+        ? `Услуга «${form.service}» не входит в прайс выбранного ${terms.specialistGenitive} — выберите услугу заново`
+        : `Прежняя услуга не входит в прайс выбранного ${terms.specialistGenitive} — выберите услугу заново`,
+    );
+    // Снимается ровно связь со справочником. Снимок названия остаётся: его
+    // правят руками, и стереть правку из-за смены мастера — потерять данные,
+    // а название названо в подписи, так что оператор видит, что было.
+    setForm((current) => ({ ...current, serviceId: "", priceTenge: "" }));
+  }, [doctorCatalog, form.doctorId, form.service, form.serviceId, terms.specialistGenitive]);
+
+  useEffect(() => {
+    if (!doctorCatalog?.canPrune || doctorCatalog.doctorId !== form.doctorId) return;
+    const allowed = form.additionalServices.filter(item => !item.serviceId || doctorCatalog.services.some(service => service.id === item.serviceId && service.doctorId === form.doctorId));
+    if (allowed.length === form.additionalServices.length) return;
+    setForm(current => ({ ...current, additionalServices: allowed }));
+    setServiceScopeNotice("Услуги прежнего мастера убраны из списка. Проверьте услуги выбранного мастера.");
+  }, [doctorCatalog, form.doctorId, form.additionalServices]);
+
+  /** Активные врачи в порядке справочника — то, из чего выбирают в форме. */
+  const activeDoctors = useMemo(
+    () => directory.items
+      .filter((doctor) => doctor.isActive)
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.fullName.localeCompare(b.fullName, "ru")),
+    [directory.items],
+  );
+
+  const doctorMatches = useMemo(() => {
+    const needle = doctorSearch.trim().toLocaleLowerCase("ru");
+    if (!needle) return [];
+    return activeDoctors
+      .filter((doctor) => `${doctor.fullName} ${doctor.specialty}`.toLocaleLowerCase("ru").includes(needle))
+      .slice(0, 8);
+  }, [activeDoctors, doctorSearch]);
+
+  const { items: appointmentItems, loaded, loadError, addItem, setItems } = useDemoCollection<Appointment>("negis_demo_appointments", appointmentsSeed, {
+    endpoint: "/api/crm/appointments",
+    listKey: "appointments",
+    toApi: appointmentToApi,
+    fromApi: appointmentFromApi,
+  });
+
+  const mutationWorkspaceId = clinicId || readCurrentWorkspaceId();
+  const mutationActorId = !isLoading && !isSigningOut && !isDemoMode && !isImpersonation ? user?.id || "" : "";
+  const observedMutationActor = useRef(mutationActorId);
+  const mutationAuthObserved = useRef(false);
+  const liveMutationEpoch = useRef(0);
+  const [mutationAuthEpoch, setMutationAuthEpoch] = useState(0);
+  const mutationEpoch = hasSupabaseFrontendEnv && isRealWorkspace(mutationWorkspaceId) ? mutationAuthEpoch : 0;
+  const deniedMutationIds = useRef(new Set<string>());
+  const currentMutationScope = useRef<AppointmentMutationScope>({
+    workspaceId: mutationWorkspaceId, actorId: mutationActorId, role: userRole, epoch: mutationEpoch,
+    active: false, deniedIds: deniedMutationIds.current, deniedCreateKeys: new Set(),
+  });
+  if (currentMutationScope.current.workspaceId !== mutationWorkspaceId || currentMutationScope.current.actorId !== mutationActorId
+    || currentMutationScope.current.role !== userRole || currentMutationScope.current.epoch !== mutationEpoch) {
+    currentMutationScope.current = {
+      workspaceId: mutationWorkspaceId, actorId: mutationActorId, role: userRole, epoch: mutationEpoch,
+      active: false, deniedIds: deniedMutationIds.current, deniedCreateKeys: new Set(),
+    };
+  }
+  const mutationScope = currentMutationScope.current;
+  // A read started before revocation must not put a refused record back on screen.
+  const items = useMemo(() => appointmentItems.filter((item) => !mutationScope.deniedIds.has(item.id.toLowerCase())),
+    [appointmentItems, mutationScope]);
+  const matchesMutationSdkActor = () => !hasSupabaseFrontendEnv || !isRealWorkspace(mutationScope.workspaceId)
+    || (mutationScope.epoch === liveMutationEpoch.current
+      && (!mutationAuthObserved.current || observedMutationActor.current === mutationScope.actorId));
+  const isCurrentMutationScope = () => mutationScope.active && currentMutationScope.current === mutationScope
+    && matchesMutationSdkActor() && readCurrentWorkspaceId() === mutationScope.workspaceId;
+  const editingAppointmentRef = useRef(editingId);
+  editingAppointmentRef.current = editingId;
+
+  useLayoutEffect(() => {
+    if (!hasSupabaseFrontendEnv) return;
+    let mounted = true;
+    const { data: { subscription } } = sessionAuth.onAuthStateChange((event, session) => {
+      if (!mounted) return;
+      const nextActor = event === "SIGNED_OUT" ? "" : session?.user.id || "";
+      mutationAuthObserved.current = true;
+      if (observedMutationActor.current === nextActor) return;
+      observedMutationActor.current = nextActor;
+      // React can batch A -> B -> A; invalidate before the next render/token lookup.
+      liveMutationEpoch.current += 1;
+      if (isRealWorkspace(currentMutationScope.current.workspaceId)) currentMutationScope.current.active = false;
+      setMutationAuthEpoch(liveMutationEpoch.current);
+    });
+    return () => { mounted = false; subscription.unsubscribe(); };
+  }, []);
+
+  useLayoutEffect(() => {
+    mutationScope.active = matchesMutationSdkActor()
+      && (!isRealWorkspace(mutationScope.workspaceId) || Boolean(mutationScope.actorId));
+    submitLock.current = false;
+    setSaving(false);
+    setEditingId(null);
+    setModalOpen(false);
+    setForm(defaultForm(todayKeyAtLoad));
+    setConflictMessage("");
+    setScheduleMessage("");
+    setClientMatches([]);
+    setClientSearchAttempted(false);
+    setRemoteVisitHistory([]);
+    // Drop only this view's handle. Its durable receipt remains owned by the
+    // original actor/workspace, including an interrupted in-flight create.
+    createAttempt.current = null;
+    restoredCreateScope.current = "";
+    prefillLeadRef.current = "";
+    setUnconfirmedCreate(false);
+    setCreateRecoveryError("");
+    return () => { mutationScope.active = false; };
+  }, [mutationScope]);
+
+  useEffect(() => {
+    if (!isRealWorkspace(mutationScope.workspaceId) || !clinicTimeZoneReady || !isCurrentMutationScope()) return;
+    const scope = mutationScope;
+    if (!scope.workspaceId || !scope.actorId) return;
+    const scopeKey = `${scope.workspaceId}:${scope.actorId}:${createRecoveryRead}`;
+    const pending = createAttempt.current;
+    if (pending && (!pending.uncertain || !isCurrentAppointmentAttempt(pending, scope.workspaceId, scope.actorId))) return;
+    if (!pending && restoredCreateScope.current === scopeKey) return;
+    restoredCreateScope.current = scopeKey;
+
+    let restored: AppointmentCreateAttempt | null;
+    try {
+      const storage = appointmentAttemptStorage();
+      if (!storage) throw new AppointmentAttemptRestoreError("unreadable");
+      const durable = restoreAppointmentCreateAttempt(storage, scope.workspaceId, scope.actorId);
+      if (pending && durable && !sameAppointmentCreateIntent(pending, durable)) throw new AppointmentAttemptRestoreError("conflict");
+      restored = pending ?? durable;
+      setCreateRecoveryError("");
+    } catch (error) {
+      setCreateRecoveryError(error instanceof Error ? error.message : "Не удалось прочитать незавершённую запись.");
+      return;
+    }
+    if (!restored) return;
+    const restoredAppointment = appointmentFromApi(restored.payload);
+    createAttempt.current = restored;
+    prefillLeadRef.current = restored.leadId || "";
+    setEditingId(null);
+    // Legacy receipts have no role provenance. They can be reconciled with
+    // the same key, but must not reveal an earlier role's draft in this view.
+    const accessRefused = scope.deniedCreateKeys.has(restored.requestKey);
+    const showDraft = !accessRefused && restored.originRole === scope.role;
+    setForm(showDraft ? formFromAppointment(restoredAppointment, clinicTimeZone) : defaultForm(todayKeyAtLoad));
+    if (showDraft) setSelectedDate(dateKeyFromStartsAt(restoredAppointment.startsAt, clinicTimeZone));
+    setConflictMessage("");
+    setScheduleMessage("");
+    setClientMatches([]);
+    setRemoteVisitHistory([]);
+    setUnconfirmedCreate(true);
+    setModalOpen(true);
+    if (accessRefused) return;
+    toast.warning("Найдена незавершённая запись. Проверьте, сохранилась ли она.", { id: "appointment-create-recovery" });
+  }, [mutationScope, clinicTimeZone, clinicTimeZoneReady, unconfirmedCreate, createRecoveryRead]);
+
+  const discardRefusedAppointment = (id: string) => {
+    mutationScope.deniedIds.add(id.toLowerCase());
+    setItems((current) => current.filter((item) => item.id.toLowerCase() !== id.toLowerCase()));
+    setRemoteVisitHistory((current) => current.filter((item) => item.id.toLowerCase() !== id.toLowerCase()));
+    if (editingAppointmentRef.current?.toLowerCase() !== id.toLowerCase()) return;
+    setModalOpen(false);
+    setEditingId(null);
+    setForm(defaultForm(todayKeyAtLoad));
+    setClientMatches([]);
+    setClientSearchAttempted(false);
+    setRemoteVisitHistory([]);
+    setServiceSearch("");
+    setDoctorSearch("");
+    setConflictMessage("");
+    setScheduleMessage("");
+  };
+
+  /**
+   * Search the real patient directory while the receptionist types a name.
+   * Names are suggestions, not identity: even one exact result must be
+   * selected explicitly before replacing contacts or linking the visit.
+   */
+  useEffect(() => {
+    const query = form.client.replace(/\s+/g, " ").trim();
+    if (!modalOpen || !isRealWorkspace() || userRole === "doctor" || form.clientId || query.length < 2) {
+      setClientMatches([]);
+      setClientSearchLoading(false);
+      setClientSearchAttempted(false);
+      setClientSearchFailed(false);
+      return;
+    }
+
+    let cancelled = false;
+    setClientSearchLoading(true);
+    setClientSearchAttempted(false);
+    setClientSearchFailed(false);
+
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const workspaceId = readCurrentWorkspaceId();
+          const response = await crmFetch(
+            `/api/crm/clients?workspaceId=${encodeURIComponent(workspaceId)}&search=${encodeURIComponent(query)}`,
+          );
+          const body = await safeJson(response);
+          if (!response.ok || body?.success !== true || body.mode !== "supabase") throw new Error("client search failed");
+          const raw = body.data?.clients ?? body.data?.items;
+          const matches = (Array.isArray(raw) ? raw : [])
+            .map(clientSearchResultFromApi)
+            .filter((item): item is ClientSearchResult => item !== null);
+          if (cancelled) return;
+
+          setClientMatches(matches);
+          setClientSearchAttempted(true);
+        } catch {
+          if (!cancelled) {
+            setClientMatches([]);
+            setClientSearchAttempted(true);
+            setClientSearchFailed(true);
+          }
+        } finally {
+          if (!cancelled) setClientSearchLoading(false);
+        }
+      })();
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [form.client, form.clientId, modalOpen, userRole]);
+
+  /** Full history comes from the database once a stable patient id is known. */
+  useEffect(() => {
+    if (!modalOpen || !isRealWorkspace() || !isUuidText(form.clientId)) {
+      setRemoteVisitHistory([]);
+      setVisitHistoryLoading(false);
+      setVisitHistoryFailed(false);
+      return;
+    }
+
+    let cancelled = false;
+    setVisitHistoryLoading(true);
+    setVisitHistoryFailed(false);
+    void (async () => {
+      try {
+        const workspaceId = readCurrentWorkspaceId();
+        const response = await crmFetch(
+          `/api/crm/appointments?workspaceId=${encodeURIComponent(workspaceId)}&clientId=${encodeURIComponent(form.clientId)}`,
+        );
+        const body = await safeJson(response);
+        if (!response.ok || body?.success !== true || body.mode !== "supabase") throw new Error("visit history failed");
+        const raw = body.data?.appointments ?? body.data?.items;
+        const history = (Array.isArray(raw) ? raw : []).map(appointmentFromApi);
+        if (!cancelled) setRemoteVisitHistory(history);
+      } catch {
+        if (!cancelled) {
+          setRemoteVisitHistory([]);
+          setVisitHistoryFailed(true);
+        }
+      } finally {
+        if (!cancelled) setVisitHistoryLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [form.clientId, modalOpen]);
+
+  // Справочник плюс то, что уже записано. Объединение обязательно: фильтр
+  // сравнивает СНИМОК имени на равенство строк, поэтому без исторических
+  // написаний старые записи перестали бы находиться.
+  const doctors = useMemo(
+    () => Array.from(new Set([
+      ...activeDoctors.map((doctor) => doctor.fullName),
+      ...items.map((item) => item.doctor).filter(Boolean),
+    ])).sort((a, b) => a.localeCompare(b, "ru")),
+    [activeDoctors, items],
+  );
+
+  // Фильтр сравнивает СНИМОК названия на равенство строк, поэтому список
+  // значений обязан быть объединением каталога и того, что уже записано.
+  // Без объединения любое историческое написание перестало бы находиться —
+  // а до применения 032 каталог пуст и весь список состоит из истории.
+  const services = useMemo(
+    () => Array.from(new Set([...catalog.map((service) => service.name), ...items.map((item) => item.service).filter(Boolean)])).sort(),
+    [catalog, items],
+  );
+
+  /**
+   * Прайс формы принадлежит выбранному мастеру. Backend also returns common
+   * clinic services for compatibility, but the booking form deliberately does
+   * not assign an unowned row to a person. A service outside the personal list
+   * can still be entered manually together with its agreed price.
+   */
+  const formCatalog = useMemo(() => {
+    const ownDoctorId = userRole === "doctor"
+      ? catalog.find((service) => service.doctorId)?.doctorId || ""
+      : "";
+    const selectedDoctorId = form.doctorId || ownDoctorId;
+
+    // A clinic with a real directory chooses the master first. Until then no
+    // colleague's price appears under the service field.
+    if (!selectedDoctorId && activeDoctors.length > 0) return [];
+
+    const source = doctorCatalog && doctorCatalog.doctorId === selectedDoctorId
+      ? doctorCatalog.services
+      : catalog;
+    return selectedDoctorId ? source.filter((service) => service.doctorId === selectedDoctorId) : source;
+  }, [activeDoctors.length, catalog, doctorCatalog, form.doctorId, userRole]);
+
+  /** Активные услуги в порядке справочника — то, из чего выбирают в форме. */
+  const activeCatalog = useMemo(
+    () => formCatalog.filter((service) => service.isActive).sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name, "ru")),
+    [formCatalog],
+  );
+
+  // В рабочей клинике прайс начинается с человека, который оказывает услугу.
+  // Свободное имя мастера остаётся допустимым откатом: после того как имя
+  // вписано, услугу и цену можно указать вручную.
+  const mustChooseDoctorBeforeService = userRole !== "doctor"
+    && activeDoctors.length > 0
+    && !form.doctorId
+    && !form.doctor.trim();
+
+  // Сужение до нуля тоже надо сказать словами: поле «Услуга» само собой
+  // превратилось бы в текстовый ввод, и оператор решил бы, что справочник
+  // сломался.
+  const serviceScopeText = serviceScopeNotice
+    || (mustChooseDoctorBeforeService
+      ? `Сначала выберите ${terms.specialistGenitive} — появятся его услуги с ценами`
+      : "")
+    || (doctorCatalog && doctorCatalog.doctorId === form.doctorId && activeCatalog.length === 0
+      ? `В прайсе выбранного ${terms.specialistGenitive} нет услуг — впишите название вручную`
+      : "");
+  const serviceScopeHint = serviceScopeText ? (
+    <p className="mt-1 text-[11px] font-semibold text-amber-700" data-testid="appointment-service-scope">
+      {serviceScopeText}
+    </p>
+  ) : null;
+  const slots = useMemo(() => generateSlots(), []);
+
+  const weekStart = useMemo(() => startOfWeekKey(selectedDate), [selectedDate]);
+  const weekDays = useMemo(() => Array.from({ length: 7 }, (_, index) => addDaysKey(weekStart, index)), [weekStart]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!clinicTimeZoneReady || createAttempt.current) return;
+
+    // Selection-2: a handoff belongs to the clinic it was made in.
+    const prefillKey = workspaceScopedKey(APPOINTMENT_PREFILL_KEY);
+
+    try {
+      const raw = window.localStorage.getItem(prefillKey);
+      if (!raw) return;
+      const prefill = JSON.parse(raw) as Record<string, unknown>;
+      const prefillDate = clinicTimeZone && selectedDate === todayKeyAtLoad ? clinicToday(clinicTimeZone) : selectedDate;
+      const nextForm = {
+        ...defaultForm(prefillDate),
+        // Заявка передаёт карточку клиента с самого начала — терялась она здесь.
+        clientId: readString(prefill.clientId),
+        client: readString(prefill.clientName) || readString(prefill.name),
+        phone: readString(prefill.phone),
+        whatsapp: readString(prefill.whatsapp) || readString(prefill.phone),
+        service: readString(prefill.service) || "Консультация",
+        source: readString(prefill.source) || "CRM",
+      };
+      setForm(nextForm);
+      prefillLeadRef.current = readString(prefill.leadId);
+      setEditingId(null);
+      setModalOpen(true);
+      window.localStorage.removeItem(prefillKey);
+    } catch {
+      window.localStorage.removeItem(prefillKey);
+    }
+  }, [selectedDate, clinicTimeZone, clinicTimeZoneReady]);
+
+  /**
+   * Заявка → «Записана» после успешно созданной записи.
+   *
+   * Стадия берётся из настроенного пайплайна клиники (semanticGroup booked);
+   * если структурных стадий нет — канонический статус booked, тот же, что
+   * ставит рука регистратора. Отказ не трогает созданную запись: заявка
+   * остаётся как была, и об этом говорится вслух.
+   */
+  const markLeadBooked = async (leadId: string) => {
+    // Демо-пространство живёт в localStorage чужой страницы: PATCH к серверу
+    // ответил бы 200 mode:"demo", ничего не изменив, и тост солгал бы. Фича
+    // работает там, где работают настоящие заявки — в реальной клинике.
+    if (!isRealWorkspace(mutationScope.workspaceId) || !isCurrentMutationScope()) return;
+    try {
+      let status = "booked";
+      let stageId = "";
+      try {
+        const response = await crmFetch(`/api/crm/lead-stages?workspaceId=${encodeURIComponent(mutationScope.workspaceId)}`, {
+          expectedUserId: mutationScope.actorId, dispatchGuard: isCurrentMutationScope,
+        });
+        if (!isCurrentMutationScope()) return;
+        const body = (await response.json()) as { success?: boolean; data?: Record<string, unknown> };
+        if (!isCurrentMutationScope()) return;
+        const rawStages = body?.data?.stages;
+        const stages = (Array.isArray(rawStages) ? rawStages : [])
+          .map((item) => leadStageDefinitionFromUnknown(item))
+          .filter((item): item is NonNullable<typeof item> => item !== null);
+        const booked = stages
+          .filter((stage) => stage.semanticGroup === "booked" && stage.isActive)
+          .sort((a, b) => a.sortOrder - b.sortOrder)[0];
+        if (booked) {
+          status = booked.stageKey;
+          if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(booked.id)) stageId = booked.id;
+        }
+      } catch {
+        if (!isCurrentMutationScope()) return;
+        // Пайплайн не прочитался — канонический booked всё равно честен.
+      }
+      const response = await crmFetch(`/api/crm/leads?workspaceId=${encodeURIComponent(mutationScope.workspaceId)}`, {
+        method: "PATCH",
+        expectedUserId: mutationScope.actorId,
+        dispatchGuard: isCurrentMutationScope,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: leadId,
+          workspaceId: mutationScope.workspaceId,
+          status,
+          ...(stageId ? { stageId } : {}),
+        }),
+      });
+      if (!isCurrentMutationScope()) return;
+      const body = (await response.json().catch(() => null)) as { success?: boolean; mode?: string } | null;
+      if (!isCurrentMutationScope()) return;
+      // 200 с mode:"demo" — это «сервер ничего не записал»: тот же порог, что
+      // у создания записи строкой выше.
+      if (!response.ok || body?.success !== true || body.mode !== "supabase") throw new Error(String(response.status));
+      toast.success("Заявка переведена в «Записана»");
+    } catch (error) {
+      if (!isCurrentMutationScope()) return;
+      console.warn("appointments: lead stage update refused", error instanceof Error ? error.message : error);
+      toast.error("Запись создана, но заявка не переведена в «Записана» — переключите стадию вручную.");
+    }
+  };
+
+  const filteredItems = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return items
+      .filter((appointment) => {
+        if (doctorFilter !== "all" && appointment.doctor !== doctorFilter) return false;
+        if (statusFilter !== "all" && appointment.status !== statusFilter) return false;
+        if (serviceFilter !== "all" && appointment.service !== serviceFilter) return false;
+        if (!query) return true;
+        return `${appointment.client} ${appointment.phone} ${appointment.whatsapp}`.toLowerCase().includes(query);
+      })
+      .sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
+  }, [doctorFilter, items, search, serviceFilter, statusFilter]);
+
+  const dayAppointments = useMemo(
+    () => filteredItems.filter((appointment) => isOnDay(appointment, selectedDate, clinicTimeZone)),
+    [filteredItems, selectedDate, clinicTimeZone],
+  );
+
+  /**
+   * Записи, разложенные по строкам дневной сетки.
+   *
+   * Раньше строка искала записи точным совпадением времени: `timeKeyFromStartsAt
+   * (...) === slot`. Сетка идёт получасовыми шагами с 09:00 до 21:00, поэтому
+   * визит в 10:15 не попадал ни в 10:00, ни в 10:30 и ИСЧЕЗАЛ с экрана дня —
+   * при том что счётчик над сеткой его считал. Оператор видел «7 записей» и
+   * шесть карточек.
+   *
+   * Теперь запись попадает в ту строку, в которую она попадает по времени: в
+   * последнюю, чьё начало не позже её собственного. А всё, что вне сетки —
+   * раньше открытия, позже закрытия или с нечитаемой датой, — собирается
+   * отдельно и показывается над ней. Спрятать такую запись нельзя: именно она
+   * чаще всего и есть ошибка, которую оператор ищет.
+   */
+  const dayBuckets = useMemo(() => {
+    const buckets = new Map<string, Appointment[]>(slots.map((slot) => [slot, [] as Appointment[]]));
+    const outside: Appointment[] = [];
+    const occupied = new Set<string>();
+
+    const minutesOf = (value: string) => {
+      const [hours, minutes] = value.split(":").map(Number);
+      return hours * 60 + minutes;
+    };
+    const slotMinutes = slots.map(minutesOf);
+
+    for (const appointment of dayAppointments) {
+      const minutes = minuteOfClinicDay(appointment.startsAt, clinicTimeZone);
+      if (minutes === null) {
+        outside.push(appointment);
+        continue;
+      }
+      if (activeStatuses.includes(appointment.status)) {
+        for (const occupiedMinute of occupiedGridSlots({
+          startMinute: minutes,
+          durationMinutes: appointment.durationMinutes,
+          slots: slotMinutes,
+        })) occupied.add(formatSlot(occupiedMinute));
+      }
+      if (minutes < slotMinutes[0] || minutes > slotMinutes[slotMinutes.length - 1]) {
+        outside.push(appointment);
+        continue;
+      }
+      let index = -1;
+      for (let i = 0; i < slotMinutes.length; i += 1) {
+        if (slotMinutes[i] <= minutes) index = i;
+      }
+      if (index < 0) {
+        outside.push(appointment);
+        continue;
+      }
+      buckets.get(slots[index])!.push(appointment);
+    }
+
+    return { buckets, outside, occupied };
+  }, [clinicTimeZone, dayAppointments, slots]);
+  const weekAppointments = useMemo(
+    () => filteredItems.filter((appointment) => isWithinWeek(appointment, weekStart, clinicTimeZone)),
+    [filteredItems, weekStart, clinicTimeZone],
+  );
+  const todayAppointments = useMemo(
+    () => items.filter((appointment) => isOnDay(appointment, todayKey, clinicTimeZone)),
+    [items, todayKey, clinicTimeZone],
+  );
+  const nextAppointment = useMemo(() => {
+    const now = Date.now();
+    return items
+      .filter((appointment) => activeStatuses.includes(appointment.status) && new Date(appointment.startsAt).getTime() >= now)
+      .sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime())[0];
+  }, [items]);
+
+  /**
+   * Свободное время под форму — как шаг «выберите время» в запись.кз.
+   *
+   * Всё считается по часам САЛОНА: и день записи (isOnDay), и минуты
+   * (minuteOfClinicDay). Ревью поймало смешение «день по устройству, минута по
+   * салону» — тот же класс бага, который в этом файле уже чинили для карточки
+   * «Сегодня записей» (см. комментарий к isOnDay).
+   *
+   * Клик по слоту пишет время в form.time, а сохранение читает его по часам
+   * устройства — поэтому при несовпадении поясов секция прячется с объяснением:
+   * показывать «свободно 16:00», записывая на 18:00, хуже, чем не показывать.
+   *
+   * Правит по-прежнему сервер: он ответит 409 на пересечение, даже если сетка
+   * устарела за время раздумий.
+   */
+  const serviceMatches = useMemo(() => {
+    const needle = serviceSearch.trim().toLocaleLowerCase("ru");
+    if (!needle) return [];
+
+    // Имя уже выбранного мастера означает «покажи его прайс». У Дианы имя
+    // случайно входило в названия услуг, поэтому это выглядело рабочим; у
+    // Лауры названия общие и старый поиск показывал только кнопку мастера.
+    const selectedDoctor = activeDoctors.find((doctor) => doctor.id === form.doctorId);
+    const selectedDoctorLabel = `${selectedDoctor?.fullName || form.doctor} ${selectedDoctor?.specialty || ""}`
+      .trim()
+      .toLocaleLowerCase("ru");
+    if (selectedDoctorLabel.includes(needle)) {
+      // Запрос по имени мастера означает именно его личный прайс. Сервер
+      // намеренно добавляет к ответу общие услуги салона, но подмешивать их
+      // сюда нельзя: «Лаура» должна показывать услуги Лауры, а не первые
+      // строки общего каталога с тем же sort_order.
+      return activeCatalog
+        .filter((service) => service.doctorId === form.doctorId)
+        .slice(0, 20);
+    }
+
+    return activeCatalog
+      .filter((service) => service.name.toLocaleLowerCase("ru").includes(needle))
+      .slice(0, 12);
+  }, [activeCatalog, activeDoctors, form.doctor, form.doctorId, serviceSearch]);
+
+  // В одном поиске оператор часто вводит не услугу, а имя мастера. Вместо
+  // ложного «ничего не найдено» предлагаем выбрать мастера и открыть его прайс.
+  const serviceSearchDoctorMatches = useMemo(() => {
+    const needle = serviceSearch.trim().toLocaleLowerCase("ru");
+    if (!needle) return [];
+    return activeDoctors
+      .filter((doctor) => doctor.id !== form.doctorId)
+      .filter((doctor) => `${doctor.fullName} ${doctor.specialty}`.toLocaleLowerCase("ru").includes(needle))
+      .slice(0, 5);
+  }, [activeDoctors, form.doctorId, serviceSearch]);
+
+  const formSlots = useMemo(() => {
+    if (!form.date) return null;
+    const [year, month, day] = form.date.split("-").map(Number);
+    if (!year || !month || !day) return null;
+
+    // Мастеру селект специалиста не показывается — сервер и так запишет
+    // клиента к нему. Его карточку узнаём по его же записям: чужих в items у
+    // него не бывает, сервер сузил список до его работы.
+    const ownDoctorId = userRole === "doctor" && !form.doctorId
+      ? items.find((appointment) => appointment.doctorId)?.doctorId ?? ""
+      : "";
+    const doctorId = form.doctorId || ownDoctorId;
+    if (!doctorId && userRole !== "doctor") return null;
+    const ownDoctorName = userRole === "doctor" && !doctorId
+      ? (form.doctor || items.find((appointment) => appointment.doctor.trim())?.doctor || "").trim().toLowerCase()
+      : "";
+    const doctor = directory.items.find((entry) => doctorId
+      ? entry.id.toLowerCase() === doctorId.toLowerCase()
+      : Boolean(ownDoctorName) && entry.fullName.trim().toLowerCase() === ownDoctorName);
+    const capacity = doctor?.capacity ?? 1;
+
+    const isoWeekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay() || 7;
+    const gridShifts = shifts.map((shift) => ({
+      doctorId: shift.doctorId,
+      weekday: shift.weekday,
+      onDate: shift.onDate,
+      onDateEnd: shift.onDateEnd,
+      isWorking: shift.isWorking,
+      startMinute: shift.startMinute,
+      endMinute: shift.endMinute,
+    }));
+
+    // «График описывает ЭТОТ день», а не «у мастера есть хоть одна строка»:
+    // единственная строка-отпуск на сентябрь не должна закрывать весь август.
+    const mine = gridShifts.filter((shift) => shift.doctorId === doctorId);
+    const definesThisDay = mine.some((shift) => {
+      const from = shift.onDate;
+      const to = shift.onDateEnd || from;
+      if (from && from <= form.date && form.date <= to) return true;
+      return shift.weekday === isoWeekday;
+    });
+    const intervals = definesThisDay
+      ? workingIntervals(gridShifts, doctorId, form.date, isoWeekday)
+      : ([[9 * 60, 21 * 60]] as Array<[number, number]>);
+
+    const busy = items
+      .filter((appointment) => {
+        if (editingId && appointment.id.toLowerCase() === editingId.toLowerCase()) return false;
+        if (!activeStatuses.includes(normalizeStatus(appointment.status))) return false;
+        if (!isOnDay(appointment, form.date, clinicTimeZone)) return false;
+        if (doctorId && appointment.doctorId) return appointment.doctorId.toLowerCase() === doctorId.toLowerCase();
+        if (!doctorId) return true;
+        const name = (appointment.doctor || "").trim().toLowerCase();
+        return Boolean(name) && name === (doctor?.fullName || "").trim().toLowerCase();
+      })
+      .map((appointment) => {
+        const startMinute = minuteOfClinicDay(appointment.startsAt, clinicTimeZone);
+        if (startMinute === null) return null;
+        const minutes = Number.isFinite(appointment.durationMinutes) && appointment.durationMinutes > 0 ? appointment.durationMinutes : 60;
+        return [startMinute, startMinute + minutes] as [number, number];
+      })
+      .filter((interval): interval is [number, number] => interval !== null);
+
+    const nowMinute = form.date === todayKey ? minuteOfClinicDay(new Date().toISOString(), clinicTimeZone) : null;
+    const slots = freeSlots({ intervals, busy, durationMinutes: totalDurationMinutes, nowMinute, capacity });
+
+    // Пустота пустоте рознь: «всё занято» — только когда виновата занятость.
+    let reason: "закрыт" | "занято" | "день кончился" | "не помещается" | null = null;
+    if (slots.length === 0) {
+      if (definesThisDay && intervals.length === 0) reason = "закрыт";
+      else if (
+        nowMinute !== null &&
+        freeSlots({ intervals, busy, durationMinutes: totalDurationMinutes, nowMinute: null, capacity }).length > 0
+      ) reason = "день кончился";
+      else if (busy.length === 0) reason = "не помещается";
+      else reason = "занято";
+    }
+    return { groups: groupSlots(slots), reason };
+  }, [form.date, form.doctor, form.doctorId, totalDurationMinutes, shifts, items, editingId, directory.items, clinicTimeZone, todayKey, userRole]);
+
+  /**
+   * Архив клиента — просьба владельца дословно: «сбоку, когда записываешь,
+   * должен быть архив: видно, кого числа какая услуга была, во сколько и к
+   * какому мастеру». То же самое — «история посещений» в запись.кз.
+   *
+   * Для выбранной карточки история строго по client_id. Без выбора допустимо
+   * совпадение полного нормализованного контакта, но не имени. Сервер отдаёт отдельную
+   * выборку по client_id: история не обрезается общим списком календаря. У
+   * мастера эта выборка всё равно сужена сервером до собственной работы.
+   */
+  const visitHistory = useMemo(() => {
+    const unique = new Map<string, Appointment>();
+    for (const appointment of [...remoteVisitHistory, ...items]) unique.set(appointment.id, appointment);
+    return [...unique.values()]
+      .filter((appointment) => {
+        if (mutationScope.deniedIds.has(appointment.id.toLowerCase())) return false;
+        if (editingId && appointment.id === editingId) return false;
+        return matchesAppointmentClientHistory(form, appointment);
+      })
+      .sort((left, right) => (right.startsAt || "").localeCompare(left.startsAt || ""))
+      .slice(0, 8);
+  }, [items, remoteVisitHistory, form.clientId, form.phone, form.whatsapp, editingId, mutationScope]);
+
+  const openCreate = (date = selectedDate, time = "09:00") => {
+    if (!isCurrentMutationScope() || submitLock.current || saving || createAttempt.current) return false;
+    if (createRecoveryError) { toast.error(createRecoveryError); return false; }
+    if (!clinicTimeZoneReady) {
+      toast.error("Не удалось определить часовой пояс. Обновите страницу и повторите.");
+      return false;
+    }
+    setEditingId(null);
+    setConflictMessage("");
+    setScheduleMessage("");
+    // Врач из активного фильтра — то, что регистратор и так выбрал глазами.
+    const preselected = doctorFilter !== "all"
+      ? activeDoctors.find((doctor) => doctor.fullName === doctorFilter)
+      : undefined;
+    setForm({
+      ...defaultForm(date, time),
+      ...(doctorFilter !== "all" ? { doctor: doctorFilter, doctorId: preselected?.id ?? "" } : {}),
+    });
+    setServiceSearch("");
+    setDoctorSearch("");
+    setClientMatches([]);
+    setClientSearchAttempted(false);
+    setRemoteVisitHistory([]);
+    setModalOpen(true);
+    return true;
+  };
+
+  const openEdit = (appointment: Appointment) => {
+    if (!isCurrentMutationScope() || mutationScope.deniedIds.has(appointment.id.toLowerCase())) return;
+    if (submitLock.current || saving || createAttempt.current) return;
+    if (!clinicTimeZoneReady) {
+      toast.error("Не удалось определить часовой пояс. Обновите страницу и повторите.");
+      return;
+    }
+    // Обе панели закрываются: отказ, оставшийся от прошлой записи, предлагал бы
+    // «Записать вне графика» для совсем другого визита.
+    setConflictMessage("");
+    setScheduleMessage("");
+    setEditingId(appointment.id);
+    setConflictMessage("");
+    setForm(formFromAppointment(appointment, clinicTimeZone));
+    setDoctorSearch("");
+    setClientMatches([]);
+    setClientSearchAttempted(false);
+    setRemoteVisitHistory([]);
+    setServiceSearch("");
+    setModalOpen(true);
+  };
+
+  /**
+   * fields — какие поля записи отправлять.
+   *
+   * По умолчанию уходит вся карточка: так работает форма, где оператор видел
+   * и правил всё сразу. Но клик по статусу («Пришёл», «Подтверждена») правит
+   * ОДНО поле, а слал тоже всю карточку — значениями из вкладки, открытой,
+   * может быть, полчаса назад. Если за это время коллега переставил время или
+   * сменил услугу, его правка молча возвращалась к старой. Точечные действия
+   * теперь называют свои поля.
+   */
+  /**
+   * Поля, которые сервер сохранить не смог. Пустой список — обычный день.
+   *
+   * Читается из ответа, а не выводится на клиенте: единственный, кто знает,
+   * что именно приняла база, — это сервер, который туда писал.
+   */
+  const unsavedFromBody = (body: unknown): string[] => {
+    const data = asRecord(asRecord(body).data);
+    return Array.isArray(data.unsaved) ? data.unsaved.map((item) => readString(item)).filter(Boolean) : [];
+  };
+
+  /** Один и тот же текст на создании и на правке — потеря выглядит одинаково. */
+  const warnAboutUnsaved = (unsaved: string[]) => {
+    if (unsaved.length === 0) return;
+    toast.error(`Сохранено не полностью: ${unsaved.join(", ")} — база клиники ещё не обновлена`);
+  };
+
+  const patchAppointment = async (
+    appointment: Appointment,
+    allowConflict = false,
+    allowOutsideSchedule = false,
+    fields?: Array<keyof ReturnType<typeof appointmentToApi>>,
+  ) => {
+    if (!isCurrentMutationScope() || mutationScope.deniedIds.has(appointment.id.toLowerCase())) {
+      throw new DOMException("Appointment session ended", "AbortError");
+    }
+    const full = appointmentToApi(appointment);
+    // An author may read the phone added by reception, but cannot write it back.
+    if (userRole === "doctor") {
+      for (const key of ["phone", "clientPhone", "whatsapp"]) delete full[key];
+    }
+    const updates = fields
+      ? Object.fromEntries(fields.filter((key) => key in full).map((key) => [key, full[key]]))
+      : full;
+    const response = await crmFetch(`/api/crm/appointments?workspaceId=${encodeURIComponent(mutationScope.workspaceId)}`, {
+      method: "PATCH",
+      expectedUserId: mutationScope.actorId,
+      dispatchGuard: () => isCurrentMutationScope() && !mutationScope.deniedIds.has(appointment.id.toLowerCase()),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: appointment.id,
+        workspaceId: mutationScope.workspaceId,
+        expectedEditVersion: appointment.editVersion,
+        updates: {
+          ...updates,
+          ...(allowConflict ? { allowConflict: true } : {}),
+          // Отдельный флаг: «Сохранить всё равно» снимает проверку пересечений
+          // целиком, и один клик не имеет права снимать заодно график врача.
+          ...(allowOutsideSchedule ? { allowOutsideSchedule: true } : {}),
+        },
+      }),
+    });
+    if (!isCurrentMutationScope()) throw new DOMException("Appointment session ended", "AbortError");
+    if (response.status === 401 || response.status === 403 || response.status === 404) {
+      mutationScope.deniedIds.add(appointment.id.toLowerCase());
+      throw new AppointmentAccessRefusalError();
+    }
+    const body = await safeJson(response);
+    if (!isCurrentMutationScope() || mutationScope.deniedIds.has(appointment.id.toLowerCase())) {
+      throw new DOMException("Appointment session ended", "AbortError");
+    }
+
+    const conflict = conflictFromBody(body);
+    if (conflict) throw conflict;
+    const outside = scheduleRefusalFromBody(body);
+    if (outside) throw outside;
+
+    // Порог тот же, что у создания: ответ «demo» означает, что записи в базе
+    // нет. Прежний код принимал его за успех и обещал «сохранено локально» —
+    // локально при этом тоже ничего не сохранялось.
+    if (!response.ok || body?.success !== true || body.mode !== "supabase") {
+      if (body?.success === false && body.code === "arrival_payment") {
+        const error = new Error(body.error);
+        error.name = "ArrivalPaymentError";
+        throw error;
+      }
+      if (body?.success === false) throw new ServerRefusalError(body.code || "unavailable", body.error, body.details ?? []);
+      throw new Error("Не удалось обновить запись на сервере");
+    }
+
+    // Сервер называет поля, которые до базы не доехали (база клиники отстала
+    // от кода на миграцию). Раньше об этом знал только лог Vercel, а на экране
+    // оставалось оптимистичное значение — то есть сотрудник видел свои 90
+    // минут, которых в базе нет. Возвращаем и список, и сохранённую строку.
+    return {
+      unsaved: unsavedFromBody(body),
+      saved: body?.data?.item ? appointmentFromApi(body.data.item) : null,
+    };
+  };
+
+  /**
+   * Создание записи ждёт ответ сервера.
+   *
+   * Прежде оно шло оптимистично через addItem и отказ приходил уже после
+   * закрытия модалки — generic-тостом, без причины и без введённых данных.
+   * Для отказа «слот занят» это неприемлемо: оператору нужно решить, занимать
+   * ли время всё равно, а решать он может только пока форма открыта.
+   * Демо-режим не трогаем: там коллекция и есть запись, сервера нет.
+   */
+  const createAppointment = async (appointment: Appointment, allowConflict: boolean, allowOutsideSchedule = false) => {
+    if (!isCurrentMutationScope()) throw new DOMException("Appointment view changed", "AbortError");
+    if (!isRealWorkspace()) {
+      void addItem(appointment);
+      return { clientCreated: false, replayed: false, leadId: "", startsAt: appointment.startsAt, status: appointment.status };
+    }
+
+    if (createRecoveryError) throw new Error(createRecoveryError);
+    const scope = mutationScope;
+    const attempt = createAttempt.current ?? newAppointmentCreateAttempt(scope.workspaceId, scope.actorId, {
+      ...appointmentToApi(appointment), workspaceId: scope.workspaceId,
+      ...(allowConflict ? { allowConflict: true } : {}),
+      ...(allowOutsideSchedule ? { allowOutsideSchedule: true } : {}),
+    }, undefined, { originRole: scope.role || undefined,
+      ...(isUuidText(prefillLeadRef.current) ? { leadId: prefillLeadRef.current } : {}) });
+    if (!isCurrentAppointmentAttempt(attempt, scope.workspaceId, scope.actorId)) throw new Error("Аккаунт записи изменился. Откройте форму заново.");
+    const storage = appointmentAttemptStorage();
+    if (!storage || !persistAppointmentCreateAttempt(storage, attempt)) {
+      const message = "Браузер не подтвердил безопасный ключ повтора. Новый запрос не отправлен; разрешите хранилище вкладки и повторите чтение.";
+      if (isCurrentMutationScope()) {
+        restoredCreateScope.current = "";
+        setCreateRecoveryError(message);
+      }
+      throw new Error(message);
+    }
+    createAttempt.current = attempt;
+    let response: Response | undefined;
+    let body: ApiResponse | null = null;
+    try {
+      response = await crmFetch(`/api/crm/appointments?workspaceId=${encodeURIComponent(attempt.workspaceId)}`, {
+        method: "POST",
+        expectedUserId: scope.actorId,
+        dispatchGuard: () => isCurrentMutationScope() && createAttempt.current === attempt,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...attempt.payload, requestKey: attempt.requestKey }),
+      });
+      if (!isCurrentMutationScope() || createAttempt.current !== attempt) throw new DOMException("Appointment view changed", "AbortError");
+      if (attempt.uncertain && [401, 403, 404].includes(response.status)) {
+        // A denied replay says nothing about the original commit. Retain its
+        // receipt, but do not leave its private draft visible or restore it
+        // again from storage in this refused view lifetime.
+        scope.deniedCreateKeys.add(attempt.requestKey);
+        setForm(defaultForm(todayKeyAtLoad));
+        setClientMatches([]);
+        setClientSearchAttempted(false);
+        setRemoteVisitHistory([]);
+        setServiceSearch("");
+        setDoctorSearch("");
+        void response.body?.cancel().catch(() => undefined);
+        const message = "Доступ к восстановлению записи закрыт. Результат первого запроса неизвестен; ключ повтора сохранён. Проверьте права доступа перед повтором.";
+        throw new AppointmentCreateRecoveryError(message);
+      }
+      body = await safeJson(response);
+      if (!isCurrentMutationScope() || createAttempt.current !== attempt) throw new DOMException("Appointment view changed", "AbortError");
+
+      const conflict = conflictFromBody(body);
+      if (conflict) throw conflict;
+      const outside = scheduleRefusalFromBody(body);
+      if (outside) throw outside;
+
+      if (!response.ok || body?.success !== true || body.mode !== "supabase") {
+        const record = asRecord(body);
+        throw new ServerRefusalError(
+          readString(record.code),
+          readString(record.error) || "Не удалось создать запись на сервере",
+          Array.isArray(record.details) ? record.details.map((item) => readString(item)) : [],
+        );
+      }
+
+      const saved = confirmedAppointmentCreate(body);
+      if (!saved) throw new Error("Сервер не подтвердил сохранённую запись. Повторите проверку.");
+      if (!clearPersistedAppointmentCreateAttempt(storage, attempt)) {
+        throw new AppointmentCreateRecoveryError("Запись сохранена, но хранилище повтора недоступно. Повторите проверку этой записи; не создавайте новую.");
+      }
+      const savedAppointment = appointmentFromApi(saved);
+      setItems((current) => isCurrentMutationScope() ? mergeCreatedAppointment(current, savedAppointment) : current);
+      warnAboutUnsaved(unsavedFromBody(body));
+      createAttempt.current = null;
+      setUnconfirmedCreate(false);
+      return { clientCreated: body.data?.clientCreated === true, replayed: body.data?.replayed === true,
+        leadId: attempt.leadId || "", startsAt: savedAppointment.startsAt, status: savedAppointment.status };
+    } catch (error) {
+      const current = isCurrentMutationScope() && createAttempt.current === attempt;
+      if (current && canReleaseAppointmentAttempt(attempt, response?.status ?? 0, body)
+        && clearPersistedAppointmentCreateAttempt(storage, attempt)) {
+        createAttempt.current = null;
+        setUnconfirmedCreate(false);
+      } else {
+        // The key was retained before dispatch. A stale callback must not
+        // resurrect it after another live reconciliation has cleared it.
+        attempt.uncertain = true;
+        if (current) {
+          persistAppointmentCreateAttempt(storage, attempt);
+          setUnconfirmedCreate(true);
+        }
+      }
+      throw error;
+    }
+  };
+
+  /**
+   * «Оформить продажу» с карточки записи.
+   *
+   * На записи уже есть клиент, услуга и связь со справочником — продажа
+   * стартует с ними, а не с чистой формы, где всё это выбиралось заново из
+   * селектов со всей базой. serviceId позволит форме продаж подставить цену
+   * из прайса тем же путём, что и ручной выбор услуги.
+   */
+  const startSaleFromAppointment = (appointment: Appointment) => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(
+      workspaceScopedKey(DEAL_PREFILL_KEY),
+      JSON.stringify({
+        title: appointment.service,
+        clientId: appointment.clientId || "",
+        appointmentId: appointment.id,
+        serviceId: appointment.serviceId || "",
+        // Согласованная цена записи главнее прайса: скидку обещали клиенту,
+        // и продажа обязана её увидеть, а не выставить полный ценник.
+        priceMinor: appointment.priceMinor,
+      }),
+    );
+    setLocation("/sales");
+  };
+
+  const updateAppointmentStatus = async (appointment: Appointment, status: AppointmentStatus) => {
+    if (!isCurrentMutationScope() || mutationScope.deniedIds.has(appointment.id.toLowerCase())) return;
+    const updated = { ...appointment, status };
+
+    try {
+      // Только статус: остальные поля этой карточки мог изменить коллега.
+      const { unsaved, saved } = await patchAppointment(updated, false, false, ["status"]);
+      if (!isCurrentMutationScope()) return;
+      if (mutationScope.deniedIds.has(appointment.id.toLowerCase())) throw new AppointmentAccessRefusalError();
+      if (saved) setItems((current) => current.map((item) => item.id === appointment.id ? saved : item));
+      if (unsaved.length > 0) warnAboutUnsaved(unsaved);
+      else toast.success(status === "arrived" && saved?.arrivalSaleId
+        ? "Приход подтверждён. Продажа оформлена."
+        : `Статус: ${getAppointmentStatusLabel(status)}`);
+    } catch (error) {
+      if (!isCurrentMutationScope()) return;
+      if (error instanceof AppointmentAccessRefusalError || mutationScope.deniedIds.has(appointment.id.toLowerCase())) {
+        discardRefusedAppointment(appointment.id);
+        toast.error("Запись больше недоступна. Обновите список.");
+        return;
+      }
+      // Keep the last confirmed row; a lost reply proves neither save nor rollback.
+      console.warn("appointments: status patch refused", error instanceof Error ? error.message : error);
+      toast.error(error instanceof Error && error.name === "ArrivalPaymentError"
+        ? error.message : error instanceof ServerRefusalError ? refusalText(error).replace("создать запись", "изменить статус записи")
+          : "Не удалось подтвердить изменение статуса. Обновите список перед повтором.");
+    }
+  };
+
+  const findConflict = (candidate: Appointment): Appointment | null => {
+    if (!activeStatuses.includes(normalizeStatus(candidate.status))) return null;
+    const candidateInterval = appointmentInterval(candidate);
+    const doctorName = candidate.doctor.trim().toLowerCase();
+    const previous = items.find((appointment) => appointment.id.toLowerCase() === candidate.id.toLowerCase());
+    if (previous && activeStatuses.includes(normalizeStatus(previous.status))
+      && previous.doctorId.toLowerCase() === candidate.doctorId.toLowerCase()
+      && previous.doctor.trim().toLowerCase() === doctorName) {
+      const previousInterval = appointmentInterval(previous);
+      // Retaining or shrinking an occupied interval consumes no additional place.
+      if (candidateInterval.start >= previousInterval.start && candidateInterval.end <= previousInterval.end) return null;
+    }
+    const doctor = directory.items.find((entry) => candidate.doctorId
+      ? entry.id.toLowerCase() === candidate.doctorId.toLowerCase()
+      : entry.fullName.trim().toLowerCase() === doctorName);
+    const intervals = items
+      .filter((appointment) => appointment.id.toLowerCase() !== candidate.id.toLowerCase()
+        && (candidate.doctorId && appointment.doctorId
+          ? appointment.doctorId.toLowerCase() === candidate.doctorId.toLowerCase()
+          : Boolean(doctorName) && appointment.doctor.trim().toLowerCase() === doctorName)
+        && activeStatuses.includes(normalizeStatus(appointment.status)))
+      .map((appointment) => ({ ...appointmentInterval(appointment), value: appointment }));
+    return findAppointmentCapacityConflict(candidateInterval, intervals, doctor?.capacity ?? 1);
+  };
+
+  const submitForm = async (allowConflict = false, allowOutsideSchedule = false) => {
+    if (!isCurrentMutationScope() || (editingId && mutationScope.deniedIds.has(editingId.toLowerCase()))) return;
+    if (!editingId && createRecoveryError) { toast.error(createRecoveryError); return; }
+    if (!clinicTimeZoneReady) {
+      toast.error("Не удалось определить часовой пояс. Обновите страницу и повторите.");
+      return;
+    }
+    if (submitLock.current || saving) return;
+    const retrying = !editingId && createAttempt.current?.uncertain === true;
+    if (!retrying && !form.client.trim()) {
+      toast.error("Укажите имя клиента");
+      return;
+    }
+
+    // Мастеру телефон не показывают вовсе (сервер срезает контакты), поэтому
+    // требовать его от него — тупик: поле пустое не по невнимательности, а по
+    // замыслу, и «Сохранить» не срабатывало бы никогда. Регистратор и владелец
+    // телефон видят, и для них требование остаётся.
+    const contactsHidden = userRole === "doctor";
+    if (!retrying && !contactsHidden && !form.phone.trim()) {
+      toast.error("Укажите телефон клиента");
+      return;
+    }
+
+    // Услуга, набранная точным названием из каталога, всё равно связывается:
+    // одно место, детерминированно, и оператору не приходится помнить, что
+    // выбирать надо из списка.
+    const resolvedServiceId = form.serviceId
+      || activeCatalog.find((service) => service.name.trim().toLowerCase() === form.service.trim().toLowerCase())?.id
+      || "";
+    // То же для врача: набранное точное имя связывается, иначе правило графика
+    // молча не применилось бы к записи, которую оператор считает связанной.
+    const resolvedDoctorId = form.doctorId
+      || activeDoctors.find((doctor) => doctor.fullName.trim().toLowerCase() === form.doctor.trim().toLowerCase())?.id
+      || "";
+    let appointment: Appointment;
+    try {
+      appointment = retrying ? appointmentFromApi(createAttempt.current!.payload) : appointmentFromForm(
+        { ...form, serviceId: resolvedServiceId, doctorId: resolvedDoctorId },
+        editingId || undefined,
+        clinicTimeZone,
+        editingId ? items.find((item) => item.id === editingId)?.startsAt : undefined,
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Проверьте услуги записи.");
+      return;
+    }
+
+    // Быстрый локальный префильтр: если конфликт виден в уже загруженном
+    // расписании, спрашиваем без обращения к серверу. Авторитет — не здесь:
+    // этот массив может быть усечён, и он не знает, что записал коллега
+    // секунду назад с другого устройства.
+    const localConflict = findConflict(appointment);
+    if (!retrying && localConflict && !allowConflict) {
+      setConflictMessage(`У ${terms.specialistGenitive} уже есть запись на это время: ${localConflict.client}, ${timeKeyFromStartsAt(localConflict.startsAt, clinicTimeZone)}. Выберите другое время.`);
+      return;
+    }
+
+    submitLock.current = true;
+    let nextCalendarStartsAt = appointment.startsAt;
+    setSaving(true);
+    setConflictMessage("");
+    setScheduleMessage("");
+    try {
+    if (editingId) {
+      try {
+        const { unsaved, saved } = await patchAppointment(appointment, allowConflict, allowOutsideSchedule);
+        if (!isCurrentMutationScope()) return;
+        if (mutationScope.deniedIds.has(editingId.toLowerCase())) throw new AppointmentAccessRefusalError();
+        // Строка на экране — серверная, а не введённая: иначе несохранённые
+        // поля продолжали бы показываться сохранёнными до перезагрузки, и
+        // коллега на своём устройстве видел бы другую длительность визита.
+        if (saved) setItems((current) => current.map((item) => (item.id === editingId ? saved : item)));
+        if (unsaved.length > 0) warnAboutUnsaved(unsaved);
+        else toast.success("Запись обновлена");
+      } catch (error) {
+        if (!isCurrentMutationScope()) return;
+        if (error instanceof AppointmentAccessRefusalError || mutationScope.deniedIds.has(editingId.toLowerCase())) {
+          discardRefusedAppointment(editingId);
+          toast.error("Запись больше недоступна. Обновите список.");
+          return;
+        }
+        if (error instanceof SlotTakenError) {
+          setConflictMessage(describeConflict(error, terms, clinicTimeZone));
+          return;
+        }
+        if (error instanceof OutsideScheduleError) {
+          setScheduleMessage(describeSchedule(error, terms));
+          return;
+        }
+        // Та же честность, что и у статуса: отказ виден отказом, строка
+        // возвращается к серверной правде, детали — в консоль оператора.
+        console.warn("appointments: patch refused", error instanceof Error ? error.message : error);
+        toast.error(refusalText(error).replace("создать запись", "сохранить запись"));
+        return;
+      }
+    } else {
+      try {
+        const result = await createAppointment(appointment, allowConflict, allowOutsideSchedule);
+        if (!isCurrentMutationScope()) return;
+        // A recovered visit may have been rescheduled after the original commit.
+        nextCalendarStartsAt = result.startsAt;
+        toast.success(result.replayed ? "Запись уже сохранена. Повтор не создал дубликат." : result.clientCreated ? "Запись создана, клиент добавлен в базу" : "Запись создана");
+        if (result.leadId) {
+          if (prefillLeadRef.current === result.leadId) prefillLeadRef.current = "";
+          if (activeStatuses.includes(result.status)) void markLeadBooked(result.leadId);
+        }
+      } catch (error) {
+        if (!isCurrentMutationScope()) return;
+        if (error instanceof SlotTakenError) {
+          setConflictMessage(describeConflict(error, terms, clinicTimeZone));
+          return;
+        }
+        if (error instanceof OutsideScheduleError) {
+          setScheduleMessage(describeSchedule(error, terms));
+          return;
+        }
+        console.warn("appointments: create refused", error instanceof Error ? error.message : error);
+        if (error instanceof AppointmentCreateRecoveryError) { toast.error(error.message); return; }
+        toast.error(createAttempt.current?.uncertain
+          ? "Сохранение не подтверждено. Повторите проверку в этой форме."
+          : refusalText(error));
+        return;
+      }
+    }
+
+    if (!isCurrentMutationScope()) return;
+    setModalOpen(false);
+    setConflictMessage("");
+    setSelectedDate(dateKeyFromStartsAt(nextCalendarStartsAt, clinicTimeZone));
+    } finally {
+      if (isCurrentMutationScope()) {
+        submitLock.current = false;
+        setSaving(false);
+      }
+    }
+  };
+
+  const recoveryErrorNotice = createRecoveryError ? (
+    <div role="alert" className="my-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+      <p>{createRecoveryError}</p>
+      <button type="button" className="neu-btn mt-3 inline-flex items-center gap-2 text-sm" onClick={() => setCreateRecoveryRead((current) => current + 1)}>
+        <RotateCw size={16} aria-hidden="true" />Повторить чтение
+      </button>
+    </div>
+  ) : null;
+
+  const renderDay = () => (
+    <section className="neu-card">
+      <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-lg font-black text-[#0F172A]">Дневной таймлайн</h2>
+          <p className="text-sm text-[#64748B]">Рабочие слоты 09:00-21:00 с шагом 30 минут</p>
+        </div>
+        <span className="rounded-full bg-[#F8FAFC] px-3 py-1 text-xs font-bold text-[#64748B]">{dayAppointments.length} записей</span>
+      </div>
+      <div className="space-y-3">
+        {dayBuckets.outside.length ? (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+            <p className="text-sm font-black text-amber-900">
+              Вне сетки дня: {dayBuckets.outside.length}
+            </p>
+            <p className="mt-1 text-xs font-semibold text-amber-800">
+              Эти записи начинаются раньше 09:00, позже 21:00 или их время не удалось прочитать. Сетка их не
+              показывает, а счётчик считает — поэтому они здесь.
+            </p>
+            <ul className="mt-2 space-y-1 text-sm font-semibold text-amber-900">
+              {dayBuckets.outside.map((appointment) => (
+                <li key={appointment.id}>
+                  {timeKeyFromStartsAt(appointment.startsAt, clinicTimeZone)} · {appointment.client} · {appointment.doctor || `без ${terms.specialistGenitive}`}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        {/*
+          Подряд идущие пустые получасовки складываются в одну строку: день
+          салона с четырьмя записями был простынёй из двадцати одного блока
+          «Свободно», и запись на вечер жила за целым экраном скролла.
+        */}
+        {slots
+          .reduce<Array<
+            | { kind: "busy"; slot: string; appointments: Appointment[] }
+            | { kind: "occupied"; slot: string }
+            | { kind: "free"; first: string; last: string }
+          >>(
+            (segments, slot) => {
+              const busy = dayBuckets.buckets.get(slot) || [];
+              if (busy.length > 0) {
+                segments.push({ kind: "busy", slot, appointments: busy });
+                return segments;
+              }
+              if (dayBuckets.occupied.has(slot)) {
+                // Интервал продолжается из карточки выше. Ничего не дублируем,
+                // но разрываем диапазон «Свободно» на реальной границе визита.
+                segments.push({ kind: "occupied", slot });
+                return segments;
+              }
+              const previous = segments[segments.length - 1];
+              if (previous && previous.kind === "free") previous.last = slot;
+              else segments.push({ kind: "free", first: slot, last: slot });
+              return segments;
+            },
+            [],
+          )
+          .map((segment) =>
+            segment.kind === "occupied" ? null : segment.kind === "busy" ? (
+              <div key={segment.slot} className="grid gap-3 rounded-2xl bg-[#F8FAFC] p-3 md:grid-cols-[84px_minmax(0,1fr)]">
+                <div className="flex items-center justify-between gap-3 md:block">
+                  <p className="text-base font-black text-[#0F172A]">{segment.slot}</p>
+                  <button type="button" className="neu-btn px-3 py-2 text-xs md:mt-3" onClick={() => openCreate(selectedDate, segment.slot)}>
+                    <Plus size={14} />
+                    Записать
+                  </button>
+                </div>
+                <div className="space-y-3">
+                  {segment.appointments.map((appointment) => (
+                    <AppointmentCard key={appointment.id} appointment={appointment} timeZone={clinicTimeZone} onEdit={openEdit} onStatus={updateAppointmentStatus} onSale={startSaleFromAppointment} />
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <button
+                key={`free-${segment.first}`}
+                type="button"
+                className="flex w-full items-center justify-between gap-3 rounded-2xl border border-dashed border-[#CBD5E1] bg-white/70 px-4 py-3 text-left text-sm font-semibold text-[#64748B]"
+                onClick={() => openCreate(selectedDate, segment.first)}
+              >
+                <span>Свободно {segment.first === segment.last ? segment.first : `${segment.first} – ${segment.last}`}</span>
+                {/* Время в кнопке: диапазон схлопнут, и без него было бы
+                    непонятно, на какую получасовку откроется форма. */}
+                <span className="inline-flex items-center gap-1 whitespace-nowrap font-bold text-[#0D9488]">
+                  <Plus size={14} />
+                  Записать на {segment.first}
+                </span>
+              </button>
+            ),
+          )}
+      </div>
+    </section>
+  );
+
+  const renderWeek = () => (
+    <section className="grid gap-3 xl:grid-cols-7">
+      {weekDays.map((day) => {
+        const dayItems = filteredItems.filter((appointment) => isOnDay(appointment, day, clinicTimeZone));
+        return (
+          <article key={day} className="neu-card p-4">
+            <div className="flex items-start justify-between gap-3 xl:block">
+              <div>
+                <h3 className="text-base font-black capitalize text-[#0F172A]">{formatShortDate(day)}</h3>
+                <p className="mt-1 text-sm text-[#64748B]">{dayItems.length} записей</p>
+              </div>
+              <button
+                type="button"
+                className="neu-btn px-3 py-2 text-xs xl:mt-4 xl:w-full"
+                onClick={() => {
+                  setSelectedDate(day);
+                  setView("day");
+                }}
+              >
+                Открыть день
+              </button>
+            </div>
+            <div className="mt-4 space-y-2">
+              {dayItems.slice(0, 3).map((appointment) => (
+                <button key={appointment.id} type="button" className="w-full rounded-xl bg-[#F8FAFC] px-3 py-2 text-left" onClick={() => openEdit(appointment)}>
+                  <p className="text-sm font-black text-[#1A56DB]">{timeKeyFromStartsAt(appointment.startsAt, clinicTimeZone)}</p>
+                  <p className="truncate text-sm font-bold text-[#0F172A]">{appointment.client}</p>
+                  <p className="truncate text-xs text-[#64748B]">{appointment.service}</p>
+                </button>
+              ))}
+              {dayItems.length === 0 ? (
+                <div className="rounded-xl bg-[#F8FAFC] px-3 py-3">
+                  <p className="text-sm text-[#94A3B8]">Свободный день</p>
+                  {/* «Открыла — пусто» мастер читает как «мои записи пропали»,
+                      хотя запись есть — завтра. Ближайшая называется прямо
+                      здесь, с переходом на её день: живой случай Айданы и
+                      Дильназ — обе «не видели свои записи», у обеих ближайшая
+                      стояла назавтра. */}
+                  {nextAppointment ? (
+                    <button
+                      type="button"
+                      className="mt-1 text-sm font-black"
+                      style={{ color: "var(--negis-primary)" }}
+                      onClick={() => setSelectedDate(dateKeyFromStartsAt(nextAppointment.startsAt, clinicTimeZone))}
+                    >
+                      Ближайшая запись — {formatVisitDay(nextAppointment.startsAt, clinicTimeZone)} в {timeKeyFromStartsAt(nextAppointment.startsAt, clinicTimeZone)} · открыть
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </article>
+        );
+      })}
+    </section>
+  );
+
+  const renderList = () => (
+    <section className="neu-card">
+      <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-lg font-black text-[#0F172A]">Список недели</h2>
+          <p className="text-sm text-[#64748B]">Сортировка по времени, фильтры и поиск применяются автоматически</p>
+        </div>
+        <span className="rounded-full bg-[#F8FAFC] px-3 py-1 text-xs font-bold text-[#64748B]">{weekAppointments.length} записей</span>
+      </div>
+      <div className="space-y-3">
+        {weekAppointments.map((appointment) => (
+          <AppointmentCard key={appointment.id} appointment={appointment} timeZone={clinicTimeZone} onEdit={openEdit} onStatus={updateAppointmentStatus} onSale={startSaleFromAppointment} />
+        ))}
+        {weekAppointments.length === 0 ? <p className="rounded-2xl bg-[#F8FAFC] p-4 text-sm text-[#64748B]">Записей по выбранным фильтрам нет.</p> : null}
+      </div>
+    </section>
+  );
+
+  return (
+    <PageLayout>
+      {clinicTimeZone && deviceTimeZone && clinicTimeZone !== deviceTimeZone ? (
+        <div className="mb-4 rounded-2xl bg-amber-50 p-4 text-sm font-semibold text-amber-800">
+          Время {terms.orgGenitive}: {clinicTimeZone}. Часовой пояс устройства: {deviceTimeZone}.
+        </div>
+      ) : null}
+      {!clinicTimeZone && scheduleReadable ? (
+        <div className="mb-4 rounded-2xl bg-slate-100 p-4 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
+          Часовой пояс {terms.orgGenitive} не задан — график {terms.specialistGenitivePlural} при записи не применяется.
+        </div>
+      ) : null}
+      {!scheduleReadable ? (
+        <div className="mb-4 rounded-2xl bg-amber-50 p-4 text-sm font-semibold text-amber-800">
+          Не удалось прочитать график {terms.specialistGenitivePlural}. Это не значит, что его нет: подсказки под временем могут быть неполными,
+          а сервер всё равно проверит запись по своему графику.
+        </div>
+      ) : null}
+      <div className="space-y-7">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#64748B]">Medina CRM</p>
+            <h1 className="mt-2 break-words text-2xl font-black text-[#0F172A] sm:text-3xl">Запись</h1>
+            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[#64748B]">
+              Календарь приёмов, статусы визитов и быстрые действия ресепшена
+            </p>
+          </div>
+          <button type="button" className="neu-btn-primary inline-flex w-full items-center justify-center gap-2 px-5 py-2.5 text-sm sm:w-auto" onClick={() => openCreate(selectedDate, "09:00")}>
+            <Plus size={16} />
+            Создать запись
+          </button>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <MetricCard label="Сегодня записей" value={todayAppointments.length} icon={CalendarCheck} tone="primary" accent />
+          <MetricCard label="Подтверждено" value={todayAppointments.filter((item) => item.status === "confirmed").length} icon={CheckCircle2} tone="success" />
+          <MetricCard label="Ждут подтверждения" value={todayAppointments.filter((item) => item.status === "scheduled").length} icon={Clock3} tone="warning" />
+          <MetricCard label="Не пришли" value={todayAppointments.filter((item) => item.status === "no_show").length} icon={UserCheck} tone="error" />
+        </div>
+
+        <section className="neu-card">
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px] xl:items-start">
+            <div className="min-w-0 space-y-4">
+              <div role="group" aria-label="Выбор даты записи" className="flex min-w-0 flex-wrap items-center gap-3">
+                <div className="grid w-full min-w-0 max-w-sm shrink-0 grid-cols-[44px_minmax(0,1fr)_44px] items-center gap-2">
+                  <button type="button" className="neu-icon-btn" onClick={() => setSelectedDate(addDaysKey(selectedDate, -1))} aria-label="Предыдущий день">
+                    <ChevronLeft size={18} />
+                  </button>
+                  <time dateTime={selectedDate} aria-live="polite" className="flex min-h-16 min-w-0 items-center justify-center rounded-lg bg-[#F8FAFC] px-2 py-2 text-center text-sm font-black capitalize text-[#0F172A] [overflow-wrap:normal]">{formatDateLabel(selectedDate)}</time>
+                  <button type="button" className="neu-icon-btn" onClick={() => setSelectedDate(addDaysKey(selectedDate, 1))} aria-label="Следующий день">
+                    <ChevronRight size={18} />
+                  </button>
+                </div>
+                <div className="flex w-full min-w-0 max-w-sm items-center gap-2">
+                  <input aria-label="Дата календаря" className="neu-input min-w-0 flex-1" type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value || selectedDate)} />
+                  {/* Возврат к сегодняшнему дню именно в поясе клиники. */}
+                  <button
+                    type="button"
+                    className={`neu-btn shrink-0 px-3 py-2 text-sm ${selectedDate === todayKey ? "text-[#0D9488]" : ""}`}
+                    onClick={() => setSelectedDate(todayKey)}
+                    disabled={selectedDate === todayKey}
+                  >
+                    Сегодня
+                  </button>
+                </div>
+              </div>
+              <div role="group" aria-label="Вид календаря" className="flex flex-wrap gap-2 sm:max-w-lg">
+                {((seesWholeClinic ? ["grid", "day", "week", "month", "list"] : ["day", "week", "month", "list"]) as CalendarView[]).map((mode) => (
+                  <button key={mode} type="button" aria-pressed={view === mode} className={`neu-btn min-w-[88px] flex-1 whitespace-nowrap px-2 py-2 text-sm ${view === mode ? "text-[#0D9488]" : ""}`} onClick={() => setView(mode)}>
+                    {viewLabels[mode]}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-2xl bg-[#F8FAFC] p-4">
+              <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Следующая запись</p>
+              {nextAppointment ? (
+                <div className="mt-3">
+                  <p className="text-lg font-black text-[#0F172A]">{timeKeyFromStartsAt(nextAppointment.startsAt, clinicTimeZone)} · {nextAppointment.client}</p>
+                  <p className="mt-1 text-sm text-[#64748B]">{nextAppointment.service}</p>
+                  <a className="neu-btn mt-3 w-full px-3 py-2 text-xs" href={toWhatsappHref(nextAppointment.whatsapp || nextAppointment.phone, `Здравствуйте, ${nextAppointment.client}! Напоминаем о записи.`)} target="_blank" rel="noreferrer">
+                    <MessageCircle size={14} />
+                    WhatsApp
+                  </a>
+                </div>
+              ) : !loaded || loadError ? (
+                // «Ближайших записей нет» на отказе чтения — та же ложь, что и
+                // пустая сетка, только в самом читаемом месте экрана.
+                <p className="mt-3 text-sm font-semibold text-[#94A3B8]">{loadError ? "Не загрузилось — не значит «нет»" : "Загружаем…"}</p>
+              ) : (
+                <p className="mt-3 text-sm text-[#94A3B8]">Ближайших активных записей нет</p>
+              )}
+            </div>
+          </div>
+        </section>
+
+        <section className="neu-card">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[1fr_1fr_1fr_1.5fr]">
+            {/* Мастеру фильтр по специалисту не показывается: сервер отдаёт
+                ему только его собственные записи, и список из одного имени
+                выглядел бы поломкой, а не фильтром. */}
+            {userRole !== "doctor" ? (
+              <SelectField label={`Все ${terms.specialistPlural}`} value={doctorFilter} onChange={setDoctorFilter}>
+                <option value="all">Все {terms.specialistPlural}</option>
+                {doctors.map((doctor) => <option key={doctor} value={doctor}>{doctor}</option>)}
+              </SelectField>
+            ) : null}
+            <SelectField label="Статус" value={statusFilter} onChange={setStatusFilter}>
+              <option value="all">Все статусы</option>
+              {statusOptions.map((status) => <option key={status} value={status}>{getAppointmentStatusLabel(status)}</option>)}
+            </SelectField>
+            <SelectField label="Услуга" value={serviceFilter} onChange={setServiceFilter}>
+              <option value="all">Все услуги</option>
+              {services.map((service) => <option key={service} value={service}>{service}</option>)}
+            </SelectField>
+            <label className="relative block">
+              <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Поиск клиента/телефона</span>
+              <Search className="absolute bottom-3 left-3 text-[#94A3B8]" size={16} />
+              <input className="neu-input w-full pl-10" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Имя, телефон или WhatsApp" />
+            </label>
+          </div>
+        </section>
+
+        {/*
+          Сбой чтения — не пустой день, и путать их здесь дороже всего в
+          продукте: по этому экрану отпускают мастера домой и говорят
+          пришедшему «свободно, заходите». Пустая сетка и «0 записей»
+          выглядят как свободный день, а тост про ошибку живёт четыре
+          секунды и исчезает, пока телефон в кармане.
+        */}
+        {loadError ? (
+          <section className="negis-glass p-4" style={{ borderLeft: "4px solid #dc2626" }} aria-live="assertive">
+            <p className="text-sm font-black" style={{ color: "#b91c1c" }}>
+              Не удалось загрузить записи
+            </p>
+            <p className="mt-1 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
+              Это сбой связи, а не свободный день: записи на месте. Не записывайте клиентов поверх —
+              обновите страницу.
+            </p>
+            <button type="button" className="neu-btn-primary mt-3 justify-center" onClick={() => window.location.reload()}>
+              Обновить страницу
+            </button>
+          </section>
+        ) : null}
+
+        {!loaded ? (
+          <section className="negis-glass flex min-h-40 items-center justify-center p-8" aria-live="polite">
+            <p className="text-sm font-bold" style={{ color: "var(--negis-muted)" }}>Загружаем записи…</p>
+          </section>
+        ) : null}
+
+        {loaded && !loadError && view === "grid" && seesWholeClinic ? (
+          <MasterDayGrid
+            dateKey={selectedDate}
+            isoWeekday={isoWeekdayOf(selectedDate)}
+            timeZone={clinicTimeZone}
+            // Фильтр «Все мастера» сужает и колонки: одна колонка крупно —
+            // это и есть режим «посмотреть день одного мастера». Записи он
+            // уже сужает через filteredItems, колонки должны совпадать.
+            doctors={(doctorFilter === "all"
+              ? activeDoctors
+              : activeDoctors.filter((doctor) => doctor.fullName === doctorFilter)
+            ).map((doctor) => ({ id: doctor.id, fullName: doctor.fullName, specialty: doctor.specialty }))}
+            shifts={shifts.map((shift) => ({
+              doctorId: shift.doctorId,
+              weekday: shift.weekday,
+              onDate: shift.onDate,
+              onDateEnd: shift.onDateEnd,
+              isWorking: shift.isWorking,
+              startMinute: shift.startMinute,
+              endMinute: shift.endMinute,
+            }))}
+            appointments={dayAppointments}
+            nowMinute={selectedDate === todayKey ? minuteOfClinicDay(new Date().toISOString(), clinicTimeZone) : null}
+            onOpen={(id) => {
+              const appointment = items.find((entry) => entry.id === id);
+              if (appointment) openEdit(appointment);
+            }}
+            onQuickStatus={(id, status) => {
+              // Та же операция, что кнопки статуса в списке: оптимистичная
+              // смена, откат и честный тост при отказе сервера — всё уже
+              // внутри updateAppointmentStatus.
+              const appointment = items.find((entry) => entry.id === id);
+              if (appointment) void updateAppointmentStatus(appointment, status);
+            }}
+            onCreate={({ doctorId, doctorName, time }) => {
+              if (!openCreate(selectedDate, time)) return;
+              // Мастер известен точнее, чем через фильтр: ткнули в его колонку.
+              // Подставляется ПОСЛЕ openCreate — тот собирает форму заново.
+              if (doctorId || doctorName) {
+                setForm((current) => ({ ...current, doctorId, doctor: doctorName }));
+              }
+            }}
+            specialistPlural={terms.specialistPlural}
+          />
+        ) : null}
+        {loaded && !loadError && view === "month" ? (
+          <section className="neu-card">
+            {(() => {
+              const [year, month] = selectedDate.split("-").map(Number);
+              if (!year || !month) return null;
+              const first = new Date(Date.UTC(year, month - 1, 1));
+              const firstWeekday = first.getUTCDay() || 7;
+              const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+              const monthLabel = first.toLocaleDateString("ru-RU", { month: "long", year: "numeric", timeZone: "UTC" });
+
+              // Счётчик обязан совпадать с тем, что покажет клик по клетке:
+              // тот же список (filteredItems — фильтры статуса и мастера уже
+              // применены; отдельного среза по «живым» статусам нет, иначе
+              // фильтр «Отменено» рисовал бы пустой месяц) и тот же календарь
+              // — день по часам САЛОНА, не устройства. Нечитаемая дата — это
+              // «не знаю», а не «сегодня».
+              const countByDay = new Map<string, number>();
+              for (const appointment of filteredItems) {
+                const instant = Date.parse(appointment.startsAt);
+                if (!Number.isFinite(instant)) continue;
+                const key = dayKeyInZone(instant, clinicTimeZone);
+                if (key.startsWith(`${year}-${String(month).padStart(2, "0")}`)) {
+                  countByDay.set(key, (countByDay.get(key) ?? 0) + 1);
+                }
+              }
+
+              const cells: Array<{ key: string; day: number } | null> = [];
+              for (let blank = 1; blank < firstWeekday; blank += 1) cells.push(null);
+              for (let day = 1; day <= daysInMonth; day += 1) {
+                cells.push({ key: `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`, day });
+              }
+
+              const shiftMonth = (delta: number) => {
+                const target = new Date(Date.UTC(year, month - 1 + delta, 1));
+                setSelectedDate(`${target.getUTCFullYear()}-${String(target.getUTCMonth() + 1).padStart(2, "0")}-01`);
+              };
+
+              return (
+                <div>
+                  <div className="mb-3 flex items-center justify-between">
+                    <button type="button" className="neu-btn px-3 py-2 text-sm" aria-label="Предыдущий месяц" onClick={() => shiftMonth(-1)}>‹</button>
+                    <p className="text-base font-black capitalize text-[#0F172A]">{monthLabel}</p>
+                    <button type="button" className="neu-btn px-3 py-2 text-sm" aria-label="Следующий месяц" onClick={() => shiftMonth(1)}>›</button>
+                  </div>
+                  <div className="grid grid-cols-7 gap-1 text-center">
+                    {["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"].map((weekday) => (
+                      <span key={weekday} className="py-1 text-[11px] font-black uppercase tracking-[0.1em] text-[#94A3B8]">{weekday}</span>
+                    ))}
+                    {cells.map((cell, index) =>
+                      cell === null ? (
+                        <span key={`blank-${index}`} />
+                      ) : (
+                        <button
+                          key={cell.key}
+                          type="button"
+                          className="flex min-h-16 flex-col items-center justify-start rounded-xl p-1.5"
+                          style={{
+                            background: cell.key === todayKey ? "rgba(13,148,136,0.10)" : "var(--negis-surface, #F8FAFC)",
+                            outline: cell.key === selectedDate ? "2px solid var(--negis-primary)" : "none",
+                          }}
+                          onClick={() => {
+                            setSelectedDate(cell.key);
+                            // День открывается тем видом, который у роли главный.
+                            setView(seesWholeClinic ? "grid" : "day");
+                          }}
+                        >
+                          <span className="text-sm font-black tabular-nums text-[#0F172A]">{cell.day}</span>
+                          {countByDay.get(cell.key) ? (
+                            <span className="mt-1 rounded-full px-1.5 py-0.5 text-[10px] font-black text-white" style={{ background: "var(--negis-primary)" }}>
+                              {countByDay.get(cell.key)}
+                            </span>
+                          ) : null}
+                        </button>
+                      ),
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+          </section>
+        ) : null}
+
+        {loaded && !loadError && view === "day" ? renderDay() : null}
+        {loaded && !loadError && view === "week" ? renderWeek() : null}
+        {loaded && !loadError && view === "list" ? renderList() : null}
+      </div>
+
+      {!modalOpen ? recoveryErrorNotice : null}
+      {modalOpen ? (
+        <div className="fixed inset-0 z-[80] flex items-end bg-slate-950/35 p-3 sm:items-center sm:justify-center" onClick={closeAppointmentForm}>
+          <form
+            className="max-h-[calc(100dvh-32px)] w-full overflow-y-auto rounded-[28px] border border-[#DBE8E0] bg-white p-5 shadow-2xl sm:max-w-3xl sm:p-6"
+            onClick={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitForm(false);
+            }}
+          >
+            <div className="mb-5 flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#64748B]">{editingId ? "Редактирование" : "Новая запись"}</p>
+                <h2 className="mt-1 text-xl font-black text-[#0F172A]">{editingId ? "Карточка записи" : "Создать запись"}</h2>
+              </div>
+              <button type="button" className="neu-icon-btn" onClick={closeAppointmentForm} disabled={saving || unconfirmedCreate} aria-label="Закрыть">
+                <X size={18} />
+              </button>
+            </div>
+
+            {!editingId ? recoveryErrorNotice : null}
+            <fieldset className="grid min-w-0 gap-4 border-0 p-0 md:grid-cols-2" disabled={saving || unconfirmedCreate}>
+              <div>
+                {/* Смена имени или телефона снимает унаследованную связь: форма,
+                    открытая из заявки Лауры, в которую вписали другого человека,
+                    иначе сохранила бы визит в карточку Лауры. Ложная связь в
+                    медицинской истории хуже потерянной; сигнал оператору —
+                    исчезающая строка «Будет привязана…». */}
+                <TextField
+                  label="Клиент/имя"
+                  value={form.client}
+                  onChange={(client) => setForm((current) => editAppointmentClient(current, "client", client))}
+                  placeholder="Начните вводить имя"
+                />
+                {form.clientId ? (
+                  <p className="mt-1 text-[11px] font-semibold" style={{ color: "var(--negis-primary)" }} data-testid="appointment-client-linked">
+                    Клиент найден. История визитов загружается по его карточке.
+                  </p>
+                ) : null}
+                {!form.clientId && userRole !== "doctor" && form.client.trim().length >= 2 ? (
+                  <div className="mt-2" data-testid="appointment-client-search-results">
+                    {clientSearchLoading ? (
+                      <p className="text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>Ищем клиента…</p>
+                    ) : clientSearchFailed ? (
+                      <p className="text-xs font-semibold text-amber-700">Не удалось проверить базу клиентов. Повторите поиск.</p>
+                    ) : clientMatches.length > 0 ? (
+                      <div className="space-y-1">
+                        {clientMatches.map((client) => (
+                          <button
+                            key={client.id}
+                            type="button"
+                            className="block w-full rounded-xl px-3 py-2 text-left text-sm font-black"
+                            style={{ background: "var(--negis-border)", color: "var(--negis-text)" }}
+                            onClick={() => {
+                              setForm((current) => selectAppointmentClient(current, client));
+                              setClientMatches([]);
+                            }}
+                          >
+                            {client.name}
+                            {client.phone ? (
+                              <span className="block text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>{formatPhone(client.phone)}</span>
+                            ) : null}
+                          </button>
+                        ))}
+                      </div>
+                    ) : clientSearchAttempted ? (
+                      <p className="text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
+                        Новый клиент будет добавлен в базу после сохранения записи.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+              {/* Мастеру поле не показывается: сервер контакты срезает, и
+                  пустое поле «Телефон» выглядело бы как потерянные данные, а
+                  введённый в него номер всё равно не сохранился бы. */}
+              {userRole !== "doctor" && (
+              <TextField label="Телефон" value={form.phone} onChange={(phone) => setForm((current) => editAppointmentClient(current, "phone", phone))} placeholder="+7..." />
+              )}
+              <TextField label="WhatsApp" value={form.whatsapp} onChange={(whatsapp) => setForm((current) => editAppointmentClient(current, "whatsapp", whatsapp))} placeholder="+7..." />
+              {/*
+                Мастер стоит ПЕРВЫМ — как в запись.кз: сначала «к кому», потом
+                «на что». Выбор мастера сужает прайс до его услуг плюс общих,
+                и перебирать все сто двадцать девять строк больше не нужно.
+              */}
+              {/*
+                Раньше это был закрытый список из четырёх выдуманных имён:
+                нового врача через форму записи ввести было нельзя вообще.
+                Теперь — справочник со свободным вводом как откатом, ровно как
+                у услуги. Пока справочник пуст или не включён, поле выглядит и
+                работает как обычный текстовый ввод.
+              */}
+              {/* Мастер записывает только к себе, и решает это сервер: он
+                  подставляет запись на того, кто её создаёт, а просьбу
+                  записать к коллеге отклоняет вслух. Показывать здесь выбор
+                  значило бы предлагать действие, которое кончится отказом. */}
+              {userRole === "doctor" ? null : activeDoctors.length > 0 ? (
+                <div>
+                  <label className="mb-2 block">
+                    <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">
+                      Поиск {terms.specialistGenitive}
+                    </span>
+                    <input
+                      className="neu-input w-full"
+                      type="search"
+                      placeholder={`Начните вводить имя ${terms.specialistGenitive}`}
+                      value={doctorSearch}
+                      onChange={(event) => setDoctorSearch(event.target.value)}
+                    />
+                  </label>
+                  {doctorSearch.trim() ? (
+                    <div className="mb-2 space-y-1" data-testid="appointment-doctor-search-results">
+                      {doctorMatches.length === 0 ? (
+                        <p className="text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
+                          Такой {terms.specialist} не найден — проверьте имя или выберите из списка.
+                        </p>
+                      ) : (
+                        doctorMatches.map((doctor) => (
+                          <button
+                            key={doctor.id}
+                            type="button"
+                            className="block w-full rounded-xl px-3 py-2 text-left text-sm font-black"
+                            style={{ background: "var(--negis-border)", color: "var(--negis-text)" }}
+                            onClick={() => {
+                              setDoctorSearch("");
+                              setForm((current) => ({ ...current, doctorId: doctor.id, doctor: doctor.fullName }));
+                            }}
+                          >
+                            {doctor.fullName}
+                            {doctor.specialty ? (
+                              <span className="font-semibold" style={{ color: "var(--negis-muted)" }}> — {doctor.specialty}</span>
+                            ) : null}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  ) : null}
+                  <SelectField
+                    label={capitalize(terms.specialist)}
+                    value={form.doctorId || OTHER_SERVICE_OPTION}
+                    onChange={(value) => {
+                      if (value === OTHER_SERVICE_OPTION) {
+                        setForm((current) => ({
+                          ...current,
+                          doctorId: "",
+                          doctor: "",
+                          serviceId: "",
+                          service: "",
+                          additionalServices: [],
+                          priceTenge: "",
+                        }));
+                        return;
+                      }
+                      const doctor = activeDoctors.find((item) => item.id === value);
+                      if (!doctor) return;
+                      // Снимок имени ставит форма, а не сервер: оба пишущих
+                      // пути шлют объект целиком, и серверная перезапись
+                      // затирала бы поправленное вручную имя на каждом
+                      // сохранении.
+                      setDoctorSearch("");
+                      setForm((current) => ({ ...current, doctorId: doctor.id, doctor: doctor.fullName }));
+                    }}
+                  >
+                    {activeDoctors.map((doctor) => (
+                      <option key={doctor.id} value={doctor.id}>
+                        {doctor.specialty ? `${doctor.fullName} — ${doctor.specialty}` : doctor.fullName}
+                      </option>
+                    ))}
+                    {/* Врач записи мог уехать в архив после того, как её
+                        завели. Без этого варианта поле рисовалось бы пустым, а
+                        один случайный клик переписал бы и связь, и имя. */}
+                    {form.doctorId && !activeDoctors.some((doctor) => doctor.id === form.doctorId) ? (
+                      <option value={form.doctorId}>{form.doctor || `${capitalize(terms.specialist)} скрыт`}</option>
+                    ) : null}
+                    <option value={OTHER_SERVICE_OPTION}>Другой {terms.specialist}…</option>
+                  </SelectField>
+                  {/* Имя видно всегда: в записи хранится снимок на момент
+                      визита, и переименование врача не меняет того, что
+                      записано в карточке. */}
+                  <div className="mt-2">
+                    <TextField
+                      label={`Имя ${terms.specialistGenitive} в записи`}
+                      value={form.doctor}
+                      onChange={(doctor) => setForm((current) => ({ ...current, doctor }))}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <TextField
+                  label={capitalize(terms.specialist)}
+                  value={form.doctor}
+                  onChange={(doctor) => setForm((current) => ({ ...current, doctor, doctorId: "" }))}
+                />
+              )}
+              {/*
+                Услуга выбирается из справочника, но свободный ввод остаётся:
+                регистратор за стойкой не должен упираться в отсутствующую
+                строку каталога. Пока каталог пуст — а до применения миграции
+                032 он пуст всегда — поле выглядит ровно как раньше.
+              */}
+              {mustChooseDoctorBeforeService ? (
+                <div data-testid="appointment-service-waiting-for-doctor">
+                  <label className="block">
+                    <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Услуга</span>
+                    <input
+                      className="neu-input w-full cursor-not-allowed opacity-70"
+                      type="text"
+                      disabled
+                      value=""
+                      placeholder={`Сначала выберите ${terms.specialistGenitive}`}
+                    />
+                  </label>
+                  {serviceScopeHint}
+                </div>
+              ) : activeCatalog.length > 0 ? (
+                <div>
+                  <label className="mb-2 block">
+                    <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Поиск услуги</span>
+                    <input
+                      className="neu-input w-full"
+                      type="search"
+                      placeholder="Начните вводить: маникюр, стрижка…"
+                      value={serviceSearch}
+                      onChange={(event) => setServiceSearch(event.target.value)}
+                    />
+                  </label>
+                  {serviceSearch.trim() ? (
+                    <div className="mb-2 space-y-1">
+                      {serviceSearchDoctorMatches.map((doctor) => (
+                        <button
+                          key={`doctor-${doctor.id}`}
+                          type="button"
+                          className="block w-full rounded-xl px-3 py-2 text-left text-sm font-black"
+                          style={{ background: "var(--negis-border)", color: "var(--negis-text)" }}
+                          onClick={() => {
+                            setServiceSearch("");
+                            setDoctorSearch("");
+                            setForm((current) => ({ ...current, doctorId: doctor.id, doctor: doctor.fullName }));
+                          }}
+                        >
+                          {doctor.fullName} — показать услуги
+                          {doctor.specialty ? (
+                            <span className="block text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>{doctor.specialty}</span>
+                          ) : null}
+                        </button>
+                      ))}
+                      {serviceMatches.length === 0 && serviceSearchDoctorMatches.length === 0 ? (
+                        <p className="text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
+                          Не нашлось ни услуги, ни мастера — проверьте написание или выберите из списка ниже.
+                        </p>
+                      ) : null}
+                      {serviceMatches.map((service) => {
+                          const price = service.basePriceMinor === null ? "" : ` — ${formatArrivalPrice(String(service.basePriceMinor), "KZT")}`;
+                          const length = service.durationMinutes ? ` · ${service.durationMinutes} мин` : "";
+                          return (
+                            <button
+                              key={service.id}
+                              type="button"
+                              disabled={form.additionalServices.some(item => item.serviceId === service.id)}
+                              className="block w-full rounded-xl px-3 py-2 text-left text-sm font-black"
+                              style={{ background: "var(--negis-border)", color: "var(--negis-text)" }}
+                              onClick={() => {
+                                setServiceScopeNotice("");
+                                setServiceSearch("");
+                                setForm((current) => ({
+                                  ...current,
+                                  serviceId: service.id,
+                                  service: service.name,
+                                  durationMinutes: service.durationMinutes ?? current.durationMinutes,
+                                  priceTenge: service.basePriceMinor === null ? "" : String(service.basePriceMinor / 100),
+                                }));
+                              }}
+                            >
+                              {service.name}
+                              <span className="font-semibold" style={{ color: "var(--negis-muted)" }}>{price}{length}</span>
+                            </button>
+                          );
+                        })}
+                    </div>
+                  ) : null}
+                  <SelectField
+                    label="Услуга"
+                    value={form.serviceId || OTHER_SERVICE_OPTION}
+                    onChange={(value) => {
+                      // Оператор выбрал услугу сам — подпись про снятую связь
+                      // больше ничего не объясняет.
+                      setServiceScopeNotice("");
+                      if (value === OTHER_SERVICE_OPTION) {
+                        // Цена принадлежала снятой услуге: оставить её значило
+                        // бы продать «другую услугу» по чужому прайсу.
+                        setForm((current) => ({ ...current, serviceId: "", priceTenge: "" }));
+                        return;
+                      }
+                      const service = activeCatalog.find((item) => item.id === value);
+                      if (!service) return;
+                      // Снимок названия ставит форма, а не сервер: оба пишущих
+                      // пути шлют объект целиком, и серверная перезапись
+                      // затирала бы поправленный вручную текст на каждом
+                      // сохранении, а не только при смене услуги.
+                      setForm((current) => ({
+                        ...current,
+                        serviceId: service.id,
+                        service: service.name,
+                        durationMinutes: service.durationMinutes ?? current.durationMinutes,
+                        // Цена из прайса — подсказка, не приговор: поле ниже
+                        // остаётся редактируемым, скидку вписывают поверх.
+                        priceTenge: service.basePriceMinor === null ? "" : String(service.basePriceMinor / 100),
+                      }));
+                    }}
+                  >
+                    {activeCatalog.map((service) => {
+                      const price = service.basePriceMinor === null ? "" : ` — ${formatArrivalPrice(String(service.basePriceMinor), "KZT")}`;
+                      const length = service.durationMinutes ? ` · ${service.durationMinutes} мин` : "";
+                      return (
+                        <option key={service.id} value={service.id} disabled={form.additionalServices.some(item => item.serviceId === service.id)}>{`${service.name}${price}${length}`}</option>
+                      );
+                    })}
+                    {/* Услуга записи могла уехать в архив после того, как её
+                        записали. Без этого варианта список не содержал бы
+                        выбранного значения: поле рисовалось бы пустым, а один
+                        случайный клик по нему переписал бы и связь, и снимок
+                        названия на другую услугу. */}
+                    {form.serviceId && !activeCatalog.some((service) => service.id === form.serviceId) ? (
+                      <option value={form.serviceId}>{form.service || "Услуга скрыта"}</option>
+                    ) : null}
+                    <option value={OTHER_SERVICE_OPTION}>Другая услуга…</option>
+                  </SelectField>
+                  {serviceScopeHint}
+                  {/* Название видно всегда: связь ссылается на строку каталога,
+                      а в записи хранится снимок на момент визита, и переименование
+                      услуги не должно менять того, что записано в карточке. */}
+                  <div className="mt-2">
+                    <TextField
+                      label="Название услуги в записи"
+                      value={form.service}
+                      onChange={(service) => setForm((current) => ({ ...current, service }))}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <TextField label="Услуга" value={form.service} onChange={(service) => setForm((current) => ({ ...current, service, serviceId: "" }))} />
+                  {serviceScopeHint}
+                </div>
+              )}
+              <TextField label="Дата" type="date" value={form.date} onChange={(date) => setForm((current) => ({ ...current, date }))} />
+              <div>
+                <TextField label="Время начала" type="time" value={form.time} onChange={(time) => setForm((current) => ({ ...current, time }))} />
+                {/* Единственное место, где продукт признаёт, что для этого
+                    врача правило не работает вовсе. */}
+                {form.doctorId ? (
+                  <p className="mt-1 text-[11px] font-semibold" style={{ color: "var(--negis-muted)" }}>
+                    {describeDoctorDay(shifts, form.doctorId, form.date, terms)}
+                  </p>
+                ) : null}
+              </div>
+
+              {/* Свободное время — как в запись.кз: нажал и время встало. */}
+              {formSlots ? (
+                <div className="md:col-span-2">
+                  <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Свободное время</span>
+                  {formSlots.reason ? (
+                    <p className="text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
+                      {formSlots.reason === "закрыт"
+                        ? "День закрыт: выходной или закрытое окно. Время можно вписать вручную — сервер предупредит."
+                        : formSlots.reason === "день кончился"
+                          ? "Рабочий день уже закончился — на сегодня времени не осталось. Выберите другую дату."
+                          : formSlots.reason === "не помещается"
+                            ? "Услуга такой длительности не помещается в рабочее окно этого дня."
+                            : "Свободного времени не осталось — всё занято записями."}
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {formSlots.groups.map((group) => (
+                        <div key={group.label} className="flex flex-wrap items-center gap-1.5">
+                          <span className="w-14 flex-none text-[11px] font-black uppercase tracking-[0.1em]" style={{ color: "var(--negis-muted)" }}>
+                            {group.label}
+                          </span>
+                          {group.slots.map((slot) => {
+                            const value = formatSlot(slot);
+                            const selected = form.time === value;
+                            return (
+                              <button
+                                key={slot}
+                                type="button"
+                                className="rounded-lg px-2.5 py-1.5 text-sm font-black tabular-nums"
+                                style={selected
+                                  ? { background: "var(--negis-primary)", color: "#fff" }
+                                  : { background: "var(--negis-border)", color: "var(--negis-text)" }}
+                                onClick={() => setForm((current) => ({ ...current, time: value }))}
+                              >
+                                {value}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : null}
+              <div>
+                <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">{form.additionalServices.length ? "Первая услуга: длительность, минут" : "Длительность, минут"}</span>
+                {/* Свободное число, а не четыре варианта: воск идёт 5 минут,
+                    VIP-комплекс — 2 часа, и оба должны выражаться честно.
+                    От длительности зависят свободные слоты и проверка
+                    пересечений — врать ей нельзя. */}
+                {/* Кламп — на потере фокуса и при отправке, НЕ на каждом
+                    нажатии: покстрочный кламп превращал «45» в 55 («4» → 5,
+                    затем дописанная «5»). Пределы 1..600 — как у каталога
+                    услуг: услуга на 47 минут легальна и не должна блокировать
+                    отправку формы. */}
+                <input
+                  className="neu-input w-full"
+                  type="number"
+                  min={1}
+                  max={600}
+                  step={1}
+                  value={form.durationMinutes || ""}
+                  onChange={(event) => {
+                    const minutes = Math.round(Number(event.target.value) || 0);
+                    setForm((current) => ({ ...current, durationMinutes: minutes }));
+                  }}
+                  onBlur={() => {
+                    setForm((current) => ({
+                      ...current,
+                      durationMinutes: Math.max(1, Math.min(600, current.durationMinutes || 60)),
+                    }));
+                  }}
+                />
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {[15, 30, 60, 90, 120].map((minutes) => (
+                    <button
+                      key={minutes}
+                      type="button"
+                      className="rounded-lg px-2 py-1 text-xs font-black tabular-nums"
+                      style={form.durationMinutes === minutes
+                        ? { background: "var(--negis-primary)", color: "#fff" }
+                        : { background: "var(--negis-border)", color: "var(--negis-text)" }}
+                      onClick={() => setForm((current) => ({ ...current, durationMinutes: minutes }))}
+                    >
+                      {minutes}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">{form.additionalServices.length ? "Первая услуга: цена, ₸" : "Цена, ₸"}</span>
+                {/* Снимок договорённости: прайс подставляет, рука правит.
+                    Пусто — «цена не называлась», и это отличается от нуля. */}
+                <input
+                  className="neu-input w-full"
+                  type="number"
+                  min={0}
+                  max={100000000}
+                  step="0.01"
+                  placeholder="Из прайса или своя"
+                  value={form.priceTenge}
+                  onChange={(event) => setForm((current) => ({ ...current, priceTenge: event.target.value }))}
+                />
+              </div>
+              {(!activeDoctors.length || form.doctorId) && <AppointmentExtraServices
+                key={`${editingId || "new"}:${form.doctorId}`}
+                items={form.additionalServices} catalog={activeCatalog} primaryId={form.serviceId}
+                onChange={additionalServices => setForm(current => ({ ...current, additionalServices }))}
+              />}
+              <div className="md:col-span-2 border-t pt-3 flex flex-wrap gap-x-6 gap-y-2 text-sm" aria-label="Итого по записи">
+                <span>Услуг: {1 + form.additionalServices.length}</span>
+                <span>Общее время: {totalDurationMinutes} мин</span>
+                <strong>Итого: {totalPriceMinor === null || !Number.isFinite(totalPriceMinor) ? "цена не указана для всех услуг" : formatArrivalPrice(String(totalPriceMinor), "KZT")}</strong>
+              </div>
+              <SelectField label="Статус" value={form.status} onChange={(status) => setForm((current) => ({ ...current, status: normalizeStatus(status) }))}>
+                {statusOptions.map((status) => <option key={status} value={status}>{getAppointmentStatusLabel(status)}</option>)}
+              </SelectField>
+              <TextField label="Источник" value={form.source} onChange={(source) => setForm((current) => ({ ...current, source }))} />
+              {visitHistoryLoading ? (
+                <div className="md:col-span-2 rounded-2xl p-3 text-sm font-semibold" style={{ background: "var(--negis-border)", color: "var(--negis-muted)" }}>
+                  Загружаем историю клиента…
+                </div>
+              ) : visitHistory.length > 0 ? (
+                <div className="md:col-span-2 rounded-2xl p-3" style={{ background: "var(--negis-border)" }}>
+                  <p className="text-xs font-black uppercase tracking-[0.12em]" style={{ color: "var(--negis-muted)" }}>
+                    Архив клиента · {visitHistory.length === 8 ? "последние 8 визитов" : `${visitHistory.length} ${visitHistory.length === 1 ? "визит" : visitHistory.length < 5 ? "визита" : "визитов"}`}
+                  </p>
+                  <div className="mt-2 space-y-1">
+                    {visitHistory.map((visit) => (
+                      <p key={visit.id} className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                        <span className="tabular-nums">{formatVisitDay(visit.startsAt, clinicTimeZone)} · {timeKeyFromStartsAt(visit.startsAt, clinicTimeZone)}</span>
+                        {visit.service ? ` · ${visit.service}` : ""}
+                        {visit.doctor ? ` · ${visit.doctor}` : ""}
+                        <span style={{ color: "var(--negis-muted)" }}> · {getAppointmentStatusLabel(visit.status)}</span>
+                        {visit.priceMinor !== null ? (
+                          <span className="tabular-nums"> · {formatArrivalPrice(String(visit.priceMinor), "KZT")}</span>
+                        ) : null}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              ) : form.clientId ? (
+                <div className="md:col-span-2 rounded-2xl p-3 text-sm font-semibold" style={{ background: "var(--negis-border)", color: "var(--negis-muted)" }}>
+                  {visitHistoryFailed
+                    ? "Не удалось загрузить прошлые визиты. Запись можно сохранить, а историю проверить позже."
+                    : "Прошлых визитов у этого клиента пока нет."}
+                </div>
+              ) : null}
+
+              <label className="block md:col-span-2">
+                <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Комментарий</span>
+                <textarea className="neu-input min-h-28 w-full resize-y" value={form.notes} onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))} />
+              </label>
+            </fieldset>
+
+            {conflictMessage ? (
+              <div className="mt-5 rounded-2xl bg-amber-50 p-4 text-sm font-semibold text-amber-800">
+                {conflictMessage}
+              </div>
+            ) : null}
+
+            {scheduleMessage ? (
+              <div className="mt-3 rounded-2xl bg-sky-50 p-4 text-sm font-semibold text-sky-900">
+                {scheduleMessage}
+              </div>
+            ) : null}
+
+            {unconfirmedCreate ? (
+              <div role="alert" className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+                {createAttempt.current?.originRole !== mutationScope.role ? <p>Данные прежней формы скрыты. Проверяется исходный запрос.</p> : null}
+                Сохранение не подтверждено. Запись могла сохраниться; повторная проверка отправит те же данные с тем же номером запроса.
+              </div>
+            ) : null}
+
+            <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:justify-end">
+              <button type="button" className="neu-btn px-5 py-2.5 text-sm" onClick={closeAppointmentForm} disabled={saving || unconfirmedCreate}>Отмена</button>
+              {/* Кнопки «Сохранить всё равно» при занятом времени больше нет:
+                  владелец закрыл двойную запись, и сервер флаг обхода тоже не
+                  читает. Баннер выше объясняет, что делать. */}
+              {/* Только обход графика. Прежняя версия передавала сюда
+                  Boolean(conflictMessage), и один клик снимал заодно проверку
+                  пересечений — ровно то, ради чего флаги и разделены. */}
+              {scheduleMessage ? (
+                <button
+                  type="button"
+                  className="neu-btn px-5 py-2.5 text-sm text-sky-700"
+                  onClick={() => void submitForm(false, true)}
+                  disabled={saving || unconfirmedCreate}
+                >
+                  Записать вне графика
+                </button>
+              ) : null}
+              <button type="submit" className="neu-btn-primary px-5 py-2.5 text-sm" disabled={saving || (!editingId && Boolean(createRecoveryError))}>
+                {saving ? "Сохраняем…" : unconfirmedCreate ? "Проверить сохранение" : editingId ? "Сохранить изменения" : "Создать запись"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+    </PageLayout>
+  );
+}

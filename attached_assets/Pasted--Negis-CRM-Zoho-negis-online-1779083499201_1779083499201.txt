@@ -1,0 +1,166 @@
+Нужно настроить восстановление пароля в Negis CRM через почту Zoho.
+
+Контекст:
+Домен negis.online уже подключён к Zoho.
+Почта уже существует и активна:
+negissupport@negis.online
+
+Resend не использовать.
+
+Задача:
+Сделать так, чтобы кнопка “Забыли пароль?” отправляла email для восстановления пароля через Supabase Auth SMTP с почты negissupport@negis.online.
+
+1. Supabase SMTP
+
+В Supabase нужно настроить:
+
+Authentication -> Settings -> SMTP Settings
+
+Включить Custom SMTP.
+
+SMTP настройки Zoho:
+
+SMTP Host:
+smtp.zoho.com
+
+SMTP Port:
+587
+
+SMTP User:
+negissupport@negis.online
+
+SMTP Password:
+ZOHO_APP_PASSWORD
+
+Sender email:
+negissupport@negis.online
+
+Sender name:
+Negis Support
+
+Важно:
+- использовать Zoho App Password, не обычный пароль от почты;
+- если включена 2FA, App Password обязателен;
+- если порт 587 не работает, попробовать порт 465 SSL.
+
+2. Supabase URL Configuration
+
+В Supabase:
+Authentication -> URL Configuration
+
+Site URL:
+https://www.negis.online
+
+Redirect URLs добавить:
+https://www.negis.online/
+https://www.negis.online/login
+https://www.negis.online/reset-password
+https://www.negis.online/auth/callback
+
+3. Кнопка “Забыли пароль?”
+
+В коде CRM найти обработчик восстановления пароля.
+
+Он должен вызывать:
+
+supabase.auth.resetPasswordForEmail(email, {
+  redirectTo: 'https://www.negis.online/reset-password'
+})
+
+Требования:
+- если email пустой, показать ошибку “Введите email”;
+- если письмо отправлено, показать “Письмо для восстановления пароля отправлено”;
+- не показывать технические ошибки пользователю без обработки;
+- не ломать обычный вход.
+
+4. Страница /reset-password
+
+Создать или проверить публичную страницу:
+https://www.negis.online/reset-password
+
+Она должна:
+- открываться без авторизации;
+- принимать recovery session от Supabase;
+- показывать форму:
+  - Новый пароль
+  - Повторите пароль
+- проверять минимум 8 символов;
+- проверять совпадение паролей;
+- вызывать:
+
+supabase.auth.updateUser({
+  password: newPassword
+})
+
+После успеха:
+- показать “Пароль обновлён”
+- дать кнопку “Войти”
+- через 2-3 секунды перенаправить на /login или главную страницу входа.
+
+Если ссылка истекла:
+Показать:
+“Ссылка восстановления пароля истекла. Запросите письмо ещё раз.”
+
+5. Supabase Email Template
+
+В Supabase:
+Authentication -> Email Templates -> Reset Password
+
+Subject:
+Восстановление пароля Negis
+
+Текст письма:
+
+Здравствуйте!
+
+Вы запросили восстановление пароля для Negis.
+
+Нажмите на ссылку ниже, чтобы задать новый пароль:
+{{ .ConfirmationURL }}
+
+Если вы не запрашивали восстановление пароля, просто проигнорируйте это письмо.
+
+Negis Support
+
+From:
+Negis Support <negissupport@negis.online>
+
+6. Env / Secrets
+
+В Replit Secrets добавить, если нужно для документации или server-side отправки:
+
+ZOHO_SMTP_HOST=smtp.zoho.com
+ZOHO_SMTP_PORT=587
+ZOHO_SMTP_USER=negissupport@negis.online
+ZOHO_SMTP_PASSWORD=ZOHO_APP_PASSWORD
+EMAIL_FROM=negissupport@negis.online
+EMAIL_FROM_NAME=Negis Support
+
+Но если отправка идёт только через Supabase Auth SMTP, эти Replit Secrets могут не использоваться. Главное — настроить SMTP в Supabase.
+
+7. Проверка
+
+Проверить полный сценарий:
+
+1. Открыть https://www.negis.online/
+2. Перейти на вход.
+3. Нажать “Забыли пароль?”
+4. Ввести email существующего пользователя.
+5. Отправить.
+6. Проверить, что письмо пришло с negissupport@negis.online.
+7. Открыть ссылку из письма.
+8. Установить новый пароль.
+9. Войти с новым паролем.
+10. Проверить, что старый пароль больше не подходит.
+
+Также проверить:
+- несуществующий email;
+- пустой email;
+- истёкшую ссылку;
+- mobile экран;
+- повторную отправку письма.
+
+Ожидаемый результат:
+Восстановление пароля работает через Zoho SMTP и Supabase Auth.
+Письма приходят с negissupport@negis.online.
+Пользователь может самостоятельно сбросить пароль и войти с новым паролем.

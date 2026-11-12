@@ -1,0 +1,74 @@
+import type { LucideIcon } from "lucide-react";
+import type { ReactNode } from "react";
+import { Skeleton } from "@/components/ui/skeleton";
+
+// Medina OS metric card. Real data only: `value` renders with tabular numerals;
+// `loading` shows a skeleton; an undefined/null value renders an honest "—".
+export function MetricCard({
+  label,
+  value,
+  icon: Icon,
+  tone = "primary",
+  delta,
+  loading = false,
+  accent = false,
+}: {
+  label: string;
+  value: number | string | null | undefined;
+  icon?: LucideIcon;
+  /* Страницы говорят на словаре NegisTone (secondary/ai), панель — на своём
+   * (info). Раньше это и было причиной, по которой каждый экран заводил
+   * собственную карточку вместо общей: объединение принимает оба. */
+  tone?: "primary" | "info" | "secondary" | "ai" | "success" | "warning" | "error" | "muted";
+  delta?: ReactNode;
+  loading?: boolean;
+  /** Одна метрика на экране может быть залита акцентом — та, ради которой
+   *  на страницу и заходят. Две залитые спорят друг с другом. */
+  accent?: boolean;
+}) {
+  const toneColor: Record<string, { fg: string; bg: string }> = {
+    primary: { fg: "var(--negis-primary)", bg: "var(--negis-primary-soft)" },
+    ai: { fg: "var(--negis-primary)", bg: "var(--negis-primary-soft)" },
+    info: { fg: "#1D4ED8", bg: "#EFF6FF" },
+    secondary: { fg: "#1D4ED8", bg: "#EFF6FF" },
+    success: { fg: "#047857", bg: "#ECFDF5" },
+    warning: { fg: "#B45309", bg: "#FFFBEB" },
+    error: { fg: "#B91C1C", bg: "#FEF2F2" },
+    muted: { fg: "var(--negis-muted)", bg: "#F3F4F6" },
+  };
+  const palette = toneColor[tone] ?? toneColor.primary;
+  const shown = value === null || value === undefined || value === "" ? "—" : value;
+
+  return (
+    <div className="neu-sm p-4" style={accent ? { background: "var(--negis-mint)", boxShadow: "none" } : undefined}>
+      <div className="flex items-center gap-2.5">
+        {Icon ? (
+          <span
+            aria-hidden
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
+            style={accent
+              ? { background: "rgba(255,255,255,0.55)", color: "var(--negis-mint-deep)" }
+              : { background: palette.bg, color: palette.fg }}
+          >
+            <Icon size={15} />
+          </span>
+        ) : null}
+        <p className="text-xs font-semibold leading-tight" style={{ color: accent ? "var(--negis-mint-deep)" : "var(--negis-muted)" }}>
+          {label}
+        </p>
+      </div>
+      {loading ? (
+        <Skeleton className="mt-3 h-7 w-16" />
+      ) : (
+        <p data-metric-value className="mt-2 text-2xl font-semibold tabular-nums" style={{ color: accent ? "var(--negis-mint-ink)" : "var(--negis-text)" }}>
+          {shown}
+        </p>
+      )}
+      {delta && !loading ? (
+        <p className="mt-1 text-xs font-medium" style={{ color: "var(--negis-muted)" }}>
+          {delta}
+        </p>
+      ) : null}
+    </div>
+  );
+}

@@ -1,0 +1,93 @@
+Redesign the Landing page (/) completely.
+
+BACKGROUND:
+Full screen. Clean light gray #F0F0F0. 
+Subtle crosshair lines (thin 0.5px #CCCCCC lines) 
+coming from top, bottom, left, right edges toward center — 
+like a precision target/scope. Small dots at the ends of lines.
+No other decorations.
+
+CENTER ELEMENT — NEGIS BUTTON:
+A large circular neumorphic button (300px diameter) in the center of the screen.
+Design exactly like the reference image:
+- Outer ring: raised neumorphic circle, concrete/stone texture feel
+  background: #D8D8D8
+  box-shadow: 8px 8px 20px #b0b0b0, -8px -8px 20px #ffffff, inset 2px 2px 4px #ffffff, inset -2px -2px 4px #b0b0b0
+  border-radius: 50%
+- Inner circle: pressed/inset neumorphic circle (slightly smaller, 240px)
+  box-shadow: inset 6px 6px 16px #b0b0b0, inset -6px -6px 16px #f5f5f5
+  border-radius: 50%
+  background: #D4D4D4
+- Text "NEGIS" inside: 
+  font-family: 'Space Grotesk' or 'Inter'
+  font-weight: 600
+  font-size: 28px
+  letter-spacing: 6px
+  color: #2A2A2A
+  text-transform: uppercase
+- On hover: slight scale(1.02) + stronger shadow
+- On click: inner circle becomes more pressed (deeper inset shadow) + opens modal
+
+MODAL (opens on button click):
+Centered card, neu-lg style, max-width 400px, backdrop blur.
+No title — just clean minimal form.
+
+TWO STATES — toggle between them with text link:
+
+STATE 1 — ВОЙТИ:
+- Email input (neu-input)
+- Password input (neu-input, type=password)
+- Button "Войти" (neu-btn-primary, full width)
+- Google sign-in button below:
+  neu-btn full width, Google icon (SVG), text "Войти через Google"
+  uses supabase.auth.signInWithOAuth({ provider: 'google' })
+- If login error → show error message in red below inputs
+- If error is "Invalid login credentials" → show link button:
+  "Забыли пароль? Сбросить" 
+  On click → calls supabase.auth.resetPasswordForEmail(email)
+  Shows success message: "Письмо со сброcом пароля отправлено на {email}"
+  If email field is empty → show: "Введите email для сброса пароля"
+- Bottom link: "Нет аккаунта? Зарегистрироваться" → switch to STATE 2
+
+STATE 2 — ЗАРЕГИСТРИРОВАТЬСЯ:
+- Имя владельца (neu-input)
+- Название клиники (neu-input)  
+- Email (neu-input)
+- Пароль (neu-input, min 8 chars)
+- Подтверждение пароля (neu-input)
+- Button "Создать аккаунт" (neu-btn-primary, full width)
+- Google sign-up button:
+  neu-btn full width, Google icon, text "Зарегистрироваться через Google"
+  uses supabase.auth.signInWithOAuth({ provider: 'google' })
+- Validate with Zod before submit
+- On success → insert clinics + user_roles → redirect /onboarding
+- Bottom link: "Уже есть аккаунт? Войти" → switch to STATE 1
+
+AFTER LOGIN:
+- Check user_roles table
+- If clinic exists AND onboarding_completed=true → show department select screen
+- If no clinic OR onboarding_completed=false → redirect /onboarding
+
+DEPARTMENT SELECT (shown after successful login, replaces modal):
+Replace modal content with department buttons:
+Three neu cards in a column (or row if space allows):
+- 📋 Запись → /booking
+- 🏥 Ресепшн → /reception  
+- 💼 Negis CRM → /sales
+- 📊 Дашборд → /dashboard (only for owner/manager role)
+- ⚙️ Админ → /admin (only for owner/manager role)
+
+Each button: neu-sm card, icon + label, hover effect.
+Small "Выйти" link at bottom.
+
+ANIMATIONS:
+- Button click: spring animation on the circle (scale 0.97 then back)
+- Modal: fade in + scale from 0.95 to 1
+- State switch (login/register): smooth crossfade
+
+FONTS:
+Import Space Grotesk from Google Fonts for the NEGIS logo text.
+Inter for everything else.
+
+Do NOT show department buttons on initial load.
+Only show them AFTER successful authentication.

@@ -1,0 +1,670 @@
+import { useEffect, useRef, useState } from "react";
+import { isLoginShape, isSyntheticEmail, loginFromEmail, normalizeLogin } from "../../../../lib/auth/staff-logins";
+import { captureControlAccess, controlFetch, verifyControlAccess } from "../lib/api";
+
+// Подключение клиники с портала.
+//
+// Два способа, и выбор между ними — это выбор, кто задаёт пароль:
+//
+//   «Логин и пароль» (по умолчанию) — владелец платформы задаёт логин или почту и
+//   пароль сам и передаёт их владельцу клиники из рук в руки. Письмо не
+//   отправляется вовсе, вход работает сразу. Пароль не сохраняется нигде,
+//   кроме хэша в Supabase, и показывается один раз на экране результата.
+//
+//   «Ссылка-приглашение» — прежний путь: владелец получает ссылку и задаёт
+//   пароль сам на странице /join. Нужен, когда у почты уже есть аккаунт:
+//   задать пароль чужому аккаунту отсюда нельзя — это был бы захват входа.
+
+const TIME_ZONES = [
+  "Asia/Almaty",
+  "Asia/Aqtobe",
+  "Asia/Aqtau",
+  "Asia/Atyrau",
+  "Asia/Oral",
+  "Asia/Qostanay",
+  "Asia/Qyzylorda",
+  "Asia/Tashkent",
+  "Asia/Bishkek",
+  "Europe/Moscow",
+  "UTC",
+];
+
+type Mode = "credentials" | "invite";
+type IdentityMode = "email" | "login";
+
+const LOGIN_ONLY_RECOVERY = "Пароль для входа по логину не восстанавливается по почте. При потере пароля владельца обратитесь в поддержку; не создавайте повторное пространство.";
+
+// Коды, при которых сервер вернул existingWorkspaceId и перевыпуск приглашения
+// в это пространство — правильное следующее действие.
+const REISSUE_CODES = new Set([
+  "invitation_already_pending",
+  "email_already_registered",
+  "partial_onboarding",
+  "partial_credentials_onboarding",
+  "owner_login_unavailable",
+]);
+
+type Result = {
+  workspaceId: string;
+  name: string;
+  vertical?: string | null;
+  purpose?: string;
+  ownerEmail: string;
+  ownerLogin?: string;
+  ownerLoginOnly?: boolean;
+  acceptUrl: string;
+  emailSent: boolean;
+  emailStatus?: string;
+};
+
+type CredsResult = {
+  workspaceId: string;
+  name: string;
+  vertical: string | null;
+  purpose: string;
+  ownerEmail: string;
+  ownerLogin: string;
+  ownerLoginOnly: boolean;
+  timeZone: string;
+  loginUrl: string;
+};
+
+function ownerIdentity(result: { ownerEmail: string; ownerLogin?: string }): string {
+  return loginFromEmail(result.ownerLogin || result.ownerEmail);
+}
+
+function isLoginOnlyOwner(result: { ownerEmail: string; ownerLoginOnly?: boolean; emailStatus?: string }): boolean {
+  return result.ownerLoginOnly === true || result.emailStatus === "login_only" || isSyntheticEmail(result.ownerEmail);
+}
+
+function emailStatusText(result: Result): string {
+  if (isLoginOnlyOwner(result)) {
+    return `Вход по логину, письмо не отправлялось. Передайте ссылку владельцу лично: он входит своим логином и паролем и открывает ссылку. ${LOGIN_ONLY_RECOVERY}`;
+  }
+  if (result.emailSent) return "Supabase отправил владельцу письмо со ссылкой. Продублируйте её сами, если письмо затеряется.";
+  if (result.emailStatus === "already_registered") {
+    return "У этой почты уже есть аккаунт, поэтому письмо-приглашение не отправлялось. Передайте ссылку сами. Если владелец не помнит пароль или его не было — на странице по ссылке есть «Выслать письмо для пароля»: он задаст пароль и откроет ссылку ещё раз.";
+  }
+  return "Письмо не ушло — передайте ссылку владельцу сами: WhatsApp, почта, любой канал.";
+}
+
+/** Без 0/O/1/l/I: пароль диктуют голосом и переписывают с бумажки. */
+function generatePassword(): string {
+  const alphabet = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  const bytes = new Uint32Array(12);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (n) => alphabet[n % alphabet.length]).join("");
+}
+
+export function Onboarding({ onDone }: { onDone: () => void }) {
+  const [mode, setMode] = useState<Mode>("credentials");
+  const [identityMode, setIdentityMode] = useState<IdentityMode>("email");
+  const [name, setName] = useState("");
+  const [vertical, setVertical] = useState("");
+  const [purpose, setPurpose] = useState("clinic_services");
+  const [ownerEmail, setOwnerEmail] = useState("");
+  const [ownerLogin, setOwnerLogin] = useState("");
+  const [ownerName, setOwnerName] = useState("");
+  const [timeZone, setTimeZone] = useState("Asia/Almaty");
+  // Поле видимое намеренно: пароль здесь не «свой секрет», а данные, которые
+  // оператор сейчас передаст дальше — скрытые точки только плодят опечатки.
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string[]>([]);
+  // Живое приглашение — не тупик: 409 приносит id пространства, и той же
+  // формой выписывается новая ссылка (старая отзывается сервером).
+  const [reissueWorkspaceId, setReissueWorkspaceId] = useState("");
+  // Занятая почта в парольном режиме — подсказка переключиться на приглашение.
+  const [offerInvite, setOfferInvite] = useState(false);
+  // У почты уже есть клиника: вторая создаётся только по явной кнопке.
+  const [confirmDuplicate, setConfirmDuplicate] = useState(false);
+  const [result, setResult] = useState<Result | null>(null);
+  const [credsResult, setCredsResult] = useState<CredsResult | null>(null);
+  // Пароль на экране результата — из локального состояния, сервер его не
+  // возвращает. Живёт до ухода с экрана и нигде больше.
+  const [shownPassword, setShownPassword] = useState("");
+  const [copied, setCopied] = useState(false);
+  const titleRef = useRef<HTMLHeadingElement | null>(null);
+  const origin = useRef(captureControlAccess());
+  const mounted = useRef(true);
+  const pending = useRef<object | null>(null);
+  const denied = useRef(false);
+  const [accessDenied, setAccessDenied] = useState(false);
+  const copyTimer = useRef<number | null>(null);
+  const formVersion = useRef(0);
+  const recoveryState = useRef({ reissueWorkspaceId, confirmDuplicate });
+  recoveryState.current = { reissueWorkspaceId, confirmDuplicate };
+  const fields = [mode, identityMode, name, vertical, purpose, ownerEmail, ownerLogin, ownerName, timeZone, password];
+  const lastFields = useRef(fields);
+  if (fields.some((value, index) => value !== lastFields.current[index])) {
+    lastFields.current = fields;
+    formVersion.current++;
+  }
+  const version = formVersion.current;
+  const current = () => mounted.current && !denied.current && origin.current.isCurrent() && formVersion.current === version;
+  const taskScope = (attempt: object) => ({ actorId: origin.current.actorId,
+    isCurrent: () => current() && pending.current === attempt });
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false; pending.current = null;
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    };
+  }, []);
+  function finish(attempt: object) {
+    if (current() && pending.current === attempt) { pending.current = null; setBusy(false); }
+  }
+  function refuse() {
+    denied.current = true;
+    pending.current = null;
+    setBusy(false); setPassword(""); setShownPassword(""); setResult(null); setCredsResult(null);
+    setReissueWorkspaceId(""); setOfferInvite(false); setConfirmDuplicate(false); setCopied(false);
+    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    setAccessDenied(true);
+  }
+
+  // Фокус — эффектом, а не сразу после setState: в момент вызова экран
+  // результата ещё не отрендерен и titleRef.current был бы null всегда.
+  useEffect(() => {
+    if (result || credsResult) titleRef.current?.focus();
+  }, [result, credsResult]);
+
+  /** Смена режима гасит ошибки прежнего: их советы и кнопки — про другой путь. */
+  function switchMode(next: Mode) {
+    if (!current() || pending.current || busy || next === mode) return;
+    if (purpose === "marketing" && next === "credentials") return;
+    setMode(next);
+    setPassword("");
+    clearOutcome();
+  }
+
+  function switchIdentity(next: IdentityMode) {
+    if (!current() || pending.current || busy || next === identityMode) return;
+    setIdentityMode(next);
+    setPassword("");
+    clearOutcome();
+  }
+
+  /** Правка ключевых полей делает прежний отказ и его кнопки неактуальными:
+      залипшая кнопка перевыпуска после исправления опечатки в почте била бы
+      по чужому подключению. */
+  function clearOutcome() {
+    setError([]);
+    setOfferInvite(false);
+    setReissueWorkspaceId("");
+    setConfirmDuplicate(false);
+  }
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    await performSubmit(false);
+  }
+
+  /**
+   * confirmAdditional — явное «да, создать вторую клинику этой почте»: без
+   * флага сервер отказывает (owner_already_has_workspace), чтобы дубли не
+   * рождались из повторов формы.
+   */
+  async function performSubmit(confirmAdditional: boolean) {
+    if (!current() || pending.current || busy) return;
+    if (confirmAdditional && (!confirmDuplicate || !recoveryState.current.confirmDuplicate)) return;
+    clearOutcome();
+    const usesOwnerLogin = mode === "credentials" && identityMode === "login";
+    const rawOwnerLogin = ownerLogin.trim();
+    const normalizedOwnerLogin = normalizeLogin(rawOwnerLogin);
+    if (purpose === "marketing" && mode === "credentials") {
+      setError(["Для маркетинга доступна только ссылка-приглашение."]);
+      return;
+    }
+    if (usesOwnerLogin && (rawOwnerLogin.length > 24 || !/^[a-z0-9._ -]+$/i.test(rawOwnerLogin) || !isLoginShape(normalizedOwnerLogin))) {
+      setError(["Укажите логин: 3–24 символа, латиница, цифры и точки."]);
+      return;
+    }
+    if (!usesOwnerLogin && isSyntheticEmail(ownerEmail)) {
+      setError(["Служебный адрес нельзя использовать как почту владельца. Укажите личную почту."]);
+      return;
+    }
+    // Один снимок пароля для запроса и результата, независимо от новых рендеров.
+    const submittedPassword = password;
+    const attempt = {};
+    pending.current = attempt;
+    const scope = taskScope(attempt);
+    setBusy(true);
+    try {
+      if (mode === "credentials") {
+        const response = await controlFetch("/api/crm/platform-onboarding-credentials", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, vertical, ownerName, timeZone, purpose, password: submittedPassword, ...(usesOwnerLogin ? { ownerLogin: normalizedOwnerLogin } : { ownerEmail }) }),
+        }, scope);
+        if (!scope.isCurrent()) return;
+        if ([401, 403, 404].includes(response.status)) { refuse(); return; }
+        const body = await response.json().catch(() => null);
+        if (!scope.isCurrent()) return;
+        if (!response.ok || body?.success !== true) {
+          const reasons = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean);
+          setError(reasons.length > 0 ? reasons : ["Не удалось подключить клинику. Попробуйте ещё раз."]);
+          // existingWorkspaceId приходит с занятой почтой или логином, живым приглашением,
+          // частичными отказами и почтой, уже владеющей клиникой: в парольном
+          // режиме всё это чинится перевыпуском в УЖЕ созданное пространство,
+          // а не вторым пространством.
+          const existingWorkspaceId =
+            (REISSUE_CODES.has(body?.code) || body?.code === "owner_already_has_workspace") &&
+            typeof body?.data?.existingWorkspaceId === "string"
+              ? body.data.existingWorkspaceId
+              : "";
+          setReissueWorkspaceId(existingWorkspaceId);
+          setOfferInvite(!usesOwnerLogin && body?.code === "email_already_registered" && !existingWorkspaceId);
+          return;
+        }
+        finish(attempt);
+        formVersion.current++;
+        setShownPassword(submittedPassword);
+        setPassword("");
+        setCredsResult(body.data as CredsResult);
+        return;
+      }
+
+      const response = await controlFetch("/api/crm/platform-onboarding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // Пароль в инвайт-путь не уходит даже заполненным полем.
+        body: JSON.stringify({ name, vertical, ownerEmail, ownerName, timeZone, purpose, ...(confirmAdditional ? { confirmAdditionalWorkspace: true } : {}) }),
+      }, scope);
+      if (!scope.isCurrent()) return;
+      if ([401, 403, 404].includes(response.status)) { refuse(); return; }
+      const body = await response.json().catch(() => null);
+      if (!scope.isCurrent()) return;
+      if (!response.ok || body?.success !== true) {
+        const reasons = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean);
+        setError(reasons.length > 0 ? reasons : ["Не удалось подключить клинику. Попробуйте ещё раз."]);
+        setReissueWorkspaceId(
+          REISSUE_CODES.has(body?.code) && typeof body?.data?.existingWorkspaceId === "string"
+            ? body.data.existingWorkspaceId
+            : "",
+        );
+        setConfirmDuplicate(body?.code === "owner_already_has_workspace");
+        return;
+      }
+      finish(attempt);
+      formVersion.current++;
+      setResult(body.data as Result);
+    } catch {
+      if (!scope.isCurrent()) return;
+      // Сервер мог успеть закоммитить до обрыва сети — утверждать «не
+      // подключена» отсюда нельзя.
+      setError(["Сеть не ответила — неизвестно, успело ли подключение. Проверьте список клиник на «Обзоре» перед повтором."]);
+    } finally {
+      finish(attempt);
+    }
+  }
+
+  async function reissue() {
+    if (!current() || pending.current || busy || !reissueWorkspaceId) return;
+    if (recoveryState.current.reissueWorkspaceId !== reissueWorkspaceId) return;
+    const attempt = {};
+    pending.current = attempt;
+    const scope = taskScope(attempt);
+    setBusy(true);
+    setError([]);
+    try {
+      const response = await controlFetch("/api/crm/platform-invitation-reissue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: reissueWorkspaceId }),
+      }, scope);
+      if (!scope.isCurrent()) return;
+      if ([401, 403, 404].includes(response.status)) { refuse(); return; }
+      const body = await response.json().catch(() => null);
+      if (!scope.isCurrent()) return;
+      if (!response.ok || body?.success !== true) {
+        const reasons = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean);
+        setError(reasons.length > 0 ? reasons : ["Перевыпустить не удалось. Попробуйте ещё раз."]);
+        // «Владелец уже принял» и «клиники нет» делают кнопку бессмысленной:
+        // оставить её значило бы показывать отказ по кругу.
+        if (body?.code === "owner_already_member" || body?.code === "not_found") setReissueWorkspaceId("");
+        return;
+      }
+      finish(attempt);
+      formVersion.current++;
+      setReissueWorkspaceId("");
+      setPassword("");
+      setResult(body.data as Result);
+    } catch {
+      if (!scope.isCurrent()) return;
+      setError(["Сеть не ответила — неизвестно, перевыпустилось ли приглашение. Проверьте карточку клиники перед повтором."]);
+    } finally {
+      finish(attempt);
+    }
+  }
+
+  async function copyText(value: string) {
+    if (!current() || pending.current) return;
+    const scope = { actorId: origin.current.actorId, isCurrent: current };
+    try {
+      await verifyControlAccess(scope);
+      if (!scope.isCurrent()) return;
+      await navigator.clipboard.writeText(value);
+      if (!scope.isCurrent()) return;
+      setCopied(true);
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => { if (scope.isCurrent()) setCopied(false); }, 2500);
+    } catch {
+      // Буфер недоступен — значение выделяется и копируется руками.
+    }
+  }
+
+  function resetForm() {
+    if (!current() || pending.current) return;
+    formVersion.current++;
+    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    setResult(null);
+    setCredsResult(null);
+    setShownPassword("");
+    setName("");
+    setVertical("");
+    setPurpose("clinic_services");
+    setOwnerEmail("");
+    setOwnerLogin("");
+    setIdentityMode("email");
+    setOwnerName("");
+    setPassword("");
+    setCopied(false);
+    clearOutcome();
+  }
+  function backToOverview() { if (current()) onDone(); }
+
+  if (accessDenied) return <><h1 className="page-title">Страница не найдена</h1><p className="page-sub">Доступ к подключению пространств закрыт.</p></>;
+  if (!origin.current.isCurrent()) return <p role="status">Проверяем доступ…</p>;
+
+  if (credsResult) {
+    return (
+      <>
+        <h1 ref={titleRef} tabIndex={-1} className="page-title">{credsResult.purpose === "mortgage_leads" ? "Пространство подключено — вход по логину и паролю" : "Клиника подключена — вход по логину и паролю"}</h1>
+        <p className="page-sub" style={{ overflowWrap: "anywhere" }}>
+          «{credsResult.name}» · {credsResult.purpose === "mortgage_leads" ? "ипотечные заявки" : credsResult.vertical === "beauty" ? "салон красоты" : credsResult.vertical === "dental" ? "стоматология" : "клиника"} · {ownerIdentity(credsResult)}
+        </p>
+
+        <div className="panel" style={{ padding: "18px 20px", maxWidth: 720 }}>
+          <h2 className="section-title">Данные для входа</h2>
+          <p className="muted" style={{ fontSize: 13, margin: "0 0 4px" }}>
+            Письмо не отправлялось: вход работает сразу. Пароль показывается один раз и после ухода с этого экрана недоступен.
+            {" "}{isLoginOnlyOwner(credsResult)
+              ? LOGIN_ONLY_RECOVERY
+              : "Восстановить пароль владелец сможет через «Забыли пароль?» на странице входа."}
+          </p>
+          <div className="result-block">
+            <div className="label">Логин</div>
+            <div className="result-link">
+              <code>{ownerIdentity(credsResult)}</code>
+            </div>
+            <div className="label" style={{ marginTop: 10 }}>Пароль</div>
+            <div className="result-link">
+              <code>{shownPassword}</code>
+              <button type="button" className="btn-primary" onClick={() => void copyText(shownPassword)}>
+                {copied ? "Скопировано" : "Скопировать"}
+              </button>
+            </div>
+            <div className="label" style={{ marginTop: 10 }}>Страница входа</div>
+            <div className="result-link">
+              <code>{credsResult.loginUrl}</code>
+            </div>
+          </div>
+          <p className="muted" style={{ fontSize: 13, marginTop: 12 }}>
+            Передайте логин и пароль владельцу лично — голосом или личным сообщением, не в общем чате.
+            Посоветуйте сменить пароль после первого входа.
+          </p>
+        </div>
+
+        <div className="panel" style={{ padding: "18px 20px", maxWidth: 720 }}>
+          <h2 className="section-title">Дальше</h2>
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            {credsResult.purpose === "mortgage_leads" ? "Активность владельца появится в карточке пространства после первого входа." : <>
+              1. Назначьте тариф на «Обзоре» — кнопка «Назначить» у новой клиники.<br />
+              2. Активность владельца появится в карточке клиники после первого входа.
+            </>}
+          </p>
+          <div style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <button type="button" className="btn" onClick={backToOverview}>К обзору</button>
+            <button type="button" className="btn" onClick={resetForm}>Подключить ещё одну</button>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  if (result) {
+    return (
+      <>
+        <h1 ref={titleRef} tabIndex={-1} className="page-title">{result.purpose === "mortgage_leads" ? "Пространство создано — ожидает владельца" : result.purpose === "marketing" ? "Пространство создано — ожидает владельца" : result.vertical ? "Клиника подключена" : "Приглашение перевыпущено"}</h1>
+        <p className="page-sub" style={{ overflowWrap: "anywhere" }}>
+          {/* Без vertical (перевыпуск) — нейтральное «новая ссылка»: прежней
+              могло и не быть, если приглашение падало на выписке. */}
+          «{result.name}» · {result.purpose === "mortgage_leads" ? "ипотечные заявки" : result.purpose === "marketing" ? "маркетинг" : result.vertical === "beauty" ? "салон красоты" : result.vertical === "dental" ? "стоматология" : result.vertical === "clinic" ? "клиника" : "новая ссылка приглашения"} · {ownerIdentity(result)}
+        </p>
+
+        <div className="panel" style={{ padding: "18px 20px", maxWidth: 720 }}>
+          <h2 className="section-title">Ссылка приглашения владельца</h2>
+          <p className="muted" style={{ fontSize: 13, margin: "0 0 4px" }}>
+            {isLoginOnlyOwner(result)
+              ? "Владелец входит своим логином и паролем и открывает ссылку, чтобы принять приглашение в существующее пространство."
+              : "Владелец открывает ссылку и принимает приглашение своим аккаунтом. Если аккаунта ещё нет, сначала регистрируется."}
+            {" "}Ссылка действует 7 дней и показывается один раз.
+          </p>
+          <div className="result-block">
+            {isLoginOnlyOwner(result) ? <>
+              <div className="label">Логин</div>
+              <div className="result-link" style={{ marginBottom: 10 }}><code>{ownerIdentity(result)}</code></div>
+            </> : null}
+            <div className="result-link">
+              <code>{result.acceptUrl}</code>
+              <button type="button" className="btn-primary" onClick={() => void copyText(result.acceptUrl)}>
+                {copied ? "Скопировано" : "Скопировать"}
+              </button>
+            </div>
+          </div>
+          <p className="muted" style={{ fontSize: 13, marginTop: 12 }}>{emailStatusText(result)}</p>
+        </div>
+
+        <div className="panel" style={{ padding: "18px 20px", maxWidth: 720 }}>
+          <h2 className="section-title">Дальше</h2>
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            {result.purpose === "mortgage_leads" || (!result.purpose && !result.vertical) ? "Когда владелец примет приглашение, его активность появится в карточке пространства." : <>
+              1. Назначьте тариф на «Обзоре» — кнопка «Назначить» у новой клиники.<br />
+              2. Когда владелец примет приглашение, его активность появится в карточке клиники.
+            </>}
+          </p>
+          <div style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <button type="button" className="btn" onClick={backToOverview}>К обзору</button>
+            <button type="button" className="btn" onClick={resetForm}>Подключить ещё одну</button>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <h1 className="page-title">Подключить пространство</h1>
+      <p className="page-sub">Название, назначение, часовой пояс и вход владельца.</p>
+
+      <form className="panel" style={{ padding: "20px", maxWidth: 640, minWidth: 0 }} aria-busy={busy} onSubmit={(event) => void submit(event)}>
+        <fieldset className="editor" disabled={busy} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, boxShadow: "none" }}>
+          <div className="fields" style={{ gridTemplateColumns: "minmax(0, 1fr)" }}>
+            <div className="field">
+              <label htmlFor="ob-purpose">Назначение пространства</label>
+              <select id="ob-purpose" value={purpose} onChange={(event) => {
+                if (!current() || pending.current) return;
+                setPurpose(event.target.value);
+                setVertical("");
+                setPassword("");
+                if (event.target.value === "marketing") setMode("invite");
+                clearOutcome();
+              }}>
+                <option value="clinic_services">Клиника, стоматология или салон</option>
+                <option value="mortgage_leads">Ипотечные заявки</option>
+                <option value="marketing">Маркетинг и привлечение клиентов</option>
+              </select>
+            </div>
+            <div className="field">
+              <label id="ob-mode-label">Способ подключения</label>
+              <div role="group" aria-labelledby="ob-mode-label" style={{ display: "flex", flexWrap: "wrap", gap: 8, minWidth: 0 }}>
+                <button
+                  type="button"
+                  className={mode === "credentials" ? "btn-primary" : "btn"}
+                  aria-pressed={mode === "credentials"}
+                  disabled={purpose === "marketing"}
+                  onClick={() => switchMode("credentials")}
+                >
+                  Логин и пароль
+                </button>
+                <button
+                  type="button"
+                  className={mode === "invite" ? "btn-primary" : "btn"}
+                  aria-pressed={mode === "invite"}
+                  onClick={() => switchMode("invite")}
+                >
+                  Ссылка-приглашение
+                </button>
+              </div>
+              <p className="muted" style={{ fontSize: 12.5, margin: "6px 0 0" }}>
+                {mode === "credentials"
+                  ? "Вы задаёте пароль и передаёте его владельцу. Письмо не отправляется. Для почты с существующим аккаунтом используйте приглашение."
+                  : "Владелец получает ссылку и задаёт пароль сам. Единственный путь для почты, у которой уже есть аккаунт."}
+              </p>
+            </div>
+            {mode === "credentials" ? <div className="field">
+              <label id="ob-identity-label">Вход владельца</label>
+              <div role="group" aria-labelledby="ob-identity-label" style={{ display: "flex", flexWrap: "wrap", gap: 4, minWidth: 0, maxWidth: 320 }}>
+                <button type="button" className={identityMode === "login" ? "btn-primary" : "btn"} aria-pressed={identityMode === "login"} style={{ flex: "1 1 100px" }} onClick={() => switchIdentity("login")}>
+                  Логин
+                </button>
+                <button type="button" className={identityMode === "email" ? "btn-primary" : "btn"} aria-pressed={identityMode === "email"} style={{ flex: "1 1 100px" }} onClick={() => switchIdentity("email")}>
+                  Почта
+                </button>
+              </div>
+            </div> : null}
+            <div className="field">
+              <label htmlFor="ob-name">Название</label>
+              <input id="ob-name" value={name} onChange={(event) => { if (current() && !pending.current) setName(event.target.value); }} placeholder={purpose === "clinic_services" ? "Салон «Люкс»" : "Название компании"} />
+            </div>
+            {purpose === "clinic_services" && <div className="field">
+              <label htmlFor="ob-vertical">Ниша</label>
+              {/* Пустой первый пункт намеренно: ниша меняет правила проверки
+                  рекламы, и выбрать её молча значило бы выбрать за клиента. */}
+              <select id="ob-vertical" value={vertical} onChange={(event) => { if (current() && !pending.current) setVertical(event.target.value); }}>
+                <option value="">— выберите —</option>
+                <option value="beauty">Салон красоты</option>
+                <option value="dental">Стоматология</option>
+                <option value="clinic">Медицинская клиника</option>
+              </select>
+            </div>}
+            {mode === "credentials" && identityMode === "login" ? <div className="field">
+              <label htmlFor="ob-login">Логин владельца</label>
+              <input
+                id="ob-login"
+                type="text"
+                value={ownerLogin}
+                onChange={(event) => {
+                  if (!current() || pending.current) return;
+                  setOwnerLogin(event.target.value);
+                  clearOutcome();
+                  setPassword("");
+                }}
+                minLength={3}
+                maxLength={24}
+                required
+                autoComplete="username"
+                autoCapitalize="none"
+                spellCheck={false}
+                placeholder="aigul.botanova"
+              />
+              <p className="muted" style={{ fontSize: 12.5, margin: "6px 0 0" }}>
+                3–24 символа: латиница, цифры и точки. {LOGIN_ONLY_RECOVERY}
+              </p>
+            </div> : <div className="field">
+              <label htmlFor="ob-email">Почта владельца{mode === "credentials" ? " (логин)" : ""}</label>
+              <input
+                id="ob-email"
+                type="email"
+                value={ownerEmail}
+                onChange={(event) => {
+                  if (!current() || pending.current) return;
+                  setOwnerEmail(event.target.value);
+                  clearOutcome();
+                  setPassword("");
+                }}
+                required
+                placeholder="owner@salon.kz"
+              />
+            </div>}
+            <div className="field">
+              <label htmlFor="ob-owner">Имя владельца</label>
+              <input id="ob-owner" value={ownerName} onChange={(event) => { if (current() && !pending.current) setOwnerName(event.target.value); }} placeholder="Необязательно" />
+            </div>
+            {mode === "credentials" ? (
+              <div className="field">
+                <label htmlFor="ob-password">Пароль владельца</label>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, minWidth: 0 }}>
+                  <input
+                    id="ob-password"
+                    value={password}
+                    onChange={(event) => { if (current() && !pending.current) setPassword(event.target.value); }}
+                    placeholder="8–72 символа"
+                    autoComplete="off"
+                    style={{ flex: "1 1 180px", minWidth: 0 }}
+                  />
+                  <button type="button" className="btn" onClick={() => { if (current() && !pending.current) setPassword(generatePassword()); }}>
+                    Сгенерировать
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            <div className="field">
+              <label htmlFor="ob-tz">Часовой пояс</label>
+              <select id="ob-tz" value={timeZone} onChange={(event) => { if (current() && !pending.current) setTimeZone(event.target.value); }}>
+                {TIME_ZONES.map((zone) => (
+                  <option key={zone} value={zone}>{zone}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {error.length > 0 ? (
+            <div className="notice error" role="alert">
+              {error.map((line) => (
+                <div key={line}>{line}</div>
+              ))}
+              {offerInvite ? (
+                <div style={{ marginTop: 10 }}>
+                  <button type="button" className="btn" onClick={() => switchMode("invite")}>
+                    Переключить на приглашение
+                  </button>
+                </div>
+              ) : null}
+              {confirmDuplicate ? (
+                <div style={{ marginTop: 10 }}>
+                  <button type="button" className="btn" disabled={busy} onClick={() => void performSubmit(true)}>
+                    {busy ? "Подключаю…" : "Да, создать вторую клинику этой почте"}
+                  </button>
+                </div>
+              ) : null}
+              {reissueWorkspaceId ? (
+                <div style={{ marginTop: 10 }}>
+                  <button type="button" className="btn" disabled={busy} onClick={() => void reissue()}>
+                    {busy ? "Выписываю…" : "Перевыпустить приглашение"}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          <div className="actions" style={{ marginTop: 16, flexWrap: "wrap" }}>
+            <button type="submit" className="btn-primary" disabled={busy}>
+              {busy ? "Подключаю…" : "Подключить"}
+            </button>
+            <button type="button" className="btn" onClick={backToOverview}>Отмена</button>
+          </div>
+        </fieldset>
+      </form>
+    </>
+  );
+}

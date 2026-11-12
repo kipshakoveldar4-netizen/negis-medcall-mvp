@@ -1,0 +1,160 @@
+.operator-workday {
+  --ow-line: var(--portal-line, #e3e9e6);
+  --ow-muted: var(--portal-muted, #65766c);
+  --ow-ink: var(--portal-ink, #17211c);
+  container-type: inline-size;
+  display: grid;
+  gap: 22px;
+  min-width: 0;
+  color: var(--ow-ink);
+  letter-spacing: 0;
+}
+
+.operator-workday *,
+.operator-workday *::before,
+.operator-workday *::after { box-sizing: border-box; letter-spacing: 0; }
+.operator-workday :is(h2, h3, h4, p, dl, dd) { margin: 0; overflow-wrap: anywhere; }
+.operator-workday h2 { font-size: 20px; font-weight: 600; line-height: 1.4; }
+.operator-workday h3 { font-size: 18px; font-weight: 600; line-height: 1.4; }
+.operator-workday svg { flex-shrink: 0; }
+
+.operator-workday__heading,
+.operator-workday__today-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.operator-workday__heading > div { min-width: 0; }
+.operator-workday__heading p { margin-top: 4px; color: var(--ow-muted); font-size: 12px; }
+.portal-content .operator-workday__heading { display: none; }
+.operator-workday__caption { color: var(--ow-muted); font-size: 12px; line-height: 1.6; }
+
+.operator-workday .operator-workday__icon-button {
+  display: inline-flex;
+  flex: 0 0 40px;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--ow-line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ow-ink);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.operator-workday .operator-workday__icon-button:hover:not(:disabled) { background: #e8f7ef; border-color: #78b695; }
+.operator-workday .operator-workday__icon-button:active:not(:disabled) { background: #a9e7c5; }
+.operator-workday :is(button, select, summary):focus-visible { outline: 2px solid #28734e; outline-offset: 3px; }
+.operator-workday :is(button, select):disabled { opacity: .5; cursor: not-allowed; }
+.operator-workday .neu-btn { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+
+.operator-workday__summary { padding: 16px 0; border-block: 1px solid var(--ow-line); }
+.operator-workday__metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 16px !important; }
+.operator-workday__metrics > div { display: grid; grid-template-columns: 23px minmax(0, 1fr); align-content: start; gap: 8px 16px; min-width: 0; padding: 0 22px; }
+.operator-workday__metrics > div:first-child { padding-left: 0; }
+.operator-workday__metrics > div + div { border-left: 1px solid var(--ow-line); }
+.operator-workday__metrics svg { grid-row: 1 / 3; color: #25563c; }
+.operator-workday__metrics dt { color: var(--ow-muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.operator-workday__metrics dd { grid-column: 2; min-width: 0; min-height: 36px; font-size: 28px; font-weight: 600; line-height: 1.3; font-variant-numeric: tabular-nums; }
+.operator-workday__metrics .operator-workday__number--long { font-size: 18px; }
+.operator-workday__summary-notes { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-top: 18px; color: var(--ow-muted); font-size: 12px; line-height: 1.6; }
+.operator-workday__summary-notes p { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; min-width: 0; }
+.operator-workday__summary-notes span { color: var(--ow-ink); }
+
+.operator-workday__body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(270px, .5fr); gap: 28px; align-items: start; }
+.operator-workday__leads { min-width: 0; }
+.operator-workday__scope { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 16px 0; padding-bottom: 16px; border-bottom: 1px solid var(--ow-line); }
+.operator-workday__scope > svg { color: var(--ow-muted); }
+.operator-workday__scope > label { display: grid; flex: 1 1 200px; min-width: 0; gap: 6px; color: var(--ow-muted); font-size: 12px; }
+.operator-workday__scope .neu-input { width: 100%; min-width: 0; max-width: 100%; color: var(--ow-ink); text-overflow: ellipsis; }
+.operator-workday__lead-scope { max-width: 100%; padding: 5px 8px; border-radius: 5px; background: #d8f1e3; color: #25563c; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.operator-workday__selected-date { display: flex; flex-basis: 100%; flex-wrap: wrap; align-items: center; gap: 5px 8px; color: var(--ow-muted); font-size: 11px; line-height: 1.6; }
+.operator-workday__selected-date span { overflow-wrap: anywhere; }
+.operator-workday__empty { display: grid; justify-items: start; gap: 16px; padding: 36px 0; }
+.operator-workday__empty > svg { color: var(--ow-muted); }
+.operator-workday__empty h4 { font-size: 15px; font-weight: 500; line-height: 1.5; }
+
+.operator-workday__today { min-width: 0; padding-left: 24px; border-left: 1px solid var(--ow-line); }
+.operator-workday__today-heading { align-items: center; margin-bottom: 4px; }
+.operator-workday__today-heading > svg { color: var(--ow-muted); }
+.operator-workday__company-days { margin-top: 12px; font-size: 12px; line-height: 1.6; }
+.operator-workday__company-days summary { width: fit-content; max-width: 100%; color: #25563c; cursor: pointer; overflow-wrap: anywhere; }
+.operator-workday__company-days ul { max-height: 240px; margin: 10px 0 0; padding: 0; overflow-y: auto; list-style: none; }
+.operator-workday__company-days li { display: grid; gap: 3px; padding: 8px 0; border-bottom: 1px solid var(--ow-line); color: var(--ow-muted); overflow-wrap: anywhere; }
+.operator-workday__company-days strong { color: var(--ow-ink); font-weight: 500; }
+.operator-workday__today-totals { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 12px !important; padding-block: 10px; border-block: 1px solid var(--ow-line); }
+.operator-workday__today-totals > div { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.operator-workday__today-totals dt { color: var(--ow-muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.operator-workday__today-totals dd { min-height: 18px; font-size: 13px; font-weight: 600; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.operator-workday__agenda { margin: 0; padding: 0; list-style: none; }
+.operator-workday__visit { min-width: 0; padding-block: 16px; border-bottom: 1px solid var(--ow-line); font-size: 13px; line-height: 1.6; }
+.operator-workday__visit-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px 12px; margin-bottom: 6px; }
+.operator-workday__visit-time { display: flex; align-items: center; gap: 8px; color: #25563c; font-size: 15px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.operator-workday__client { font-weight: 600; }
+.operator-workday__phone { display: flex; align-items: flex-start; gap: 6px; margin-top: 3px !important; color: var(--ow-muted); font-variant-numeric: tabular-nums; }
+.operator-workday__phone svg { margin-top: 3px; }
+.operator-workday__company-name { margin-top: 8px !important; font-weight: 500; }
+.operator-workday__local-date { display: flex; flex-wrap: wrap; gap: 1px 8px; margin-bottom: 6px !important; color: var(--ow-muted); font-size: 11px; }
+.operator-workday__visit-more { margin-top: 8px; }
+.operator-workday__visit-more summary { width: fit-content; max-width: 100%; color: #25563c; font-size: 11px; cursor: pointer; }
+.operator-workday__visit-details { display: grid; gap: 10px; margin-top: 14px !important; }
+.operator-workday__visit-details > div { min-width: 0; }
+.operator-workday__visit-details dt { margin-bottom: 3px; color: var(--ow-muted); font-size: 11px; }
+.operator-workday__status { display: inline-block; max-width: 100%; padding: 3px 7px; border-radius: 5px; background: #edf0ef; color: #485750; font-size: 11px; }
+.operator-workday__status--scheduled { background: #e7f1fb; color: #245b91; }
+.operator-workday__status--confirmed,
+.operator-workday__status--arrived { background: #d8f1e3; color: #25563c; }
+.operator-workday__status--cancelled,
+.operator-workday__status--no_show { background: #faecec; color: #9b3740; }
+.operator-workday__confirmation { display: flex; align-items: flex-start; gap: 6px; color: #25563c; }
+.operator-workday__confirmation > svg { margin-top: 3px; }
+.operator-workday__confirmation span { min-width: 0; }
+.operator-workday__confirmation time { display: block; color: var(--ow-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.operator-workday__today-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding-top: 16px; color: var(--ow-muted); font-size: 12px; line-height: 1.6; }
+.operator-workday__pages { display: flex; gap: 8px; }
+.operator-workday__state,
+.operator-workday__unavailable { display: flex; align-items: flex-start; gap: 10px; min-width: 0; padding: 22px 0; color: var(--ow-muted); font-size: 13px; line-height: 1.6; }
+.operator-workday__state { min-height: 88px; }
+.operator-workday__state svg,
+.operator-workday__unavailable > svg { margin-top: 1px; }
+.operator-workday__error { color: var(--danger, #a52f38); }
+.operator-workday__unavailable > div { min-width: 0; }
+.operator-workday__unavailable p:first-child { margin-bottom: 8px; color: var(--ow-ink); font-weight: 500; }
+.operator-workday__unavailable ul { margin: 8px 0 0; padding-left: 18px; overflow-wrap: anywhere; }
+.operator-workday__spinner { animation: operator-workday-spin 1s linear infinite; }
+@keyframes operator-workday-spin { to { transform: rotate(360deg); } }
+
+.operator-workday [aria-label="Заявки оператора"] { min-width: 0; border: 0; padding-top: 0; }
+.operator-workday [aria-label="Заявки оператора"] > h4 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.operator-workday [aria-label="Заявки оператора"] > div > .flex.flex-wrap.items-start { min-width: 0; padding: 18px 0; align-items: center; gap: 18px; }
+.operator-workday [aria-label="Заявки оператора"] > div > .flex.flex-wrap.items-start + .flex.flex-wrap.items-start { border-top: 1px solid var(--ow-line); }
+.operator-workday [aria-label="Заявки оператора"] > div > .flex.flex-wrap.items-start > div:first-child { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 7px 16px; }
+.operator-workday [aria-label="Заявки оператора"] > div > .flex.flex-wrap.items-start > div:first-child > p { min-width: 0; overflow-wrap: anywhere; }
+.operator-workday [aria-label="Заявки оператора"] > div > .flex.flex-wrap.items-start > div:first-child > p:nth-child(2) { grid-column: 1; font-variant-numeric: tabular-nums; color: var(--ow-muted); }
+.operator-workday [aria-label="Заявки оператора"] > div > .flex.flex-wrap.items-start > div:first-child > p:nth-child(3) { grid-column: 2; grid-row: 1; color: #25563c; }
+.operator-workday [aria-label="Заявки оператора"] > div > .flex.flex-wrap.items-start > div:first-child > p:nth-child(4) { grid-column: 2; grid-row: 2; color: var(--ow-muted); }
+
+@container (max-width: 960px) {
+  .operator-workday__body { grid-template-columns: minmax(0, 1fr); }
+  .operator-workday__today { padding: 22px 0 0; border-left: 0; border-top: 1px solid var(--ow-line); }
+  .operator-workday__visit-details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@container (max-width: 620px) {
+  .operator-workday__metrics > div { display: flex; flex-direction: column; gap: 7px; padding: 0 10px; }
+  .operator-workday__metrics > div:last-child { padding-right: 0; }
+  .operator-workday__metrics svg { width: 19px; height: 19px; }
+  .operator-workday__metrics dt { min-height: 50px; font-size: 11px; }
+  .operator-workday__metrics dd { font-size: 22px; min-height: 30px; }
+  .operator-workday__metrics .operator-workday__number--long { font-size: 15px; overflow-wrap: anywhere; }
+  .operator-workday__scope { align-items: flex-start; }
+  .operator-workday__scope > svg { margin-top: 28px; }
+  .operator-workday__scope > label { flex-basis: calc(100% - 32px); }
+  .operator-workday__visit-details { grid-template-columns: minmax(0, 1fr); }
+  .operator-workday .operator-workday__icon-button { width: 44px; height: 44px; flex-basis: 44px; }
+  .operator-workday [aria-label="Заявки оператора"] > div > .flex.flex-wrap.items-start { gap: 12px; }
+  .operator-workday [aria-label="Заявки оператора"] > div > .flex.flex-wrap.items-start > div:first-child { flex-basis: 100%; display: block; }
+  .operator-workday [aria-label="Заявки оператора"] > div > .flex.flex-wrap.items-start > div:first-child > p { margin-block: 5px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .operator-workday__spinner { animation: none; }
+}

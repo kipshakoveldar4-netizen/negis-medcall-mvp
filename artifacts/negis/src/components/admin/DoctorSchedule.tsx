@@ -1,0 +1,1219 @@
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Plus, RefreshCw, X } from "lucide-react";
+import { toast } from "sonner";
+import { useAuth } from "@/contexts/AuthContext";
+import { crmErrorMessage, crmFetch } from "@/lib/api";
+import { isRealWorkspace, readWorkspaceId } from "@/lib/demoStorage";
+import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
+import { hasSupabaseFrontendEnv, supabase, sessionAuth } from "@/lib/supabase";
+import { capitalize, termsFor, type Terms } from "../../../../../lib/vertical/terms";
+
+// Справочник исполнителей — врачей или мастеров — и их график.
+//
+// Отдельный компонент, а не шестьсот строк внутрь AdminCenter: так уже сделан
+// раздел WhatsApp, и вкладка остаётся одной строкой в разметке.
+//
+// Своего маршрута у экрана нет намеренно. Отдельный /doctors стоил бы шести
+// согласованных регистраций — ленивый импорт, права маршрута, сам маршрут,
+// боковое меню, мобильное меню, заголовок и проверка мобильной вёрстки, — и
+// всё это ради адреса, для аудитории, которая и так сидит в настройках.
+
+type ClinicDoctor = {
+  id: string;
+  fullName: string;
+  specialty: string;
+  /** Сколько клиентов ведёт одновременно. Единица — обычный приём. */
+  capacity: number;
+  salaryFixedMinor?: number | null;
+  salaryPercent?: number | null;
+  sortOrder: number;
+  isActive: boolean;
+};
+
+type Shift = {
+  id: string;
+  doctorId: string;
+  weekday: number | null;
+  onDate: string;
+  onDateEnd: string;
+  isWorking: boolean;
+  startMinute: number | null;
+  endMinute: number | null;
+  note: string;
+};
+
+type ScreenState = "loading" | "ready" | "failed" | "unavailable";
+
+/**
+ * Что заводим на дату. Булев флаг «работает» третье состояние выразить не мог:
+ * закрытое окно нерабочее, но с часами — ровно теми, которые сервер вычтет из
+ * смены.
+ */
+type ExceptionKind = "off" | "window" | "hours";
+
+type ExceptionDraft = { from: string; to: string; note: string; kind: ExceptionKind; start: string; end: string };
+
+/** Общепринятые русские сокращения. label.slice(0, 2) давал «По», «Че», «Пя». */
+const WEEKDAY_SHORT: Record<number, string> = { 1: "Пн", 2: "Вт", 3: "Ср", 4: "Чт", 5: "Пт", 6: "Сб", 7: "Вс" };
+
+const WEEKDAYS: Array<{ iso: number; label: string }> = [
+  { iso: 1, label: "Понедельник" },
+  { iso: 2, label: "Вторник" },
+  { iso: 3, label: "Среда" },
+  { iso: 4, label: "Четверг" },
+  { iso: 5, label: "Пятница" },
+  { iso: 6, label: "Суббота" },
+  { iso: 7, label: "Воскресенье" },
+];
+
+/**
+ * Пояса, из которых выбирают. Закрытый список, а не свободный ввод: строка,
+ * которую не понимает Intl, молча выключила бы правило графика целиком.
+ */
+const TIME_ZONES = [
+  "Asia/Almaty",
+  "Asia/Aqtobe",
+  "Asia/Aqtau",
+  "Asia/Atyrau",
+  "Asia/Oral",
+  "Asia/Qostanay",
+  "Asia/Qyzylorda",
+  "Asia/Tashkent",
+  "Asia/Bishkek",
+  "Europe/Moscow",
+];
+
+function readText(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function readNullableInt(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) ? Math.round(numeric) : null;
+}
+
+function doctorFromApi(record: Record<string, unknown>): ClinicDoctor {
+  return {
+    id: readText(record.id),
+    fullName: readText(record.fullName) || readText(record.full_name),
+    specialty: readText(record.specialty),
+    capacity: Number(record.capacity) || 1,
+    salaryFixedMinor: record.salaryFixedMinor === null || record.salaryFixedMinor === undefined || record.salaryFixedMinor === "" ? null : Number(record.salaryFixedMinor),
+    salaryPercent: record.salaryPercent === null || record.salaryPercent === undefined || record.salaryPercent === "" ? null : Number(record.salaryPercent),
+    sortOrder: readNullableInt(record.sortOrder ?? record.sort_order) ?? 0,
+    isActive:
+      record.isActive === undefined && record.is_active === undefined
+        ? true
+        : Boolean(record.isActive ?? record.is_active),
+  };
+}
+
+function shiftFromApi(record: Record<string, unknown>): Shift {
+  return {
+    id: readText(record.id),
+    doctorId: readText(record.doctorId) || readText(record.doctor_id),
+    weekday: readNullableInt(record.weekday),
+    onDate: readText(record.onDate) || readText(record.on_date),
+    onDateEnd: readText(record.onDateEnd) || readText(record.on_date_end),
+    isWorking:
+      record.isWorking === undefined && record.is_working === undefined
+        ? true
+        : Boolean(record.isWorking ?? record.is_working),
+    startMinute: readNullableInt(record.startMinute ?? record.start_minute),
+    endMinute: readNullableInt(record.endMinute ?? record.end_minute),
+    note: readText(record.note),
+  };
+}
+
+/** «09:00» ⇄ 540. Минуты за полночь показываются как 02:00 следующего дня. */
+function minuteToTime(minute: number | null): string {
+  if (minute === null) return "";
+  const normalized = ((minute % 1440) + 1440) % 1440;
+  return `${String(Math.floor(normalized / 60)).padStart(2, "0")}:${String(normalized % 60).padStart(2, "0")}`;
+}
+
+function timeToMinute(value: string): number | null {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return null;
+  return hours * 60 + minutes;
+}
+
+/**
+ * Закрытое окно — нерабочая строка С часами.
+ *
+ * На сервере выходной и окно — одна и та же нерабочая строка, и различают их
+ * только часы. Без этой проверки окно на два часа читалось бы на экране как
+ * выходной на весь день, хотя вычитается из смены именно оно.
+ */
+function isClosedWindow(shift: Shift): boolean {
+  return !shift.isWorking && shift.startMinute !== null && shift.endMinute !== null;
+}
+
+/** Подпись строки: показывает то, что в ней лежит, и ничего сверх того. */
+function shiftStateText(shift: Shift): string {
+  const hours = `${minuteToTime(shift.startMinute)}–${minuteToTime(shift.endMinute)}`;
+  if (isClosedWindow(shift)) return `Закрыто ${hours}`;
+  if (!shift.isWorking) return "Выходной";
+  return hours;
+}
+
+/**
+ * Детали сервера по-русски. Оператор не должен читать `weekday must be…`.
+ *
+ * Функция от словаря ниши, а не константа: сервер говорит «врач» для любой
+ * ниши, и перевод — единственное место, где салон услышит «мастер».
+ */
+function detailTextFor(terms: Terms): Record<string, string> {
+  return {
+    "fullName is required": `Укажите имя ${terms.specialistGenitive}.`,
+    "fullName must be unique within the workspace": `${capitalize(terms.specialist)} с таким именем уже есть.`,
+    "doctorId is required": `Сначала выберите ${terms.specialistGenitive}.`,
+    "either weekday or onDate is required, not both": "Строка графика — либо день недели, либо дата.",
+    // Прежний перевод «у выходного не может быть часов» объяснял отказ,
+    // которого больше нет: нерабочая строка с часами — это закрытое окно.
+    "startMinute and endMinute are required for a working row": `Укажите начало и конец ${terms.dutyGenitive}.`,
+    "startMinute and endMinute are required for a closed window": "Укажите, с какого и по какое время закрыто.",
+    "startMinute and endMinute must be numbers": "Время указывается как 09:00.",
+    "startMinute and endMinute must be integers": "Время указывается как 09:00.",
+    "startMinute must be between 0 and 1439": "Начало должно попадать в сутки: от 00:00 до 23:59.",
+    "weekday must be an integer between 1 (Monday) and 7 (Sunday)": "День недели выбран неверно.",
+    "onDate must be a valid date": "Дата указана неверно.",
+    "onDateEnd must be a valid date": "Дата окончания указана неверно.",
+    "endMinute must be after startMinute and no more than 24 hours later":
+      `Конец ${terms.dutyGenitive} должен быть позже начала и не длиннее суток.`,
+    "onDateEnd must not be earlier than onDate": "Конец периода не может быть раньше начала.",
+  };
+}
+
+function refusalText(status: number, error: string, details: string[], detailText: Record<string, string>): string {
+  const translated = details.map((detail) => detailText[detail]).filter(Boolean);
+  if (translated.length > 0) return translated.join(" ");
+  if (error && /[а-яё]/i.test(error)) return error;
+  return crmErrorMessage(status);
+}
+
+type Envelope = {
+  success?: boolean;
+  mode?: string;
+  error?: string;
+  details?: string[];
+  data?: Record<string, unknown>;
+};
+
+async function readEnvelope(response: Response): Promise<Envelope | null> {
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as Envelope;
+  } catch {
+    return null;
+  }
+}
+
+export function DoctorSchedule() {
+  const auth = useAuth();
+  const workspaceId = readWorkspaceId();
+  // The parent does not key this tab by workspace or auth identity.
+  const key = JSON.stringify([workspaceId, auth.user?.id, auth.session?.user.id, auth.clinicId,
+    auth.userRole, Object.entries(auth.rolePermissions).sort(([a], [b]) => a.localeCompare(b)),
+    auth.isLoading, auth.isSigningOut, auth.isImpersonation, auth.isDemoMode, auth.isStaffMode,
+    auth.vertical, getSignOutRevision()]);
+  return <DoctorScheduleEditor key={key} auth={auth} workspaceId={workspaceId} />;
+}
+
+function DoctorScheduleEditor({ auth, workspaceId }: { auth: ReturnType<typeof useAuth>; workspaceId: string }) {
+  const { userRole, rolePermissions, vertical } = auth;
+  const actorId = auth.user?.id || "";
+  const lifetime = useRef({ mounted: false, retired: false, run: 0, revision: getSignOutRevision(), controller: new AbortController() }).current;
+  const [expired, setExpired] = useState(false);
+  const terms = termsFor(vertical);
+  const detailText = useMemo(() => detailTextFor(terms), [terms]);
+  const [doctors, setDoctors] = useState<ClinicDoctor[]>([]);
+  const [shifts, setShifts] = useState<Shift[]>([]);
+  const [timeZone, setTimeZone] = useState("");
+  const [screen, setScreen] = useState<ScreenState>("loading");
+  const [failureText, setFailureText] = useState("");
+  const [selectedId, setSelectedId] = useState("");
+  const [formOpen, setFormOpen] = useState(false);
+  const [editingId, setEditingId] = useState("");
+  const [form, setForm] = useState({ fullName: "", specialty: "", capacity: "1", sortOrder: "0", isActive: true, salaryFixedTenge: "", salaryPercent: "" });
+  const [saving, setSaving] = useState(false);
+  const [exception, setException] = useState<ExceptionDraft>({ from: "", to: "", note: "", kind: "off", start: "09:00", end: "18:00" });
+  // weekday === 0 — форма окна закрыта: ноль не бывает днём недели по ISO, и
+  // отдельный флаг «открыта» тут ничего бы не добавил.
+  const [weekdayWindow, setWeekdayWindow] = useState({ weekday: 0, start: "13:00", end: "14:00", note: "" });
+
+  const generation = useRef(0);
+  const selection = useRef({ id: "", doctorSaving: false, rhythmSaving: false });
+  const view = selection.current;
+  const isCurrent = (run = lifetime.run) => lifetime.mounted && !lifetime.retired && run === lifetime.run
+    && Boolean(actorId) && !auth.isLoading && !auth.isSigningOut && !auth.isDemoMode
+    && !isSignOutPending() && getSignOutRevision() === lifetime.revision && readWorkspaceId() === workspaceId;
+  const isViewCurrent = (run = lifetime.run) => isCurrent(run) && selection.current === view;
+  const retire = () => {
+    if (!lifetime.mounted || lifetime.retired) return;
+    lifetime.retired = true;
+    lifetime.controller.abort();
+    setExpired(true);
+  };
+
+  useLayoutEffect(() => {
+    lifetime.mounted = true;
+    lifetime.run++;
+    lifetime.controller = new AbortController();
+    const subscription = hasSupabaseFrontendEnv ? sessionAuth.onAuthStateChange((_event, session) => {
+      if ((session?.user.id || "") !== actorId) retire();
+    }).data.subscription : null;
+    return () => {
+      lifetime.mounted = false;
+      lifetime.run++;
+      lifetime.controller.abort();
+      subscription?.unsubscribe();
+    };
+  }, [lifetime, actorId]);
+
+  /** Правит тот, кто отвечает за клинику. Нет права — нет и кнопок. */
+  const canManage = useMemo(
+    () => userRole === "owner" || userRole === "admin" || userRole === "manager" || Boolean(rolePermissions.admin),
+    [rolePermissions.admin, userRole],
+  );
+
+  /** Часовой пояс пишется через настройки, а они только для владельца и админа. */
+  const canSetTimeZone = userRole === "owner" || userRole === "admin";
+
+  const selectDoctor = (id: string) => {
+    if (!isCurrent() || selection.current.id === id) return;
+    selection.current = { id, doctorSaving: false, rhythmSaving: false };
+    setSelectedId(id);
+    setFormOpen(false);
+    setSaving(false);
+    setRhythmSaving(false);
+    setWeekdayWindow({ weekday: 0, start: "13:00", end: "14:00", note: "" });
+    setException({ from: "", to: "", note: "", kind: "off", start: "09:00", end: "18:00" });
+    setRhythm({ work: 2, off: 2, start: "", weeks: 4, from: "09:00", to: "21:00" });
+  };
+
+  const fetchFor = (path: string, run: number, guard: () => boolean, init: RequestInit = {}) => crmFetch(path, {
+    ...init, cache: "no-store", expectedUserId: actorId, signal: lifetime.controller.signal,
+    dispatchGuard: () => isCurrent(run) && guard(),
+  });
+
+  const load = async (options: { quiet?: boolean } = {}) => {
+    const run = lifetime.run;
+    if (!lifetime.mounted || lifetime.retired || selection.current !== view) return;
+    if (!isRealWorkspace()) { setScreen("unavailable"); return; }
+    if (!isViewCurrent(run)) return;
+    const current = generation.current + 1;
+    generation.current = current;
+    if (!options.quiet) setScreen("loading");
+
+    try {
+      const query = encodeURIComponent(workspaceId);
+      const [doctorsResponse, shiftsResponse] = await Promise.all([
+        fetchFor(`/api/crm/clinic-doctors?workspaceId=${query}`, run, () => generation.current === current),
+        fetchFor(`/api/crm/doctor-schedule?workspaceId=${query}`, run, () => generation.current === current),
+      ]);
+      if (!isCurrent(run) || generation.current !== current) return;
+      if ([doctorsResponse.status, shiftsResponse.status].some((status) => status === 401 || status === 403)) { retire(); return; }
+      const doctorsBody = await readEnvelope(doctorsResponse);
+      const shiftsBody = await readEnvelope(shiftsResponse);
+      if (!isCurrent(run) || generation.current !== current) return;
+
+      if (!doctorsResponse.ok || doctorsBody?.success !== true) {
+        // Пустой список здесь был бы неправдой: «не удалось прочитать» и
+        // «врачей нет» — разные ответы, и второй заставил бы завести всех
+        // заново поверх существующих.
+        console.warn("[doctors] read failed", doctorsResponse.status, doctorsBody?.error);
+        setFailureText(refusalText(doctorsResponse.status, readText(doctorsBody?.error), doctorsBody?.details || [], detailText));
+        setScreen("failed");
+        return;
+      }
+
+      if (doctorsBody.data?.directoryAvailable === false) {
+        setDoctors([]);
+        setShifts([]);
+        setScreen("unavailable");
+        return;
+      }
+
+      const rawDoctors = doctorsBody.data?.doctors ?? doctorsBody.data?.items;
+      const list = (Array.isArray(rawDoctors) ? rawDoctors : []).map((item) => doctorFromApi(item as Record<string, unknown>));
+      list.sort((a, b) => a.sortOrder - b.sortOrder || a.fullName.localeCompare(b.fullName, "ru"));
+      setDoctors(list);
+
+      if (shiftsResponse.ok && shiftsBody?.success === true) {
+        const rawShifts = shiftsBody.data?.shifts ?? shiftsBody.data?.items;
+        setShifts((Array.isArray(rawShifts) ? rawShifts : []).map((item) => shiftFromApi(item as Record<string, unknown>)));
+        setTimeZone(readText(shiftsBody.data?.timeZone));
+      }
+
+      // These reads cover the whole workspace. Preserve a choice made while
+      // decoding instead of restoring the doctor captured by the loader.
+      const chosen = selection.current.id;
+      selectDoctor(chosen && list.some((doctor) => doctor.id === chosen) ? chosen : list[0]?.id ?? "");
+      setScreen("ready");
+    } catch (error) {
+      if (!isCurrent(run) || generation.current !== current) return;
+      if ([401, 403].includes(Number((error as { status?: number })?.status))) { retire(); return; }
+      console.warn("[doctors] read threw", error);
+      setFailureText(crmErrorMessage(error));
+      setScreen("failed");
+    }
+  };
+
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!formOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isViewCurrent() && event.key === "Escape") setFormOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [formOpen, view]);
+
+  const write = async (path: string, method: "POST" | "PATCH", payload: Record<string, unknown>): Promise<boolean> => {
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || (path === "/api/crm/admin-settings" && !canSetTimeZone)) return false;
+    try {
+      const response = await fetchFor(path, run, () => isViewCurrent(run), {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, workspaceId }),
+      });
+      if (!isViewCurrent(run)) return false;
+      if (response.status === 401 || response.status === 403) { retire(); return false; }
+      const body = await readEnvelope(response);
+      if (!isViewCurrent(run)) return false;
+      if (!response.ok || body?.success !== true) {
+        console.warn("[doctors] write failed", path, method, response.status, body?.error, (body?.details || []).join("; "));
+        toast.error(refusalText(response.status, readText(body?.error), body?.details || [], detailText));
+        return false;
+      }
+      return true;
+    } catch (error) {
+      if (!isViewCurrent(run)) return false;
+      if ([401, 403].includes(Number((error as { status?: number })?.status))) { retire(); return false; }
+      console.warn("[doctors] write threw", path, method, error);
+      toast.error(crmErrorMessage(error));
+      return false;
+    }
+  };
+
+  const submitDoctor = async () => {
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || view.doctorSaving) return;
+    const fullName = form.fullName.trim();
+    if (!fullName) {
+      toast.error(`Укажите имя ${terms.specialistGenitive}`);
+      return;
+    }
+    view.doctorSaving = true;
+    setSaving(true);
+    try {
+      // Оплата: пустое поле — null, «условия не заданы»; это не ноль.
+      const salaryFixed = form.salaryFixedTenge.trim();
+      const salaryPercent = form.salaryPercent.trim();
+      const fields = {
+        fullName,
+        specialty: form.specialty.trim(),
+        capacity: readNullableInt(form.capacity) ?? 1,
+        sortOrder: readNullableInt(form.sortOrder) ?? 0,
+        isActive: form.isActive,
+        salaryFixedMinor: salaryFixed === "" ? null : Math.max(0, Math.round(Number(salaryFixed) || 0)) * 100,
+        salaryPercent: salaryPercent === "" ? null : Math.min(100, Math.max(0, Math.round(Number(salaryPercent) || 0))),
+      };
+      const ok = editingId
+        ? await write("/api/crm/clinic-doctors", "PATCH", { id: editingId, ...fields })
+        : await write("/api/crm/clinic-doctors", "POST", fields);
+      if (!ok || !isViewCurrent(run)) return;
+      setFormOpen(false);
+      toast.success(`${capitalize(terms.specialist)} ${editingId ? "обновлён" : "добавлен"}`);
+      await load({ quiet: true });
+    } finally {
+      if (isViewCurrent(run)) { view.doctorSaving = false; setSaving(false); }
+    }
+  };
+
+  const selected = doctors.find((doctor) => doctor.id === selectedId) ?? null;
+  const mine = useMemo(() => shifts.filter((shift) => shift.doctorId === selectedId), [selectedId, shifts]);
+  const weeklyByDay = useMemo(() => {
+    const map = new Map<number, Shift[]>();
+    for (const shift of mine) {
+      if (shift.weekday === null) continue;
+      const list = map.get(shift.weekday) ?? [];
+      list.push(shift);
+      map.set(shift.weekday, list);
+    }
+    return map;
+  }, [mine]);
+  const exceptions = useMemo(() => mine.filter((shift) => Boolean(shift.onDate)), [mine]);
+
+  const saveWeekday = async (iso: number, start: string, end: string) => {
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || !selectedId) return;
+    const startMinute = timeToMinute(start);
+    const endMinute = timeToMinute(end);
+    if (startMinute === null || endMinute === null) {
+      toast.error("Время указывается как 09:00");
+      return;
+    }
+    // Смена через полночь: 22:00–02:00 хранится как [1320, 1560).
+    const normalizedEnd = endMinute <= startMinute ? endMinute + 1440 : endMinute;
+    // Строк на один день может оказаться несколько: правится КАЖДАЯ. Прежняя
+    // версия трогала первую, рапортовала успех — и правило продолжало читать
+    // вторую, то есть экран показывал одно, а сервер судил по другому.
+    // Закрытые окна этого дня — отдельные строки, и правка часов смены их не
+    // касается: PATCH превратил бы окно во вторую рабочую строку, и день
+    // остался бы разом и без окна, и с дублем смены.
+    const existing = (weeklyByDay.get(iso) ?? []).filter((row) => !isClosedWindow(row));
+    const payload = { doctorId: selectedId, weekday: iso, isWorking: true, startMinute, endMinute: normalizedEnd };
+    let ok = true;
+    if (existing.length === 0) {
+      ok = await write("/api/crm/doctor-schedule", "POST", payload);
+    } else {
+      for (const row of existing) {
+        ok = (await write("/api/crm/doctor-schedule", "PATCH", { id: row.id, ...payload })) && ok;
+      }
+    }
+    if (!ok || !isViewCurrent(run)) return;
+    toast.success("График сохранён");
+    await load({ quiet: true });
+  };
+
+  const setDayOff = async (iso: number) => {
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || !selectedId) return;
+    const existing = (weeklyByDay.get(iso) ?? []).filter((row) => !isClosedWindow(row));
+    const payload = { doctorId: selectedId, weekday: iso, isWorking: false, startMinute: null, endMinute: null };
+    let ok = true;
+    if (existing.length === 0) {
+      ok = await write("/api/crm/doctor-schedule", "POST", payload);
+    } else {
+      for (const row of existing) {
+        ok = (await write("/api/crm/doctor-schedule", "PATCH", { id: row.id, ...payload })) && ok;
+      }
+    }
+    if (!ok || !isViewCurrent(run)) return;
+    toast.success("День отмечен как нерабочий");
+    await load({ quiet: true });
+  };
+
+  /**
+   * Окно внутри дня недели: нерабочая строка С часами, которую сервер вычтет
+   * из смены.
+   *
+   * Всегда POST и никогда PATCH: окон в одном дне бывает несколько — обед и
+   * отъезд не одно и то же, — и правка первой строки съела бы вторую.
+   */
+  const closeWeekdayWindow = async (iso: number) => {
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || !selectedId) return;
+    const startMinute = timeToMinute(weekdayWindow.start);
+    const endMinute = timeToMinute(weekdayWindow.end);
+    if (startMinute === null || endMinute === null) {
+      toast.error("Время указывается как 09:00");
+      return;
+    }
+    const ok = await write("/api/crm/doctor-schedule", "POST", {
+      doctorId: selectedId,
+      weekday: iso,
+      isWorking: false,
+      startMinute,
+      endMinute: endMinute <= startMinute ? endMinute + 1440 : endMinute,
+      note: weekdayWindow.note.trim(),
+    });
+    if (!ok || !isViewCurrent(run)) return;
+    setWeekdayWindow({ weekday: 0, start: "13:00", end: "14:00", note: "" });
+    toast.success("Окно закрыто");
+    await load({ quiet: true });
+  };
+
+  /**
+   * Ритм на период — «2/2» и «5/2» из запись.кз.
+   *
+   * Недельный шаблон ритм «два через два» выразить не может в принципе: цикл
+   * ритма — четыре дня, а неделя — семь, и рабочие дни каждую неделю падают на
+   * разные даты. Поэтому ритм раскладывается в ДАТИРОВАННЫЕ блоки: рабочий
+   * блок — строка с часами на диапазон дат, выходной — строка «закрыто» на
+   * следующий диапазон. Датированные строки и так главнее недельного шаблона.
+   *
+   * Выходные пишутся явно, а не «просто не пишем рабочих строк»: день, не
+   * покрытый ничем, у мастера без недельного шаблона читается как «график не
+   * задан — запись не ограничена», и ритм 2/2 молча превратился бы в «всегда
+   * можно».
+   */
+  const [rhythm, setRhythm] = useState({ work: 2, off: 2, start: "", weeks: 4, from: "09:00", to: "21:00" });
+  const [rhythmSaving, setRhythmSaving] = useState(false);
+
+  const fillRhythm = async () => {
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || !selectedId || view.rhythmSaving) return;
+    if (!rhythm.start) {
+      toast.error("Укажите, с какой даты начинается ритм");
+      return;
+    }
+    const startMinute = timeToMinute(rhythm.from);
+    const endMinute = timeToMinute(rhythm.to);
+    if (startMinute === null || endMinute === null || endMinute <= startMinute) {
+      toast.error("Часы ритма указываются как 09:00–21:00");
+      return;
+    }
+    const work = Math.max(1, Math.min(6, Math.round(rhythm.work)));
+    const off = Math.max(1, Math.min(6, Math.round(rhythm.off)));
+    const totalDays = Math.max(7, Math.min(70, Math.round(rhythm.weeks) * 7));
+
+    const addDays = (key: string, days: number) => {
+      const [year, month, day] = key.split("-").map(Number);
+      const date = new Date(Date.UTC(year, month - 1, day + days));
+      return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+    };
+
+    // Блоки: [рабочие × work, закрытые × off] до конца периода.
+    const blocks: Array<{ from: string; to: string; working: boolean }> = [];
+    let cursor = 0;
+    while (cursor < totalDays) {
+      const workEnd = Math.min(cursor + work, totalDays);
+      blocks.push({ from: addDays(rhythm.start, cursor), to: addDays(rhythm.start, workEnd - 1), working: true });
+      cursor = workEnd;
+      if (cursor >= totalDays) break;
+      const offEnd = Math.min(cursor + off, totalDays);
+      blocks.push({ from: addDays(rhythm.start, cursor), to: addDays(rhythm.start, offEnd - 1), working: false });
+      cursor = offEnd;
+    }
+
+    view.rhythmSaving = true;
+    setRhythmSaving(true);
+    let written = 0;
+    try {
+      for (const block of blocks) {
+        const payload: Record<string, unknown> = {
+          doctorId: selectedId,
+          onDate: block.from,
+          onDateEnd: block.to,
+          isWorking: block.working,
+          note: `ритм ${work}/${off}`,
+        };
+        if (block.working) {
+          payload.startMinute = startMinute;
+          payload.endMinute = endMinute;
+        }
+        const ok = await write("/api/crm/doctor-schedule", "POST", payload);
+        if (!isViewCurrent(run)) return;
+        if (!ok) {
+          // Останавливаемся честно: половина записанного ритма видна в списке
+          // исключений, и её можно перенести или продолжить, а не гадать.
+          toast.error(`Записано ${written} из ${blocks.length} блоков — дальше сервер отказал`);
+          return;
+        }
+        written += 1;
+      }
+      toast.success(`Ритм ${work}/${off} записан: ${blocks.length} блоков на ${Math.round(totalDays / 7)} нед.`);
+      setRhythm((current) => ({ ...current, start: "" }));
+      await load({ quiet: true });
+    } finally {
+      if (isViewCurrent(run)) { view.rhythmSaving = false; setRhythmSaving(false); }
+    }
+  };
+
+  const addException = async () => {
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || !selectedId) return;
+    if (!exception.from) {
+      toast.error("Укажите дату");
+      return;
+    }
+    const payload: Record<string, unknown> = {
+      doctorId: selectedId,
+      onDate: exception.from,
+      onDateEnd: exception.to || exception.from,
+      isWorking: exception.kind === "hours",
+      note: exception.note.trim(),
+    };
+    // Часы едут и у особых часов, и у закрытого окна: у второго они — ровно то,
+    // что сервер вычтет из смены. Без часов строка стала бы выходным на день.
+    if (exception.kind !== "off") {
+      const start = timeToMinute(exception.start);
+      const end = timeToMinute(exception.end);
+      if (start === null || end === null) {
+        toast.error("Время указывается как 09:00");
+        return;
+      }
+      payload.startMinute = start;
+      if (exception.kind === "window") {
+        // Закрытое окно за полночь не заворачивается. Смена — может: ночной
+        // приём существует. А «закрыто с 13:00 по 13:00», превращённое в
+        // 13:00–13:00 следующих суток, тихо отрезало бы весь остаток дня, и
+        // строка в списке при этом читалась бы как безобидная.
+        if (end <= start) {
+          toast.error("Конец окна должен быть позже начала");
+          return;
+        }
+        payload.endMinute = end;
+      } else {
+        payload.endMinute = end <= start ? end + 1440 : end;
+      }
+    }
+    const ok = await write("/api/crm/doctor-schedule", "POST", payload);
+    if (!ok || !isViewCurrent(run)) return;
+    const kind = exception.kind;
+    setException({ from: "", to: "", note: "", kind: "off", start: "09:00", end: "18:00" });
+    toast.success(kind === "window" ? "Окно закрыто" : kind === "hours" ? "Особые часы сохранены" : "День закрыт");
+    await load({ quiet: true });
+  };
+
+  /**
+   * Исключение можно ПЕРЕНЕСТИ, но нельзя удалить.
+   *
+   * У платформы нет DELETE ни для одного ресурса, а у строки графика нет
+   * колонки «архивная»: снять её нечем. Прежняя кнопка «Снять» отправляла
+   * пустую дату — сервер отвергал такое тело, а если бы принял, строка
+   * нарушила бы ограничение «ровно один ключ: день недели или дата».
+   * Кнопки, которая не может сработать, здесь больше нет; вместо неё —
+   * перенос дат, и честная строка о том, что удаления пока не существует.
+   */
+  const moveException = async (shift: Shift, from: string, to: string) => {
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || shift.doctorId !== selectedId) return;
+    if (!from) {
+      toast.error("Укажите дату");
+      return;
+    }
+    const ok = await write("/api/crm/doctor-schedule", "PATCH", {
+      id: shift.id,
+      onDate: from,
+      onDateEnd: to || from,
+    });
+    if (!ok || !isViewCurrent(run)) return;
+    toast.success("Даты исключения изменены");
+    await load({ quiet: true });
+  };
+
+  const saveTimeZone = async (zone: string) => {
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canSetTimeZone) return;
+    const ok = await write("/api/crm/admin-settings", "POST", { key: "clinic_schedule", value: { timeZone: zone } });
+    if (!ok || !isViewCurrent(run)) return;
+    setTimeZone(zone);
+    toast.success(`Часовой пояс ${terms.orgGenitive} сохранён`);
+  };
+
+  const resolvedSummary = useMemo(() => {
+    if (!selected) return "";
+    const working = WEEKDAYS
+      .filter((day) => (weeklyByDay.get(day.iso) ?? []).some((shift) => shift.isWorking))
+      .map((day) => WEEKDAY_SHORT[day.iso]);
+    // «Строк нет вовсе» и «все дни отмечены нерабочими» — разные состояния, и
+    // второе правило как раз ПРИМЕНЯЕТ, отказывая всю неделю. Прежняя сводка
+    // печатала для него «ничем не ограничена» — прямо наоборот.
+    if (mine.length === 0) return `График не задан — запись к этому ${terms.specialistDative} ничем не ограничена.`;
+    if (working.length === 0) return "Все дни отмечены нерабочими: запись будет предупреждать в любой день.";
+    if (working.length === 7) return `${capitalize(terms.specialist)} принимает все дни недели.`;
+    return `${capitalize(terms.specialist)} принимает: ${working.join(", ")}. В остальные дни запись будет предупреждать.`;
+    // terms в зависимостях обязателен: без него смена ниши на лету оставляла
+    // бы сводку на словаре прежней ниши, пока остальной экран уже переключился.
+  }, [mine.length, selected, terms, weeklyByDay]);
+
+  if (expired) return null;
+
+  return (
+    <div className="grid gap-5 xl:grid-cols-[minmax(280px,360px)_minmax(0,1fr)]">
+      <section className="neu-card">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-black text-[#0F172A]">{capitalize(terms.specialistPlural)}</h2>
+            <p className="text-sm text-[#64748B]">Кто принимает в {terms.orgPrepositional}. Имя отсюда подставляется в запись.</p>
+          </div>
+          {canManage && screen === "ready" ? (
+            <button
+              type="button"
+              className="neu-btn px-3 py-2"
+              onClick={() => {
+                if (!isViewCurrent()) return;
+                setEditingId("");
+                setForm({ fullName: "", specialty: "", capacity: "1", sortOrder: "0", isActive: true, salaryFixedTenge: "", salaryPercent: "" });
+                setFormOpen(true);
+              }}
+            >
+              <Plus size={15} />
+            </button>
+          ) : null}
+        </div>
+
+        {screen === "loading" ? (
+          <p className="text-sm font-semibold text-[#64748B]" aria-live="polite">Загружаем данные…</p>
+        ) : null}
+
+        {screen === "failed" ? (
+          <div className="rounded-2xl bg-rose-50 p-4 text-sm font-semibold text-rose-900" aria-live="polite">
+            Не удалось загрузить справочник {terms.specialistGenitivePlural}. Это не значит, что их нет.
+            <p className="mt-1 font-normal">{failureText}</p>
+            <button type="button" className="neu-btn mt-3 px-3 py-2 text-xs" onClick={() => void load()}>
+              <RefreshCw size={13} />
+              Попробовать снова
+            </button>
+          </div>
+        ) : null}
+
+        {screen === "unavailable" ? (
+          <p className="rounded-2xl bg-slate-100 p-4 text-sm font-semibold text-[#64748B]">
+            Справочник {terms.specialistGenitivePlural} ещё не включён. Поле «{capitalize(terms.specialist)}» в записи работает как раньше — текстом.
+          </p>
+        ) : null}
+
+        {screen === "ready" && doctors.length === 0 ? (
+          <p className="text-sm font-semibold text-[#64748B]">
+            {canManage
+              ? `${capitalize(terms.specialistGenitivePlural)} пока нет. Добавьте первого — он появится в форме записи.`
+              : `${capitalize(terms.specialistGenitivePlural)} пока нет. Список заполняет администратор ${terms.orgGenitive}.`}
+          </p>
+        ) : null}
+
+        {screen === "ready" && doctors.length > 0 ? (
+          <div className="grid gap-2">
+            {doctors.map((doctor) => (
+              <button
+                key={doctor.id}
+                type="button"
+                onClick={() => { if (isViewCurrent()) selectDoctor(doctor.id); }}
+                className={`rounded-2xl border p-3 text-left ${
+                  doctor.id === selectedId ? "border-[#0D9488] bg-[#ECFDF5]" : "border-[#E2E8F0] bg-white/70"
+                }`}
+                style={{ opacity: doctor.isActive ? 1 : 0.55 }}
+              >
+                <span className="block font-bold text-[#0F172A]">{doctor.fullName}</span>
+                <span className="mt-0.5 block text-xs text-[#64748B]">
+                  {doctor.specialty || "Специальность не указана"}
+                  {doctor.capacity > 1 ? ` · ведёт ${doctor.capacity} одновременно` : ""}
+                  {doctor.isActive ? "" : " · скрыт"}
+                </span>
+                {canManage ? (
+                  <span
+                    className="mt-2 inline-block text-xs font-bold text-[#0D9488]"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (!isViewCurrent()) return;
+                      setEditingId(doctor.id);
+                      setForm({
+                        fullName: doctor.fullName,
+                        specialty: doctor.specialty,
+                        capacity: String(doctor.capacity),
+                        sortOrder: String(doctor.sortOrder),
+                        isActive: doctor.isActive,
+                        salaryFixedTenge: doctor.salaryFixedMinor === null || doctor.salaryFixedMinor === undefined ? "" : String(Math.round(doctor.salaryFixedMinor / 100)),
+                        salaryPercent: doctor.salaryPercent === null || doctor.salaryPercent === undefined ? "" : String(doctor.salaryPercent),
+                      });
+                      setFormOpen(true);
+                    }}
+                  >
+                    Изменить
+                  </span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </section>
+
+      <section className="neu-card">
+        <div className="mb-4">
+          <h2 className="text-lg font-black text-[#0F172A]">График {terms.dutyGenitive}</h2>
+          <p className="text-sm text-[#64748B]">
+            Часы задаются во времени {terms.orgGenitive}. Пока часовой пояс не выбран, график при записи не применяется.
+          </p>
+        </div>
+
+        <label className="mb-5 block">
+          <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Часовой пояс {terms.orgGenitive}</span>
+          {canSetTimeZone ? (
+            <select className="neu-input w-full" value={timeZone} onChange={(event) => void saveTimeZone(event.target.value)}>
+              <option value="">Не выбран — график не применяется</option>
+              {TIME_ZONES.map((zone) => (
+                <option key={zone} value={zone}>{zone}</option>
+              ))}
+            </select>
+          ) : (
+            <p className="text-sm font-semibold text-[#0F172A]">
+              {timeZone || "Не выбран — график не применяется"}
+            </p>
+          )}
+        </label>
+
+        {screen !== "ready" || !selected ? (
+          <p className="text-sm font-semibold text-[#64748B]">Выберите {terms.specialistGenitive} слева, чтобы задать его график.</p>
+        ) : (
+          <div className="grid gap-4">
+            <p className="rounded-2xl bg-[#F1F5F9] p-3 text-sm font-semibold text-[#334155]">{resolvedSummary}</p>
+
+            <div className="grid gap-2">
+              {WEEKDAYS.map((day) => {
+                const rows = weeklyByDay.get(day.iso) ?? [];
+                const working = rows.find((shift) => shift.isWorking) ?? null;
+                // Окна — отдельные строки того же дня: смена остаётся рабочей,
+                // а эти часы сервер из неё вычитает.
+                const windows = rows.filter(isClosedWindow);
+                const draftOpen = weekdayWindow.weekday === day.iso;
+                return (
+                  <div key={day.iso} className="flex flex-wrap items-center gap-2 rounded-2xl border border-[#E2E8F0] bg-white/70 p-3">
+                    <span className="w-32 text-sm font-bold text-[#0F172A]">{day.label}</span>
+                    {working ? (
+                      <>
+                        {/* key включает врача и сами значения: без него поле с
+                            defaultValue не обновляется при смене врача, и у
+                            второго врача показывались часы первого. */}
+                        <input
+                          key={`start-${selectedId}-${day.iso}-${working.startMinute}`}
+                          className="neu-input w-28"
+                          type="time"
+                          step={300}
+                          defaultValue={minuteToTime(working.startMinute)}
+                          disabled={!canManage}
+                          onBlur={(event) => canManage && void saveWeekday(day.iso, event.target.value, minuteToTime(working.endMinute))}
+                        />
+                        <span className="text-sm text-[#64748B]">до</span>
+                        <input
+                          key={`end-${selectedId}-${day.iso}-${working.endMinute}`}
+                          className="neu-input w-28"
+                          type="time"
+                          step={300}
+                          defaultValue={minuteToTime(working.endMinute)}
+                          disabled={!canManage}
+                          onBlur={(event) => canManage && void saveWeekday(day.iso, minuteToTime(working.startMinute), event.target.value)}
+                        />
+                        {working.endMinute !== null && working.endMinute > 1440 ? (
+                          <span className="text-xs font-semibold text-[#0369A1]">следующий день</span>
+                        ) : null}
+                        {canManage ? (
+                          <>
+                            <button
+                              type="button"
+                              className="neu-btn px-3 py-1.5 text-xs"
+                              onClick={() => isViewCurrent() && setWeekdayWindow({ weekday: day.iso, start: "13:00", end: "14:00", note: "" })}
+                            >
+                              Закрыть окно
+                            </button>
+                            <button type="button" className="neu-btn px-3 py-1.5 text-xs" onClick={() => void setDayOff(day.iso)}>
+                              Закрыть день
+                            </button>
+                          </>
+                        ) : null}
+                      </>
+                    ) : (
+                      <>
+                        <span className="text-sm font-semibold text-[#64748B]">
+                          {rows.length > 0 ? "Не работает" : "Не задано"}
+                        </span>
+                        {canManage ? (
+                          <button
+                            type="button"
+                            className="neu-btn px-3 py-1.5 text-xs"
+                            onClick={() => void saveWeekday(day.iso, "09:00", "18:00")}
+                          >
+                            Задать 09:00–18:00
+                          </button>
+                        ) : null}
+                      </>
+                    )}
+                    {windows.length > 0 ? (
+                      <div className="basis-full text-xs font-semibold text-[#B45309]">
+                        {windows.map((shift) => (
+                          <span key={shift.id} className="mr-3 inline-block">
+                            {shiftStateText(shift)}
+                            {shift.note ? ` · ${shift.note}` : ""}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    {canManage && draftOpen ? (
+                      <div className="basis-full mt-1 flex flex-wrap items-end gap-2 border-t border-[#E2E8F0] pt-2">
+                        <label className="block">
+                          <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Закрыто с</span>
+                          <input
+                            className="neu-input w-28"
+                            type="time"
+                            step={300}
+                            value={weekdayWindow.start}
+                            onChange={(event) => isViewCurrent() && setWeekdayWindow((c) => ({ ...c, start: event.target.value }))}
+                          />
+                        </label>
+                        <label className="block">
+                          <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">по</span>
+                          <input
+                            className="neu-input w-28"
+                            type="time"
+                            step={300}
+                            value={weekdayWindow.end}
+                            onChange={(event) => isViewCurrent() && setWeekdayWindow((c) => ({ ...c, end: event.target.value }))}
+                          />
+                        </label>
+                        <label className="block min-w-[160px] flex-1">
+                          <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Причина</span>
+                          <input
+                            className="neu-input w-full"
+                            value={weekdayWindow.note}
+                            onChange={(event) => isViewCurrent() && setWeekdayWindow((c) => ({ ...c, note: event.target.value }))}
+                            placeholder="Обед, планёрка…"
+                          />
+                        </label>
+                        <button type="button" className="neu-btn-primary px-4 py-2 text-xs" onClick={() => void closeWeekdayWindow(day.iso)}>
+                          Закрыть окно
+                        </button>
+                        <button
+                          type="button"
+                          className="neu-btn px-3 py-2 text-xs"
+                          onClick={() => isViewCurrent() && setWeekdayWindow((c) => ({ ...c, weekday: 0 }))}
+                        >
+                          Отмена
+                        </button>
+                        <p className="w-full text-xs text-[#64748B]">
+                          Эти часы вычитаются из смены дня: остальное время остаётся рабочим.
+                        </p>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div>
+              {/* Ритм — до исключений: сначала заполняют период, потом
+                  правят его точечно. Порядок чтения совпадает с порядком дел. */}
+              <h3 className="mb-2 text-sm font-black text-[#0F172A]">Ритм на период: 2/2, 5/2 или свой</h3>
+              <p className="mb-3 text-xs font-semibold text-[#64748B]">
+                Заполняет график датированными блоками: рабочие дни с часами, выходные закрыты.
+                Недельный шаблон ритм «два через два» выразить не может — цикл не кратен неделе.
+              </p>
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                {[
+                  { work: 2, off: 2, label: "2/2" },
+                  { work: 5, off: 2, label: "5/2" },
+                  { work: 3, off: 1, label: "3/1" },
+                ].map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    className="neu-btn px-3 py-1.5 text-sm"
+                    style={rhythm.work === preset.work && rhythm.off === preset.off ? { color: "#0D9488", fontWeight: 800 } : undefined}
+                    onClick={() => isViewCurrent() && setRhythm((current) => ({ ...current, work: preset.work, off: preset.off }))}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+                <label className="flex items-center gap-1 text-xs font-bold text-[#64748B]">
+                  работает
+                  <input className="neu-input w-14 px-2 py-1.5 text-sm" type="number" min={1} max={6} value={rhythm.work}
+                    onChange={(event) => isViewCurrent() && setRhythm((current) => ({ ...current, work: Number(event.target.value) || 1 }))} />
+                  через
+                  <input className="neu-input w-14 px-2 py-1.5 text-sm" type="number" min={1} max={6} value={rhythm.off}
+                    onChange={(event) => isViewCurrent() && setRhythm((current) => ({ ...current, off: Number(event.target.value) || 1 }))} />
+                </label>
+              </div>
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-1 text-xs font-bold text-[#64748B]">
+                  с
+                  <input className="neu-input px-2 py-1.5 text-sm" type="date" value={rhythm.start}
+                    onChange={(event) => isViewCurrent() && setRhythm((current) => ({ ...current, start: event.target.value }))} />
+                </label>
+                <label className="flex items-center gap-1 text-xs font-bold text-[#64748B]">
+                  недель
+                  <select className="neu-input px-2 py-1.5 text-sm" value={rhythm.weeks}
+                    onChange={(event) => isViewCurrent() && setRhythm((current) => ({ ...current, weeks: Number(event.target.value) }))}>
+                    {[2, 4, 6, 8].map((weeks) => <option key={weeks} value={weeks}>{weeks}</option>)}
+                  </select>
+                </label>
+                <label className="flex items-center gap-1 text-xs font-bold text-[#64748B]">
+                  часы
+                  <input className="neu-input w-24 px-2 py-1.5 text-sm" value={rhythm.from} placeholder="09:00"
+                    onChange={(event) => isViewCurrent() && setRhythm((current) => ({ ...current, from: event.target.value }))} />
+                  –
+                  <input className="neu-input w-24 px-2 py-1.5 text-sm" value={rhythm.to} placeholder="21:00"
+                    onChange={(event) => isViewCurrent() && setRhythm((current) => ({ ...current, to: event.target.value }))} />
+                </label>
+                <button type="button" className="neu-btn-primary px-4 py-2 text-sm" disabled={rhythmSaving} onClick={() => void fillRhythm()}>
+                  {rhythmSaving ? "Заполняем…" : "Заполнить график"}
+                </button>
+              </div>
+
+              <h3 className="mb-2 mt-5 text-sm font-black text-[#0F172A]">Исключения: отпуск, выходной, закрытое окно, особые часы</h3>
+              <p className="mb-2 text-xs text-[#64748B]">
+                Исключение можно перенести на другую дату, но удалить его в этой версии нельзя — у строк графика ещё нет
+                архивирования.
+              </p>
+              {exceptions.length === 0 ? (
+                <p className="text-sm text-[#64748B]">Исключений нет.</p>
+              ) : (
+                <div className="grid gap-2">
+                  {exceptions.map((shift) => (
+                    <div key={shift.id} className="flex flex-wrap items-center gap-2 rounded-2xl border border-[#E2E8F0] bg-white/70 p-3 text-sm">
+                      <span className="font-bold text-[#0F172A]">
+                        {shift.onDate}
+                        {shift.onDateEnd && shift.onDateEnd !== shift.onDate ? ` — ${shift.onDateEnd}` : ""}
+                      </span>
+                      {/* Общее «не работает» стирало разницу: у выходного
+                          закрыт весь день, у окна — только его часы, а запись
+                          вокруг них проходит. */}
+                      <span className={isClosedWindow(shift) ? "font-semibold text-[#B45309]" : "text-[#64748B]"}>
+                        {shiftStateText(shift)}
+                      </span>
+                      {shift.note ? <span className="text-[#64748B]">· {shift.note}</span> : null}
+                      {canManage ? (
+                        <label className="ml-auto flex items-center gap-2 text-xs font-semibold text-[#64748B]">
+                          Перенести на
+                          <input
+                            className="neu-input w-36"
+                            type="date"
+                            defaultValue={shift.onDate}
+                            onBlur={(event) => {
+                              if (event.target.value && event.target.value !== shift.onDate) {
+                                void moveException(shift, event.target.value, shift.onDateEnd);
+                              }
+                            }}
+                          />
+                        </label>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {canManage ? (
+                <div className="mt-3 flex flex-wrap items-end gap-2 rounded-2xl border border-dashed border-[#CBD5E1] p-3">
+                  <label className="block">
+                    <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">С</span>
+                    <input className="neu-input w-40" type="date" value={exception.from} onChange={(event) => isViewCurrent() && setException((c) => ({ ...c, from: event.target.value }))} />
+                  </label>
+                  <label className="block">
+                    <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">По</span>
+                    <input className="neu-input w-40" type="date" value={exception.to} onChange={(event) => isViewCurrent() && setException((c) => ({ ...c, to: event.target.value }))} />
+                  </label>
+                  <label className="block">
+                    <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Что делаем</span>
+                    <select
+                      className="neu-input w-56"
+                      value={exception.kind}
+                      onChange={(event) => isViewCurrent() && setException((c) => ({ ...c, kind: event.target.value as ExceptionKind }))}
+                    >
+                      <option value="off">Закрыть день целиком</option>
+                      <option value="window">Закрыть окно внутри дня</option>
+                      <option value="hours">Особые часы</option>
+                    </select>
+                  </label>
+                  {exception.kind !== "off" ? (
+                    <>
+                      <label className="block">
+                        <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">
+                          {exception.kind === "window" ? "Закрыто с" : "Часы с"}
+                        </span>
+                        <input className="neu-input w-28" type="time" step={300} value={exception.start} onChange={(event) => isViewCurrent() && setException((c) => ({ ...c, start: event.target.value }))} />
+                      </label>
+                      <label className="block">
+                        <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">по</span>
+                        <input className="neu-input w-28" type="time" step={300} value={exception.end} onChange={(event) => isViewCurrent() && setException((c) => ({ ...c, end: event.target.value }))} />
+                      </label>
+                    </>
+                  ) : null}
+                  <label className="block flex-1 min-w-[180px]">
+                    <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Причина</span>
+                    <input className="neu-input w-full" value={exception.note} onChange={(event) => isViewCurrent() && setException((c) => ({ ...c, note: event.target.value }))} placeholder="Отпуск, конференция…" />
+                  </label>
+                  <button type="button" className="neu-btn-primary px-4 py-2 text-sm" onClick={() => void addException()}>
+                    {exception.kind === "window" ? "Закрыть окно" : exception.kind === "off" ? "Закрыть день" : "Сохранить особые часы"}
+                  </button>
+                  {exception.kind === "window" ? (
+                    <p className="w-full text-xs text-[#64748B]">
+                      Строка на дату замещает недельный образец целиком. Чтобы в этот день работали остальные часы,
+                      добавьте на ту же дату «Особые часы» — окно вычтется из них. Одно окно без часов закроет день
+                      полностью, но с указанной причиной.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        )}
+      </section>
+
+      {formOpen ? (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => isViewCurrent() && setFormOpen(false)}>
+          {/* max-h + overflow обязательны: без них на iPhone SE карточка выше
+              экрана, а прокрутить нечем — ни заголовок, ни «Сохранить» не
+              достать. Тот же приём, что у остальных модалок продукта. */}
+          <div className="neu-card max-h-[90vh] w-full max-w-md overflow-y-auto bg-white p-5" onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-base font-black text-[#0F172A]">{editingId ? `Изменить ${terms.specialistGenitive}` : `Новый ${terms.specialist}`}</h3>
+              <button type="button" className="neu-btn px-3 py-2" onClick={() => isViewCurrent() && setFormOpen(false)} aria-label="Закрыть">
+                <X size={15} />
+              </button>
+            </div>
+            <div className="mt-4 grid gap-3">
+              <label className="block">
+                <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">ФИО</span>
+                <input className="neu-input w-full" value={form.fullName} onChange={(event) => isViewCurrent() && setForm((c) => ({ ...c, fullName: event.target.value }))} placeholder="Сауле Ахметова" />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Специальность</span>
+                <input className="neu-input w-full" value={form.specialty} onChange={(event) => isViewCurrent() && setForm((c) => ({ ...c, specialty: event.target.value }))} placeholder="Косметолог" />
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="block">
+                  <span className="mb-1.5 block text-[11px] font-bold text-[#64748B]">Фикс в месяц, ₸</span>
+                  {/* Оплата мастера: фикс и процент, на усмотрение админа.
+                      Пусто — «условия не заданы»: статистика честно не считает
+                      зарплату, а не выдумывает нули. */}
+                  <input className="neu-input w-full" type="number" min={0} step={1000} placeholder="Не задан"
+                    value={form.salaryFixedTenge}
+                    onChange={(event) => isViewCurrent() && setForm((current) => ({ ...current, salaryFixedTenge: event.target.value }))} />
+                </label>
+                <label className="block">
+                  <span className="mb-1.5 block text-[11px] font-bold text-[#64748B]">Процент от услуг, %</span>
+                  <input className="neu-input w-full" type="number" min={0} max={100} step={1} placeholder="Не задан"
+                    value={form.salaryPercent}
+                    onChange={(event) => isViewCurrent() && setForm((current) => ({ ...current, salaryPercent: event.target.value }))} />
+                </label>
+              </div>
+              <label className="block">
+                <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Клиентов одновременно</span>
+                <input
+                  className="neu-input w-full"
+                  inputMode="numeric"
+                  value={form.capacity}
+                  onChange={(event) => isViewCurrent() && setForm((c) => ({ ...c, capacity: event.target.value }))}
+                />
+                {/*
+                  Единица — обычный приём: второй клиент в тот же интервал будет
+                  отклонён. Больше единицы имеет смысл там, где мастер и правда
+                  ведёт нескольких: одному нанесена краска и он выдерживает,
+                  второму в это время делают укладку.
+                */}
+                <span className="mt-1 block text-xs font-semibold text-[#64748B]">
+                  1 — {terms.visit} один на один. Больше — столько записей {terms.specialist} может вести параллельно.
+                </span>
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Порядок в списке</span>
+                <input className="neu-input w-full" inputMode="numeric" value={form.sortOrder} onChange={(event) => isViewCurrent() && setForm((c) => ({ ...c, sortOrder: event.target.value }))} />
+              </label>
+              <label className="flex items-center gap-2 text-sm font-semibold text-[#334155]">
+                <input type="checkbox" checked={form.isActive} onChange={(event) => isViewCurrent() && setForm((c) => ({ ...c, isActive: event.target.checked }))} />
+                Принимает — показывать в форме записи
+              </label>
+            </div>
+            <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-end">
+              <button type="button" className="neu-btn px-4 py-2 text-sm" onClick={() => isViewCurrent() && setFormOpen(false)}>Отмена</button>
+              <button type="button" className="neu-btn-primary px-4 py-2 text-sm" disabled={saving} onClick={() => void submitDoctor()}>
+                {saving ? "Сохраняем…" : "Сохранить"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}

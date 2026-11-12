@@ -1,0 +1,713 @@
+import assert from "node:assert/strict";
+import { withAppointmentCreateRpcSpy, appointmentSpyRows, appointmentSpyBody } from "./appointment-create-rpc-spy.js";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const clientFormUrl = new URL("../../artifacts/negis/src/lib/appointmentClient.ts", import.meta.url);
+const { editAppointmentClient } = await import(clientFormUrl.href) as {
+  editAppointmentClient(
+    current: { clientId: string; client: string; phone: string; whatsapp: string },
+    field: "client" | "phone" | "whatsapp",
+    value: string,
+  ): { clientId: string; client: string; phone: string; whatsapp: string };
+};
+
+// CRM — the client link, validated.
+//
+// Two defects with one shape. An appointment's client_id existed in the schema
+// since 010 and was returned by every read, but no write path set it: a visit
+// was never attached to the patient it was for. And a lead's client_id WAS
+// written — guarded only by isUuid, which is a shape check, not a tenancy
+// check: a client id from another clinic is also a uuid, the FK points at
+// clients(id) with no workspace clause, and the value went straight in.
+//
+// Both now go through readWorkspaceReference like every other reference in
+// this file: the id is looked up inside the acting workspace, a foreign id is
+// refused with 400 before anything is written, and an explicit empty string
+// unlinks. These tests drive the real router with a spying database.
+//
+// Nothing here touches production.
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const routerPath = path.join(repoRoot, "api", "crm", "[...path].ts");
+
+const WORKSPACE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const WORKSPACE_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const USER_A = "11111111-1111-4111-8111-111111111111";
+const STAFF_A = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const LEAD_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const CLIENT_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+/** A perfectly well-formed uuid that belongs to another clinic. */
+const FOREIGN_CLIENT_ID = "99999999-9999-4999-8999-999999999999";
+const APPOINTMENT_ID = "abababab-abab-4bab-8bab-abababababab";
+const TOKEN = "header.payload.signature";
+
+type StaffRow = { id: string; workspace_id: string; role: string; status: string };
+type QueryLog = { table: string; filters: Record<string, unknown>; op: string };
+
+/**
+ * Same spy as the tenant-isolation suite, with one addition: maybeSingle
+ * honours the recorded eq filters, because readWorkspaceReference is exactly
+ * a filtered maybeSingle and these tests exist to prove the filter matters.
+ */
+function spyClient(
+  rows: Record<string, unknown[]>,
+  log: QueryLog[],
+  missingColumns: Set<string> = new Set(),
+  hardFailTables: Set<string> = new Set(),
+) {
+  return {
+    from(table: string) {
+      const entry: QueryLog = { table, filters: {}, op: "select" };
+      log.push(entry);
+      const builder: Record<string, unknown> = {};
+      const chain = () => builder;
+      const matches = (row: Record<string, unknown>) =>
+        Object.entries(entry.filters).every(([column, value]) => {
+          if (column === "__row") return true;
+          if (column.startsWith("__ilike:")) {
+            const field = column.slice("__ilike:".length);
+            const needle = String(value).replace(/^%|%$/g, "").replace(/\\([\\%_*])/g, "$1").toLowerCase();
+            return String(row[field] ?? "").toLowerCase().includes(needle);
+          }
+          return row[column] === value;
+        });
+      Object.assign(builder, {
+        select: () => chain(),
+        insert: (row: unknown) => { entry.op = "insert"; entry.filters.__row = row; return chain(); },
+        update: (row: unknown) => { entry.op = "update"; entry.filters.__row = row; return chain(); },
+        upsert: (row: unknown) => { entry.op = "upsert"; entry.filters.__row = row; return chain(); },
+        delete: () => { entry.op = "delete"; return chain(); },
+        order: () => chain(),
+        limit: () => chain(),
+        single: () => chain(),
+        maybeSingle: () => {
+          const found = (rows[table] ?? []).map((r) => r as Record<string, unknown>).find(matches) ?? null;
+          return Promise.resolve({ data: found, error: null });
+        },
+        eq(column: string, value: unknown) {
+          // Колонка, которой в базе ещё нет (миграция не применена), — это
+          // ошибка PostgREST 42703, а не пустой результат. Отличать одно от
+          // другого важно: от этого зависит, деградирует поиск или врёт.
+          if (missingColumns.has(column)) entry.filters.__missingColumn = column;
+          if (column === "__fail") entry.filters.__hardFailure = value;
+          entry.filters[column] = value;
+          return chain();
+        },
+        ilike(column: string, value: string) { entry.filters[`__ilike:${column}`] = value; return chain(); },
+        in(column: string, values: unknown) { entry.filters[column] = values; return chain(); },
+        then(resolve: (value: { data: unknown; error: unknown; count?: number }) => void) {
+          if (hardFailTables.has(table)) {
+            resolve({
+              data: null,
+              error: { message: `canceling statement due to statement timeout on ${table}`, code: "57014" },
+            });
+            return;
+          }
+          if (entry.filters.__missingColumn) {
+            resolve({
+              data: null,
+              error: { message: `column clients.${String(entry.filters.__missingColumn)} does not exist`, code: "42703" },
+            });
+            return;
+          }
+          // Точечный поиск фильтрует по-настоящему; списочное чтение — нет,
+          // как и раньше.
+          const tableRows = rows[table] ?? [];
+          const filtered = Object.keys(entry.filters).some((c) => c.endsWith("_normalized") || c === "client_id" || c === "full_name" || c.startsWith("__ilike:"))
+            ? tableRows.map((r) => r as Record<string, unknown>).filter(matches)
+            : tableRows;
+          resolve({ data: filtered, error: null, count: filtered.length });
+        },
+      });
+      return builder;
+    },
+  };
+}
+
+type MockResponse = {
+  statusCode: number;
+  body: Record<string, unknown>;
+  status: (code: number) => MockResponse;
+  setHeader: () => MockResponse;
+  json: (payload: unknown) => MockResponse;
+};
+
+function mockResponse(): MockResponse {
+  const res: MockResponse = {
+    statusCode: 0,
+    body: {},
+    status(code) { res.statusCode = code; return res; },
+    setHeader() { return res; },
+    json(payload) { res.body = (payload ?? {}) as Record<string, unknown>; return res; },
+  };
+  return res;
+}
+
+async function loadRouter(
+  rows: Record<string, unknown[]>,
+  missingColumns: string[] = [],
+  hardFailTables: string[] = [],
+) {
+  const log: QueryLog[] = [];
+  process.env.SUPABASE_URL = "https://project.example.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+
+  globalThis.fetch = (async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ id: USER_A, email: "a@example.test" }),
+  })) as unknown as typeof globalThis.fetch;
+
+  const supabaseModule = (await import(
+    pathToFileURL(path.join(repoRoot, "lib", "supabase", "server.ts")).href
+  )) as { setSupabaseServerClientFactoryForTests: (factory: (() => unknown) | null) => void };
+
+  const owner: StaffRow = { id: STAFF_A, workspace_id: WORKSPACE_A, role: "owner", status: "active" };
+  const clientRows: Record<string, unknown[]> = { staff_users: [owner], ...rows };
+  supabaseModule.setSupabaseServerClientFactoryForTests(() =>
+    withAppointmentCreateRpcSpy(spyClient(appointmentSpyRows(clientRows), log, new Set(missingColumns), new Set(hardFailTables))));
+
+  const routerModule = (await import(pathToFileURL(routerPath).href)) as {
+    default: (req: unknown, res: MockResponse) => Promise<unknown>;
+  };
+
+  return async (input: { segments: string[]; method?: string; body?: unknown; query?: Record<string, unknown> }) => {
+    log.length = 0;
+    const res = mockResponse();
+    await routerModule.default(
+      {
+        method: input.method ?? "GET",
+        headers: { authorization: `Bearer ${TOKEN}` },
+        query: { path: input.segments, workspaceId: WORKSPACE_A, ...(input.query ?? {}) },
+        body: appointmentSpyBody(input.segments[0], input.method, input.body),
+      },
+      res,
+    );
+    return { res, log: [...log] };
+  };
+}
+
+const ownClient = { id: CLIENT_ID, workspace_id: WORKSPACE_A };
+
+/* ── The lead's link, now a tenancy check ── */
+
+test("CLK1 linking a lead to another clinic's client is refused before anything is written", async () => {
+  // The foreign client exists — in someone else's workspace. Under the old
+  // uuid-shape guard this request stored the id; the FK had nothing to say.
+  const call = await loadRouter({
+    clients: [{ id: FOREIGN_CLIENT_ID, workspace_id: WORKSPACE_B }],
+    leads: [{ id: LEAD_ID, workspace_id: WORKSPACE_A, full_name: "Лаура" }],
+  });
+  const { res, log } = await call({
+    segments: ["leads"],
+    method: "PATCH",
+    body: { id: LEAD_ID, updates: { clientId: FOREIGN_CLIENT_ID } },
+  });
+
+  assert.equal(res.statusCode, 400, JSON.stringify(res.body));
+  assert.equal(log.filter((e) => e.op === "update").length, 0, "the refusal comes before the write");
+
+  const lookup = log.find((e) => e.table === "clients");
+  assert.ok(lookup, "the id must be looked up, not trusted");
+  assert.equal(lookup.filters.workspace_id, WORKSPACE_A, "and looked up inside the acting workspace");
+});
+
+test("CLK2 linking a lead to the clinic's own client stores the id the lookup returned", async () => {
+  const call = await loadRouter({
+    clients: [ownClient],
+    leads: [{ id: LEAD_ID, workspace_id: WORKSPACE_A, full_name: "Лаура" }],
+  });
+  const { res, log } = await call({
+    segments: ["leads"],
+    method: "PATCH",
+    body: { id: LEAD_ID, updates: { clientId: CLIENT_ID } },
+  });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const update = log.find((e) => e.table === "leads" && e.op === "update");
+  assert.ok(update, "the lead must be updated");
+  assert.equal((update.filters.__row as Record<string, unknown>).client_id, CLIENT_ID);
+  assert.equal(update.filters.workspace_id, WORKSPACE_A);
+});
+
+test("CLK3 an explicit empty string unlinks", async () => {
+  const call = await loadRouter({
+    leads: [{ id: LEAD_ID, workspace_id: WORKSPACE_A, full_name: "Лаура", client_id: CLIENT_ID }],
+  });
+  const { res, log } = await call({
+    segments: ["leads"],
+    method: "PATCH",
+    body: { id: LEAD_ID, updates: { clientId: "" } },
+  });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const update = log.find((e) => e.table === "leads" && e.op === "update");
+  assert.ok(update);
+  assert.equal((update.filters.__row as Record<string, unknown>).client_id, null);
+  assert.equal(log.filter((e) => e.table === "clients").length, 0, "an unlink needs no lookup");
+});
+
+/* ── The appointment's link, which never existed ── */
+
+test("CLK4 an appointment created from a lead's handoff stores the patient it is for", async () => {
+  const call = await loadRouter({ clients: [ownClient] });
+  const { res, log } = await call({
+    segments: ["appointments"],
+    method: "POST",
+    body: { client: "Лаура Ким", phone: "+7 700 801 77 21", clientId: CLIENT_ID },
+  });
+
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  const insert = log.find((e) => e.table === "appointments" && e.op === "insert");
+  assert.ok(insert, "the appointment must be created");
+  assert.equal(
+    (insert.filters.__row as Record<string, unknown>).client_id,
+    CLIENT_ID,
+    "the visit is attached to the client card — this is the write path that never existed",
+  );
+
+  const lookup = log.find((e) => e.table === "clients");
+  assert.ok(lookup, "and the id was verified, not trusted");
+  assert.equal(lookup.filters.workspace_id, WORKSPACE_A);
+});
+
+test("CLK5 an appointment refuses another clinic's client the same way the lead does", async () => {
+  const call = await loadRouter({
+    clients: [{ id: FOREIGN_CLIENT_ID, workspace_id: WORKSPACE_B }],
+  });
+  const { res, log } = await call({
+    segments: ["appointments"],
+    method: "POST",
+    body: { client: "Лаура Ким", phone: "+7 700 801 77 21", clientId: FOREIGN_CLIENT_ID },
+  });
+
+  assert.equal(res.statusCode, 400, JSON.stringify(res.body));
+  assert.equal(log.filter((e) => e.op === "insert").length, 0, "nothing is written");
+});
+
+test("CLK6 a new appointment creates and links a patient card", async () => {
+  const call = await loadRouter({});
+  const { res, log } = await call({
+    segments: ["appointments"],
+    method: "POST",
+    body: { client: "Лаура Ким", phone: "+7 700 801 77 21" },
+  });
+
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  const clientInsert = log.find((e) => e.table === "clients" && e.op === "insert");
+  const appointmentInsert = log.find((e) => e.table === "appointments" && e.op === "insert");
+  assert.ok(clientInsert, "the typed new patient is persisted in clients");
+  assert.ok(appointmentInsert, "the appointment is still persisted");
+  const clientRow = clientInsert.filters.__row as Record<string, unknown>;
+  const appointmentRow = appointmentInsert.filters.__row as Record<string, unknown>;
+  assert.equal(appointmentRow.client_id, clientRow.id, "the visit and patient card share the generated id");
+  assert.equal(clientRow.full_name, "Лаура Ким");
+  assert.equal(clientRow.phone, "+7 700 801 77 21");
+  assert.equal((res.body.data as Record<string, unknown>).clientCreated, true);
+});
+
+test("CLK6b a returning patient's canonical phone reuses the existing card", async () => {
+  const call = await loadRouter({
+    clients: [{
+      id: CLIENT_ID,
+      workspace_id: WORKSPACE_A,
+      full_name: "Лаура Ким",
+      phone: "+7 700 801 77 21",
+      phone_normalized: "+77008017721",
+      whatsapp_normalized: null,
+    }],
+  });
+  const { res, log } = await call({
+    segments: ["appointments"],
+    method: "POST",
+    body: { client: "Лаура Ким", phone: "8 700 801 77 21" },
+  });
+
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  assert.equal(log.filter((entry) => entry.table === "clients" && entry.op === "insert").length, 0, "a return visit must not duplicate the patient");
+  const appointmentInsert = log.find((entry) => entry.table === "appointments" && entry.op === "insert");
+  assert.equal((appointmentInsert?.filters.__row as Record<string, unknown>).client_id, CLIENT_ID);
+  assert.equal((res.body.data as Record<string, unknown>).clientCreated, false);
+});
+
+for (const scenario of [
+  { label: "one same-name card without contacts", clients: [{ ...ownClient, full_name: "Test Same Name", phone: null, whatsapp: null }] },
+  { label: "one same-name card with private contacts", clients: [{ ...ownClient, full_name: "Test Same Name", phone: "+77000000001", whatsapp: "+77000000002" }] },
+  { label: "multiple same-name cards", clients: [{ ...ownClient, full_name: "Test Same Name" }, { id: FOREIGN_CLIENT_ID, workspace_id: WORKSPACE_A, full_name: "Test Same Name" }] },
+  { label: "a same-name card in another workspace", clients: [{ id: FOREIGN_CLIENT_ID, workspace_id: WORKSPACE_B, full_name: "Test Same Name" }] },
+]) {
+  test(`CLK6c a name-only booking cannot select ${scenario.label}`, async () => {
+    const call = await loadRouter({ clients: scenario.clients });
+    const { res, log } = await call({
+      segments: ["appointments"], method: "POST",
+      body: { client: "Test Same Name", phone: "", whatsapp: "", clientId: "" },
+    });
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    const created = log.find((entry) => entry.table === "clients" && entry.op === "insert")?.filters.__row as Record<string, unknown> | undefined;
+    assert.ok(created, "a typed name does not identify an existing person, even when unique in this clinic");
+    assert.equal(created.workspace_id, WORKSPACE_A);
+    assert.equal(created.full_name, "Test Same Name");
+    assert.equal(created.phone, null);
+    assert.equal(created.whatsapp, null);
+    assert.ok(!scenario.clients.some((client) => client.id === created.id));
+    const appointment = log.find((entry) => entry.table === "appointments" && entry.op === "insert")?.filters.__row as Record<string, unknown>;
+    assert.equal(appointment.client_id, created.id);
+    assert.equal((res.body.data as Record<string, unknown>).clientCreated, true);
+    assert.equal((res.body.data as Record<string, unknown>).clientMatch, "created");
+    assert.equal(log.filter((entry) => entry.table === "clients" && ["update", "delete", "upsert"].includes(entry.op)).length, 0);
+  });
+}
+
+test("CLK6d explicit same-name card selection works without revealing or requiring contacts", async () => {
+  const call = await loadRouter({ clients: [{ ...ownClient, full_name: "Test Same Name", phone: "+77000000001" }] });
+  const { res, log } = await call({
+    segments: ["appointments"], method: "POST", body: { client: "Test Same Name", clientId: CLIENT_ID },
+  });
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  assert.equal(log.filter((entry) => entry.table === "clients" && entry.op === "insert").length, 0);
+  const appointment = log.find((entry) => entry.table === "appointments" && entry.op === "insert")?.filters.__row as Record<string, unknown>;
+  assert.equal(appointment.client_id, CLIENT_ID);
+  assert.equal(appointment.client_phone, null);
+  assert.equal((res.body.data as Record<string, unknown>).clientMatch, "provided");
+});
+
+test("CLK6e explicit name-only selection from a foreign workspace is refused before any insert", async () => {
+  const call = await loadRouter({ clients: [{ id: FOREIGN_CLIENT_ID, workspace_id: WORKSPACE_B, full_name: "Test Same Name" }] });
+  const { res, log } = await call({
+    segments: ["appointments"], method: "POST", body: { client: "Test Same Name", clientId: FOREIGN_CLIENT_ID },
+  });
+  assert.equal(res.statusCode, 400, JSON.stringify(res.body));
+  assert.equal(log.filter((entry) => entry.op === "insert").length, 0);
+});
+
+test("CLK7 editing an appointment keeps its client unless the edit says otherwise", async () => {
+  const call = await loadRouter({
+    clients: [ownClient],
+    appointments: [{ id: APPOINTMENT_ID, workspace_id: WORKSPACE_A, client_id: CLIENT_ID }],
+  });
+  // The browser always serializes clientId (that is the F11 lesson), so a
+  // normal edit carries the same id back; the lookup re-verifies and keeps it.
+  const { res, log } = await call({
+    segments: ["appointments"],
+    method: "PATCH",
+    body: { id: APPOINTMENT_ID, updates: { service: "Чистка лица", clientId: CLIENT_ID } },
+  });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const update = log.find((e) => e.table === "appointments" && e.op === "update");
+  assert.ok(update);
+  assert.equal((update.filters.__row as Record<string, unknown>).client_id, CLIENT_ID);
+});
+
+/* ── Source pins: the chain that dropped the value ── */
+
+test("CLK8 the appointments page carries clientId through every step that used to drop it", async () => {
+  const source = await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"),
+    "utf8",
+  );
+
+  // The handoff from the lead card carried clientId from the day it was
+  // written; the appointments page dropped it at five separate steps. Each
+  // one is pinned, because losing any single link breaks the whole chain
+  // silently — the form still works, the toast still says «Запись создана».
+  const toApi = source.slice(source.indexOf("function appointmentToApi("), source.indexOf("async function safeJson("));
+  assert.ok(
+    /clientId:\s*appointment\.clientId \?\? ""/.test(toApi),
+    "toApi must always send clientId — an absent key is dropped by JSON.stringify and the link silently never persists",
+  );
+
+  const fromApi = source.slice(source.indexOf("function appointmentFromApi("), source.indexOf("function appointmentToApi("));
+  assert.ok(
+    fromApi.includes("record.client_id"),
+    "fromApi must read the id the server has always returned",
+  );
+
+  const prefill = source.slice(source.indexOf("const prefillKey"), source.indexOf("const filteredItems"));
+  assert.ok(
+    prefill.includes("readString(prefill.clientId)"),
+    "the handoff from the lead card must not be dropped on consumption",
+  );
+
+  for (const carrier of ["function formFromAppointment(", "function appointmentFromForm(", "function defaultForm("]) {
+    const at = source.indexOf(carrier);
+    assert.ok(at >= 0, `${carrier} must exist`);
+    assert.ok(
+      source.slice(at, at + 700).includes("clientId"),
+      `${carrier} must carry clientId — this is a link of the chain that used to drop it`,
+    );
+  }
+});
+
+test("CLK10 patches publish only confirmed rows and never restore a refused private record", async () => {
+  // G2-C11 removed optimistic writes: restoring the old row on 403 exposed its
+  // contacts again. The action matrix separately executes the actual handlers.
+  const source = await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"),
+    "utf8",
+  );
+
+  const statusHandler = source.slice(
+    source.indexOf("const updateAppointmentStatus"),
+    source.indexOf("const findConflict"),
+  );
+  const statusCatch = statusHandler.slice(statusHandler.indexOf("catch"));
+  const statusAwait = statusHandler.indexOf("await patchAppointment");
+  const statusWrite = statusHandler.indexOf("setItems(");
+  assert.ok(statusAwait >= 0 && statusWrite > statusAwait, "no unconfirmed status is published before the server reply");
+  assert.ok(statusHandler.includes("item.id === appointment.id ? saved : item"), "only the returned row is published");
+  assert.ok(statusCatch.includes("discardRefusedAppointment(appointment.id)"), "a denied record is hidden, not restored");
+  assert.ok(!statusCatch.includes("setItems("), "ordinary errors retain the confirmed list without restoring private snapshots");
+
+  const submit = source.slice(source.indexOf("const submitForm"), source.indexOf("const renderDay"));
+  const editAwait = submit.indexOf("await patchAppointment");
+  const editWrite = submit.indexOf("setItems(");
+  assert.ok(editAwait >= 0 && editWrite > editAwait, "no unconfirmed form values are published before PATCH returns");
+  assert.ok(submit.includes("item.id === editingId ? saved : item"), "the edit publishes the server-confirmed row");
+  const editCatchStart = submit.indexOf("} catch (error)", editAwait);
+  const editCatchEnd = submit.indexOf("\n    } else {", editCatchStart);
+  assert.ok(editCatchStart > editAwait && editCatchEnd > editCatchStart, "inspect only the actual edit refusal branch");
+  const submitCatch = submit.slice(editCatchStart, editCatchEnd);
+  assert.ok(submitCatch.includes("discardRefusedAppointment(editingId)"), "a denied edit closes and clears its record");
+  assert.ok(!submitCatch.includes("setItems("), "catch paths must not restore a denied contact snapshot");
+
+  // Scoped to the refusal paths on purpose: the demo-mode info toast is
+  // truthful — there the collection really does live in localStorage. The lie
+  // was promising a local save in a catch block a real clinic can reach.
+  for (const [name, block] of [["status", statusCatch], ["edit", submitCatch]] as const) {
+    assert.ok(
+      !block.includes("локально"),
+      `the ${name} refusal path must not promise a local save that does not happen in a real clinic`,
+    );
+  }
+});
+
+test("CLK11 both «Записать» handoffs carry the client card, and a manual replacement drops it", async () => {
+  // Three review lenses converged on the same defect: the handoff from the
+  // client card itself — the most direct «записать клиента» flow there is —
+  // never included clientId, so only the lead path produced a linked visit.
+  const clients = await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "pages", "ClientsPage.tsx"),
+    "utf8",
+  );
+  const clientPrefill = clients.slice(
+    clients.indexOf("function saveAppointmentPrefill("),
+    clients.indexOf("function saveDealPrefill("),
+  );
+  assert.ok(
+    clientPrefill.includes("clientId: client.id"),
+    "the client card's own handoff must name the client it is about",
+  );
+
+  // And the inherited link must not survive the operator writing a different
+  // person into the form: a visit filed to the wrong patient card is worse
+  // than an unlinked visit.
+  const appointments = await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"),
+    "utf8",
+  );
+  for (const field of ["client", "phone", "whatsapp"] as const) {
+    assert.ok(
+      appointments.includes(`editAppointmentClient(current, "${field}", ${field})`),
+      `editing «${field}» must clear the inherited link — the hint line disappearing is the operator's signal`,
+    );
+    const replaced = editAppointmentClient({
+      clientId: CLIENT_ID, client: "Original", phone: "+77000000001", whatsapp: "+77000000002",
+    }, field, "replacement");
+    assert.equal(replaced.clientId, "");
+    assert.equal(replaced[field], "replacement");
+  }
+});
+
+/* ── Finding the patient this number already belongs to ── */
+
+const PHONE_TRUNK = "8 701 000 00 01";
+const PHONE_INTERNATIONAL = "+7 701 000-00-01";
+const CANONICAL = "+77010000001";
+
+const clientRow = (over: Record<string, unknown> = {}) => ({
+  id: CLIENT_ID,
+  workspace_id: WORKSPACE_A,
+  full_name: "Лаура Ким",
+  phone: PHONE_INTERNATIONAL,
+  phone_normalized: CANONICAL,
+  whatsapp: null,
+  whatsapp_normalized: null,
+  ...over,
+});
+
+test("CLK12 the trunk form and the international form find the same patient", async () => {
+  // The defect that had nothing to do with size: the browser compared digits
+  // only, so «8 701…» and «+7 701…» were two different people and the
+  // conversion filed a second card for a patient who already had one.
+  const call = await loadRouter({ clients: [clientRow()] });
+  const { res, log } = await call({ segments: ["clients"], query: { phone: PHONE_TRUNK } });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const found = (res.body.data as { clients: Array<Record<string, unknown>> }).clients;
+  assert.equal(found.length, 1, "one patient, however the number was typed");
+  assert.equal(found[0].id, CLIENT_ID);
+
+  const lookup = log.find((e) => e.table === "clients" && "phone_normalized" in e.filters);
+  assert.ok(lookup, "the match is an indexed equality on the canonical form, not a scan in the browser");
+  assert.equal(lookup.filters.phone_normalized, CANONICAL);
+  assert.equal(lookup.filters.workspace_id, WORKSPACE_A);
+});
+
+test("CLK13 a patient reached on WhatsApp at a second number is still that patient", async () => {
+  const call = await loadRouter({
+    clients: [clientRow({ phone: null, phone_normalized: null, whatsapp: PHONE_INTERNATIONAL, whatsapp_normalized: CANONICAL })],
+  });
+  const { res } = await call({ segments: ["clients"], query: { phone: PHONE_TRUNK } });
+
+  const found = (res.body.data as { clients: Array<Record<string, unknown>> }).clients;
+  assert.equal(found.length, 1, "the conversion matches on both numbers, so the lookup must too");
+});
+
+test("CLK14 asking about a number nobody has returns nobody — not the whole clinic", async () => {
+  const call = await loadRouter({ clients: [clientRow()] });
+  const { res } = await call({ segments: ["clients"], query: { phone: "+7 747 000 00 00" } });
+
+  const found = (res.body.data as { clients: Array<Record<string, unknown>> }).clients;
+  assert.equal(found.length, 0, "an unfiltered answer here is exactly how a duplicate card gets created");
+});
+
+test("CLK15 another clinic's patient is not a match", async () => {
+  const call = await loadRouter({ clients: [clientRow({ workspace_id: WORKSPACE_B })] });
+  const { res, log } = await call({ segments: ["clients"], query: { phone: PHONE_TRUNK } });
+
+  const found = (res.body.data as { clients: Array<Record<string, unknown>> }).clients;
+  assert.equal(found.length, 0);
+  for (const lookup of log.filter((e) => e.table === "clients")) {
+    assert.equal(lookup.filters.workspace_id, WORKSPACE_A, "every read stays scoped, filter included");
+  }
+});
+
+test("CLK16 without the phone parameter the list behaves exactly as before", async () => {
+  const call = await loadRouter({ clients: [clientRow(), clientRow({ id: FOREIGN_CLIENT_ID })] });
+  const { res, log } = await call({ segments: ["clients"] });
+
+  const found = (res.body.data as { clients: unknown[] }).clients;
+  assert.equal(found.length, 2, "the filter is additive: absent means unchanged");
+  assert.equal(
+    log.filter((e) => e.table === "clients" && "phone_normalized" in e.filters).length,
+    0,
+    "and no lookup runs",
+  );
+});
+
+test("CLK16a client name search is bounded and workspace scoped", async () => {
+  const call = await loadRouter({
+    clients: [
+      clientRow({ full_name: "Лаура Ким" }),
+      clientRow({ id: FOREIGN_CLIENT_ID, full_name: "Мария Ким" }),
+    ],
+  });
+  const { res, log } = await call({ segments: ["clients"], query: { search: "лаур" } });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const found = (res.body.data as { clients: Array<Record<string, unknown>> }).clients;
+  assert.deepEqual(found.map((item) => item.id), [CLIENT_ID]);
+  const lookup = log.find((entry) => entry.table === "clients" && "__ilike:full_name" in entry.filters);
+  assert.ok(lookup, "the name is filtered by PostgREST, not after downloading the clinic");
+  assert.equal(lookup.filters.workspace_id, WORKSPACE_A);
+});
+
+test("CLK16b appointment history is filtered by stable client id", async () => {
+  const call = await loadRouter({
+    appointments: [
+      { id: APPOINTMENT_ID, workspace_id: WORKSPACE_A, client_id: CLIENT_ID, client_name: "Лаура Ким" },
+      { id: "12121212-1212-4212-8212-121212121212", workspace_id: WORKSPACE_A, client_id: FOREIGN_CLIENT_ID, client_name: "Мария Ким" },
+    ],
+  });
+  const { res, log } = await call({ segments: ["appointments"], query: { clientId: CLIENT_ID } });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const found = (res.body.data as { appointments: Array<Record<string, unknown>> }).appointments;
+  assert.deepEqual(found.map((item) => item.id), [APPOINTMENT_ID]);
+  const lookup = log.find((entry) => entry.table === "appointments" && entry.filters.client_id === CLIENT_ID);
+  assert.ok(lookup, "history is narrowed inside the database query");
+});
+
+test("CLK17 before the migration lands the check still works — it does not silently switch off", async () => {
+  // A deployment reaches production before its migrations are applied by hand
+  // here. The first version of this branch answered that window with an empty
+  // list, which is not "degraded" — it is OFF: every conversion would file a
+  // second card for a returning patient, including one whose number is spelled
+  // identically, which the browser this replaced did catch. Strictly worse than
+  // what it replaced, for as long as the owner had not run the SQL.
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    const call = await loadRouter({ clients: [clientRow()] }, ["phone_normalized", "whatsapp_normalized"]);
+    const { res } = await call({ segments: ["clients"], query: { phone: PHONE_TRUNK } });
+
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    const found = (res.body.data as { clients: Array<Record<string, unknown>> }).clients;
+    assert.equal(found.length, 1, "the comparison moves into code on a bounded read, exactly as it does for leads");
+    assert.equal(found[0].id, CLIENT_ID);
+  } finally {
+    console.warn = realWarn;
+  }
+
+  assert.ok(
+    warnings.some((line) => line.includes("migration 030")),
+    "and the operator log says which migration would make it exact again",
+  );
+  assert.ok(!warnings.join(" ").includes("701"), "without carrying a patient's number into the log");
+});
+
+test("CLK19 a database failure is a failure, not «this clinic has no such patient»", async () => {
+  // The rule this file states for the unfiltered read, and the rule
+  // test:wazzup-webhook WZ22 pins for the identical lookup on leads. The first
+  // version of this branch swallowed every error class alike, so a statement
+  // timeout answered 200 with an empty list — and the conversion, taking that
+  // as authoritative, created the duplicate the branch exists to prevent.
+  const call = await loadRouter({ clients: [clientRow()] }, [], ["clients"]);
+  const { res } = await call({ segments: ["clients"], query: { phone: PHONE_TRUNK } });
+
+  assert.equal(res.statusCode, 502, JSON.stringify(res.body));
+  assert.equal(res.body.success, false);
+  const text = JSON.stringify(res.body);
+  for (const leak of ["statement timeout", "57014"]) {
+    assert.ok(!text.includes(leak), `the answer must not quote the database: ${leak}`);
+  }
+});
+
+test("CLK18 the conversion asks the server instead of downloading the clinic", async () => {
+  const source = await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "pages", "LeadsPage.tsx"),
+    "utf8",
+  );
+
+  assert.ok(
+    !source.includes("loadExistingClients"),
+    "the whole-clinic read is gone, not merely unused",
+  );
+  const finder = source.slice(source.indexOf("async function findClientsByPhone("), source.indexOf("// CRM7"));
+  assert.ok(finder.includes("phone=${encodeURIComponent(phone)}"), "the number is the query, not a post-filter");
+  assert.ok(
+    !finder.includes("normalizePhone"),
+    "canonicalization stays in the two places test:crm-phone-parity holds together; a browser copy would be a third",
+  );
+});
+
+test("CLK9 the old uuid-shape guard is gone from the lead mapping", async () => {
+  const server = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
+  assert.ok(
+    !server.includes("row.client_id = isUuid(clientId) ? clientId : null;"),
+    "a uuid-shape check is not a tenancy check: another clinic's client id is also a uuid",
+  );
+  const builder = server.slice(
+    server.indexOf("async function buildLeadReferenceRow("),
+    server.indexOf("async function buildAppointmentReferenceRow("),
+  );
+  assert.ok(
+    builder.includes('table: "clients"'),
+    "the lead's client link lives with the other validated references",
+  );
+});

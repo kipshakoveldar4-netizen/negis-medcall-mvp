@@ -1,0 +1,525 @@
+import { extractJsonObject, generateText, resolveTextProvider } from "../ai/text-provider";
+
+export type ContentStudioStatus = "idea" | "script_ready" | "avatar_ready" | "telegram_ready";
+
+export type ContentStudioVideo = {
+  id: string;
+  title: string;
+  niche: string;
+  goal: string;
+  duration: string;
+  style: string;
+  audience: string;
+  hook?: string;
+  script?: string;
+  voiceover?: string;
+  cta?: string;
+  caption?: string;
+  hashtags?: string[];
+  avatarPrompt?: string;
+  tapnowPrompt?: string;
+  status: ContentStudioStatus;
+  createdAt: string;
+};
+
+export type ScriptPackage = {
+  hook: string;
+  script: string;
+  voiceover: string;
+  cta: string;
+  caption: string;
+  hashtags: string[];
+};
+
+export type PromptPackage = {
+  prompt: string;
+  negativePrompt?: string;
+  format?: "photo" | "video";
+};
+
+export type ContentStudioMode = "demo" | "openai" | "anthropic" | "telegram" | "mock";
+
+export type ContentAdVariant = {
+  id: string;
+  label: string;
+  angle: string;
+  primaryText: string;
+  headline: string;
+  description: string;
+  cta: string;
+};
+
+// Phase 1 content package: everything a clinic needs for one creative —
+// short-form video script, ad text, prompts, and the WhatsApp opener.
+export type ContentPackage = {
+  ideaTitle: string;
+  hook: string;
+  script: string;
+  shotList: string[];
+  textOnScreen: string[];
+  voiceover: string;
+  caption: string;
+  adPrimaryText: string;
+  adHeadline: string;
+  adVariants: ContentAdVariant[];
+  cta: string;
+  photoPrompt: string;
+  videoPrompt: string;
+  whatsappMessage: string;
+  complianceNotes: string[];
+};
+
+export type ContentPackageBrief = {
+  mode?: unknown;
+  format?: unknown;
+  service?: unknown;
+  city?: unknown;
+  offer?: unknown;
+  audience?: unknown;
+  goal?: unknown;
+  tone?: unknown;
+  materialNotes?: unknown;
+};
+
+function briefString(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+// Deterministic, compliance-safe demo package. Never promises results,
+// never uses "100%", never diagnoses by appearance.
+export function demoContentPackage(input: ContentPackageBrief = {}): ContentPackage {
+  const service = briefString(input.service, "услуга клиники");
+  const city = briefString(input.city, "вашем городе");
+  const offer = briefString(input.offer, "бесплатная первичная консультация");
+  const audience = briefString(input.audience, "взрослые, которые заботятся о здоровье");
+  const tone = briefString(input.tone, "доверительно");
+  const format = briefString(input.format, "reels");
+  const goal = briefString(input.goal, "leads");
+  const materialNotes = briefString(input.materialNotes, "");
+
+  const goalCta = goal === "appointment" ? "Записаться на приём" : goal === "awareness" ? "Узнать подробнее" : "Получить консультацию";
+  const adPrimaryText = `${service} в ${city}. Первый шаг — консультация: врач ответит на вопросы и предложит индивидуальный план. ${offer}. Запись в WhatsApp.`;
+  const adHeadline = `${service} в ${city}`;
+  const adVariants: ContentAdVariant[] = [
+    {
+      id: "offer",
+      label: "Прямой оффер",
+      angle: "Сразу объясняет предложение и следующий шаг.",
+      primaryText: adPrimaryText,
+      headline: adHeadline,
+      description: offer,
+      cta: goalCta,
+    },
+    {
+      id: "expert",
+      label: "Экспертное объяснение",
+      angle: "Помогает понять, что будет на первой консультации.",
+      primaryText: `Перед тем как выбрать ${service.toLowerCase()}, важно обсудить ожидания и возможные ограничения с врачом. В клинике в ${city} специалист ответит на вопросы и предложит индивидуальный план. ${offer}. Напишите в WhatsApp, чтобы узнать подробнее.`,
+      headline: `Консультация по услуге «${service}»`,
+      description: "Понятный первый шаг вместе со специалистом",
+      cta: goalCta,
+    },
+    {
+      id: "trust",
+      label: "Доверие и комфорт",
+      angle: "Делает акцент на спокойном знакомстве с клиникой.",
+      primaryText: `Первый визит по направлению «${service}» может быть спокойным и понятным. В ${city} врач выслушает ваши вопросы и расскажет о возможных вариантах после консультации. ${offer}. Администратор поможет подобрать время в WhatsApp.`,
+      headline: "Начните со спокойной консультации",
+      description: `${service}: знакомство с врачом и индивидуальный план`,
+      cta: goalCta,
+    },
+  ];
+
+  return {
+    ideaTitle: `${service} в ${city}: как проходит приём`,
+    hook: `Думаете про ${service.toLowerCase()}? Вот что важно знать перед первым визитом.`,
+    script: [
+      `1. Хук (0-3 сек): «${service}: что происходит на первом приёме?»`,
+      "2. Проблема (3-10 сек): многие откладывают визит, потому что не знают, чего ожидать.",
+      `3. Решение (10-25 сек): врач рассказывает, как проходит консультация по услуге «${service}», какие вопросы задать и как подготовиться.`,
+      `4. Предложение (25-35 сек): ${offer}.`,
+      `5. CTA (35-45 сек): «${goalCta} — напишите нам в WhatsApp».`,
+    ].join("\n"),
+    shotList: [
+      "Кадр 1: врач в кабинете, взгляд в камеру, дневной свет.",
+      "Кадр 2: ресепшн клиники, администратор встречает пациента.",
+      `Кадр 3: крупный план процесса консультации по услуге «${service}» (без медицинских манипуляций в кадре).`,
+      "Кадр 4: пациент и врач обсуждают план — спокойная атмосфера.",
+      "Кадр 5: финальный кадр с логотипом клиники и CTA.",
+    ],
+    textOnScreen: [
+      `${service} — как проходит приём`,
+      "Расскажем и покажем без сложных терминов",
+      offer,
+      `${goalCta} → WhatsApp`,
+    ],
+    voiceover: `Если вы давно думаете про ${service.toLowerCase()}, начните с консультации. Врач осмотрит, ответит на вопросы и предложит план, который подходит именно вам. ${offer}. Напишите нам в WhatsApp — администратор подберёт удобное время.`,
+    caption: `${service} в ${city} 🏥\n\nРассказываем, как проходит первый приём: без спешки, с понятными объяснениями и планом действий.\n\n${offer}.\n\nНапишите в WhatsApp — ответим на вопросы и подберём время. Тон: ${tone}.`,
+    adPrimaryText,
+    adHeadline,
+    adVariants,
+    cta: goalCta,
+    photoPrompt: `Реалистичное фото для медицинской рекламы: современный кабинет клиники, врач-специалист по направлению «${service}», доброжелательная атмосфера, мягкий дневной свет, чистые тона, без текста на изображении, формат ${format}. Без изображений процедур и шприцев крупным планом.${materialNotes ? ` Материалы клиники: ${materialNotes}.` : ""}`,
+    videoPrompt: `Короткое вертикальное видео (${format}, 9:16, 30-45 секунд) для клиники: врач рассказывает про «${service}», кадры кабинета и ресепшн, спокойный ${tone} тон, субтитры на русском, финальный кадр с CTA «${goalCta}». Аудитория: ${audience}. Без обещаний результата и без кадров «до/после».`,
+    whatsappMessage: `Здравствуйте! Пишу по рекламе про «${service}». Хочу узнать подробнее и записаться на консультацию.`,
+    complianceNotes: [
+      "Формулировки без гарантий результата и без «100% результат».",
+      "Нет диагностики по внешности и обещаний «до/после».",
+      "Медицинская услуга подаётся через консультацию и индивидуальный план.",
+    ],
+  };
+}
+
+function normalizeStringArray(value: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(value)) return fallback;
+  const items = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  return items.length > 0 ? items : fallback;
+}
+
+function normalizeAdVariants(value: unknown, fallback: ContentAdVariant[]): ContentAdVariant[] {
+  const records = Array.isArray(value) ? value : [];
+  return fallback.map((fallbackVariant, index) => {
+    const candidate = records[index];
+    const record = candidate && typeof candidate === "object" && !Array.isArray(candidate)
+      ? (candidate as Record<string, unknown>)
+      : {};
+    const read = (key: keyof ContentAdVariant) =>
+      typeof record[key] === "string" && (record[key] as string).trim()
+        ? (record[key] as string).trim()
+        : fallbackVariant[key];
+
+    return {
+      // Stable local ids keep selection deterministic even if a provider
+      // repeats or omits ids in its JSON response.
+      id: fallbackVariant.id,
+      label: read("label"),
+      angle: read("angle"),
+      primaryText: read("primaryText"),
+      headline: read("headline"),
+      description: read("description"),
+      cta: read("cta"),
+    };
+  });
+}
+
+export function normalizeContentPackage(value: unknown, fallback: ContentPackage): ContentPackage {
+  const record = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  type StringField = Exclude<keyof ContentPackage, "shotList" | "textOnScreen" | "complianceNotes" | "adVariants">;
+  const read = (key: StringField) =>
+    typeof record[key] === "string" && (record[key] as string).trim() ? (record[key] as string).trim() : (fallback[key] as string);
+  const adPrimaryText = read("adPrimaryText");
+  const adHeadline = read("adHeadline");
+  const cta = read("cta");
+  const fallbackVariants = fallback.adVariants.map((variant, index) =>
+    index === 0
+      ? {
+          ...variant,
+          primaryText: adPrimaryText,
+          headline: adHeadline,
+          description: read("caption"),
+          cta,
+        }
+      : variant,
+  );
+  return {
+    ideaTitle: read("ideaTitle"),
+    hook: read("hook"),
+    script: read("script"),
+    shotList: normalizeStringArray(record.shotList, fallback.shotList),
+    textOnScreen: normalizeStringArray(record.textOnScreen, fallback.textOnScreen),
+    voiceover: read("voiceover"),
+    caption: read("caption"),
+    adPrimaryText,
+    adHeadline,
+    adVariants: normalizeAdVariants(record.adVariants, fallbackVariants),
+    cta,
+    photoPrompt: read("photoPrompt"),
+    videoPrompt: read("videoPrompt"),
+    whatsappMessage: read("whatsappMessage"),
+    complianceNotes: normalizeStringArray(record.complianceNotes, fallback.complianceNotes),
+  };
+}
+
+type CreateVideoInput = {
+  title?: unknown;
+  niche?: unknown;
+  goal?: unknown;
+  duration?: unknown;
+  style?: unknown;
+  audience?: unknown;
+};
+
+type OpenAIResponsesBody = {
+  output_text?: string;
+  output?: Array<{
+    content?: Array<{
+      text?: string;
+    }>;
+  }>;
+};
+
+type ContentStudioFetchResponse = {
+  ok: boolean;
+  status: number;
+  text: () => Promise<string>;
+};
+
+type ContentStudioFetch = (
+  input: string | URL,
+  init?: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  },
+) => Promise<ContentStudioFetchResponse>;
+
+type OpenAIResponseBody = OpenAIResponsesBody & {
+  error?: {
+    message?: string;
+  };
+  raw?: string;
+};
+
+const demoVideos: ContentStudioVideo[] = [
+  {
+    id: "demo-content-video",
+    title: "Почему клиника теряет заявки после рекламы",
+    niche: "медицинский маркетинг",
+    goal: "показать ценность CRM и быстрой обработки лидов",
+    duration: "30-45 seconds",
+    style: "экспертный разбор",
+    audience: "собственники клиник и маркетологи",
+    hook: "У вас есть заявки, но нет стабильных продаж?",
+    script:
+      "Многие клиники думают, что проблема в рекламе. Но часто проблема в связке: оффер, скорость ответа, CRM и повторная коммуникация.",
+    voiceover:
+      "У вас есть заявки, но нет стабильных продаж? Значит, нужно смотреть не только рекламу, но и всю воронку.",
+    cta: "Напишите “РАЗБОР”, и мы покажем, где теряются клиенты.",
+    caption: "Реклама - это только первый шаг. Важно видеть всю систему: лиды, звонки, записи и продажи.",
+    hashtags: ["#маркетинг", "#таргет", "#клиника", "#crm", "#ai"],
+    avatarPrompt:
+      "Realistic vertical 9:16 AI avatar, confident medical marketing strategist, modern clinic CRM dashboard in background, premium daylight, clean studio look.",
+    tapnowPrompt:
+      "Vertical 9:16 realistic scene: clinic owner sees ad leads, CRM dashboard, WhatsApp messages, call tracking, appointments pipeline, premium healthcare marketing style.",
+    status: "telegram_ready",
+    createdAt: new Date().toISOString(),
+  },
+];
+
+let memoryVideos = [...demoVideos];
+
+function readString(value: unknown, fallback = ""): string {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function normalizeHashtags(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    const tags = value.map(String).map((tag) => tag.trim()).filter(Boolean);
+    if (tags.length > 0) return tags;
+  }
+
+  if (typeof value === "string") {
+    const tags = value.split(/\s+/).map((tag) => tag.trim()).filter(Boolean);
+    if (tags.length > 0) return tags;
+  }
+
+  // Пустой список, а не набор по умолчанию.
+  //
+  // Сюда попадает только ответ модели: демо-пакет отдаётся целиком, минуя
+  // нормализацию. Подставлять здесь пять хэштегов означало показать клинике
+  // как «сгенерированные» теги, которых никто не генерировал, — и клиника
+  // опубликовала бы их под своим постом.
+  return [];
+}
+
+function extractOutputText(body: OpenAIResponsesBody): string {
+  if (typeof body.output_text === "string") return body.output_text;
+
+  const text = body.output
+    ?.flatMap((item) => item.content ?? [])
+    .map((content) => content.text)
+    .filter((value): value is string => Boolean(value))
+    .join("\n");
+
+  return text ?? "";
+}
+
+async function readJsonBody(response: ContentStudioFetchResponse): Promise<OpenAIResponseBody> {
+  const rawText = await response.text();
+  const trimmed = rawText.trim();
+
+  if (!trimmed) return {};
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as OpenAIResponseBody) : { raw: trimmed };
+  } catch {
+    return { raw: trimmed };
+  }
+}
+
+export function listContentVideos(): ContentStudioVideo[] {
+  return [...memoryVideos].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function createContentVideo(input: CreateVideoInput): ContentStudioVideo {
+  const video: ContentStudioVideo = {
+    id: `content-${Date.now()}`,
+    title: readString(input.title, "Ролик для клиники"),
+    niche: readString(input.niche, "клиника / медицинский маркетинг"),
+    goal: readString(input.goal, "получить заявки"),
+    duration: readString(input.duration, "30-45 seconds"),
+    style: readString(input.style, "экспертный разбор"),
+    audience: readString(input.audience, "собственники клиник и маркетологи"),
+    status: "idea",
+    createdAt: new Date().toISOString(),
+    hashtags: [],
+  };
+
+  memoryVideos = [video, ...memoryVideos];
+  return video;
+}
+
+export function updateContentVideo(id: string, patch: Partial<ContentStudioVideo>): ContentStudioVideo | null {
+  let updated: ContentStudioVideo | null = null;
+  memoryVideos = memoryVideos.map((video) => {
+    if (video.id !== id) return video;
+    updated = { ...video, ...patch };
+    return updated;
+  });
+
+  return updated;
+}
+
+export function demoScriptPackage(): ScriptPackage {
+  return {
+    hook: "У вас есть заявки, но нет стабильных продаж?",
+    script:
+      "Многие клиники думают, что проблема в рекламе. Но часто проблема в связке: оффер, скорость ответа, CRM и повторная коммуникация. Если администратор отвечает через час, а заявки не попадают в единую систему, бюджет уходит без понятной картины.",
+    voiceover:
+      "У вас есть заявки, но нет стабильных продаж? Значит, нужно смотреть не только рекламу, но и всю воронку: оффер, скорость ответа, CRM, звонки, записи и повторные касания.",
+    cta: "Напишите “РАЗБОР”, и мы покажем, где теряются клиенты.",
+    caption: "Реклама - это только первый шаг. Важно видеть всю систему: лиды, звонки, записи и продажи.",
+    hashtags: ["#маркетинг", "#таргет", "#клиника", "#crm", "#ai"],
+  };
+}
+
+export function demoAvatarPrompt(input?: { title?: unknown; style?: unknown }): PromptPackage {
+  return {
+    format: "video",
+    prompt: [
+      "Realistic vertical 9:16 AI avatar video.",
+      "Confident healthcare marketing strategist speaking to camera.",
+      `Topic: ${readString(input?.title, "clinic marketing funnel audit")}.`,
+      `Style: ${readString(input?.style, "premium expert, calm and direct")}.`,
+      "Modern clinic office, soft daylight, CRM dashboard and lead notifications in background.",
+      "Natural skin texture, clean framing, professional wardrobe, trustworthy tone.",
+    ].join(" "),
+    negativePrompt: "low quality, distorted face, extra fingers, unreadable text, cartoon, heavy blur, dark lighting",
+  };
+}
+
+export function demoTapNowPrompt(input?: { title?: unknown; niche?: unknown; goal?: unknown }): PromptPackage {
+  return {
+    prompt: [
+      "Vertical 9:16 premium realistic marketing video scene.",
+      `Topic: ${readString(input?.title, "clinic lead funnel")}.`,
+      `Niche: ${readString(input?.niche, "medical clinic marketing")}.`,
+      `Goal: ${readString(input?.goal, "turn ad leads into booked appointments")}.`,
+      "Show CRM dashboard, WhatsApp leads, call tracking, appointment pipeline, clean clinic brand visuals.",
+      "Young AI strategist explains the funnel, modern office, smooth camera movement, production-ready lighting.",
+    ].join(" "),
+    negativePrompt: "low quality, text artifacts, medical claims, distorted UI, chaotic background, off-brand colors",
+  };
+}
+
+export function normalizeScriptPackage(value: unknown): ScriptPackage {
+  const record = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+
+  return {
+    hook: readString(record.hook, demoScriptPackage().hook),
+    script: readString(record.script, demoScriptPackage().script),
+    voiceover: readString(record.voiceover, demoScriptPackage().voiceover),
+    cta: readString(record.cta, demoScriptPackage().cta),
+    caption: readString(record.caption, demoScriptPackage().caption),
+    hashtags: normalizeHashtags(record.hashtags),
+  };
+}
+
+export function normalizePromptPackage(value: unknown, fallback: PromptPackage): PromptPackage {
+  const record = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+
+  return {
+    format: record.format === "photo" || record.format === "video" ? record.format : fallback.format,
+    prompt: readString(record.prompt, fallback.prompt),
+    negativePrompt: readString(record.negativePrompt, fallback.negativePrompt ?? ""),
+  };
+}
+
+/**
+ * Текстовый пакет от модели.
+ *
+ * Имя сохранено ради вызывающих, но провайдер здесь больше не один: выбор
+ * между Claude и OpenAI живёт в lib/ai/text-provider.ts и объявляется
+ * переменными окружения. Контракт прежний: без ключей — demo-заготовка,
+ * отказ провайдера — исключение с причиной, а mode называет того, кто
+ * действительно написал текст.
+ */
+export async function generateOpenAIJson<TData>(input: {
+  system: string;
+  user: unknown;
+  fallback: TData;
+  normalize: (value: unknown) => TData;
+}): Promise<{ mode: ContentStudioMode; data: TData }> {
+  if (!resolveTextProvider(process.env)) {
+    // Названный в AI_TEXT_PROVIDER провайдер без ключа — ошибка настройки, а
+    // не «ключей нет»: молчаливый скат в заготовку прятал бы опечатку.
+    if (process.env.AI_TEXT_PROVIDER?.trim()) {
+      throw new Error(`Провайдер ${process.env.AI_TEXT_PROVIDER.trim()} выбран в AI_TEXT_PROVIDER, но его ключ не задан.`);
+    }
+    return { mode: "demo", data: input.fallback };
+  }
+
+  const result = await generateText({ system: input.system, user: input.user, purpose: "content", json: true, maxTokens: 4096 });
+  if (!result.ok) {
+    throw new Error(result.reason);
+  }
+
+  // Модель могла обрамить объект пояснением: у Anthropic нет режима «отвечай
+  // JSON-ом», и один абзац вежливости не должен стоить всего ответа.
+  const json = extractJsonObject(result.text);
+  if (!json) {
+    throw new Error(`${result.provider}: ответ без JSON-объекта`);
+  }
+
+  return {
+    mode: result.provider,
+    data: input.normalize(JSON.parse(json)),
+  };
+}
+
+export function telegramPackageText(input: {
+  title?: string;
+  hook?: string;
+  script?: string;
+  voiceover?: string;
+  cta?: string;
+  caption?: string;
+  hashtags?: string[];
+  avatarPrompt?: string;
+  tapnowPrompt?: string;
+}): string {
+  const parts = [
+    `ИИ студия контента: ${input.title || "ролик"}`,
+    input.hook ? `Hook:\n${input.hook}` : null,
+    input.script ? `Script:\n${input.script}` : null,
+    input.voiceover ? `Voiceover:\n${input.voiceover}` : null,
+    input.cta ? `CTA:\n${input.cta}` : null,
+    input.caption ? `Caption:\n${input.caption}` : null,
+    input.hashtags?.length ? `Hashtags:\n${input.hashtags.join(" ")}` : null,
+    input.avatarPrompt ? `Avatar prompt:\n${input.avatarPrompt}` : null,
+    input.tapnowPrompt ? `TapNow prompt:\n${input.tapnowPrompt}` : null,
+  ];
+
+  return parts.filter(Boolean).join("\n\n---\n\n");
+}

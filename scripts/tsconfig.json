@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node"]
+  },
+  "include": ["src"],
+  "exclude": ["src/medina-auth-mutation-entry.test.ts", "src/medina-auth-mutation-session.test.ts", "src/medina-auth-password-authority.test.ts"]
+}

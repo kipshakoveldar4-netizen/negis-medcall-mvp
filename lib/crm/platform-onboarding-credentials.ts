@@ -1,0 +1,400 @@
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { readApplicationOrigin } from "../auth/application-origin";
+import { validatePasswordRules } from "../auth/password-rules";
+import { emailFromLogin, isLoginShape, isSyntheticEmail, normalizeLogin } from "../auth/staff-logins";
+import { getSupabaseServerClient } from "../supabase/server";
+import { validateOnboardingRequest, type OnboardingRejection, type OnboardingRequest } from "./platform-onboarding";
+import { escapeLikePattern } from "./staff-invitations";
+import { onboardingSettings } from "./workspace-purpose";
+
+// Подключение клиники с логином и паролем — упрощённый путь без письма.
+//
+// Живая передача салона показала, чего стоит цепочка «ссылка → мессенджер →
+// /join → задай пароль»: WhatsApp портил фрагмент, ссылка терялась, владелец
+// без пароля упирался в «Invalid login credentials». Владелец платформы
+// попросил путь короче: он сам задаёт владельцу клиники логин (почту) и
+// пароль и передаёт их из рук в руки.
+//
+// Этот модуль — ЕДИНСТВЕННОЕ место, где пароль проходит через платформенный
+// код, и у прохода три правила:
+//
+//   — пароль нигде не сохраняется и никуда не возвращается: он уходит одним
+//     аргументом в auth.admin.createUser (Supabase хранит только хэш) и не
+//     попадает ни в таблицы, ни в ответы, ни в логи;
+//   — email_confirm: true — подтверждающее письмо не отправляется вовсе,
+//     вход работает сразу; это и есть «без письма»;
+//   — аккаунт создаётся ПЕРВЫМ: самый частый отказ — занятая почта — не
+//     оставляет после себя ни пространства, ни настроек. Занятая почта — не
+//     тупик: такую клинику подключает соседний инвайт-путь, владелец входит
+//     со своим паролем и принимает ссылку.
+//
+// Инвайт-путь (platform-onboarding.ts) остаётся как был и по-прежнему не
+// видит паролей.
+
+type JsonRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): JsonRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as JsonRecord;
+}
+
+function readString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function sendJson(res: VercelResponse, status: number, body: JsonRecord) {
+  res.status(status).json(body);
+}
+
+/**
+ * Правила пароля решаются без базы, поэтому отдельной функцией — как
+ * validateOnboardingRequest. Сами правила живут в lib/auth/password-rules.ts:
+ * их читает и форма профиля в кабинете, где сотрудник меняет пароль себе. Пока
+ * правила были записаны здесь, кабинет требовал шесть символов вместо восьми.
+ */
+export function validateOwnerPassword(value: unknown): string[] {
+  return validatePasswordRules(value);
+}
+
+type CredentialsOnboardingRequest = OnboardingRequest & { ownerLogin: string; ownerLoginOnly: boolean };
+
+/** The same Auth address is used at creation and at username sign-in. */
+export function validateCredentialsOnboardingRequest(body: JsonRecord): CredentialsOnboardingRequest | OnboardingRejection {
+  let ownerLogin = "";
+  if (body.ownerLogin !== undefined) {
+    const rawLogin = readString(body.ownerLogin);
+    ownerLogin = normalizeLogin(rawLogin);
+    if ((body.ownerEmail !== undefined && (typeof body.ownerEmail !== "string" || readString(body.ownerEmail))) ||
+        typeof body.ownerLogin !== "string" || rawLogin.length > 24 ||
+        !/^[a-z0-9._ -]+$/i.test(rawLogin) || !isLoginShape(ownerLogin)) {
+      return {
+        status: 400, error: "Форма заполнена не до конца", code: "invalid_onboarding",
+        details: ["Укажите либо почту, либо логин владельца: 3–24 символа латиницей, цифры и точки."],
+      };
+    }
+  } else if (isSyntheticEmail(body.ownerEmail)) {
+    return {
+      status: 400, error: "Форма заполнена не до конца", code: "invalid_onboarding",
+      details: ["Служебный адрес выдаёт система. Укажите логин без «@» в поле логина или настоящую почту."],
+    };
+  }
+  const validated = validateOnboardingRequest(ownerLogin ? {
+    ...body,
+    ownerEmail: emailFromLogin(ownerLogin),
+    ownerName: readString(body.ownerName) || ownerLogin,
+  } : body);
+  return "status" in validated ? validated : { ...validated, ownerLogin, ownerLoginOnly: Boolean(ownerLogin) };
+}
+
+/** POST /api/crm/platform-onboarding-credentials — за requirePlatformOwner. */
+export async function handlePlatformOnboardingCredentials(req: VercelRequest, res: VercelResponse) {
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendJson(res, 503, { success: false, error: "Хранилище не настроено", code: "storage_not_configured" });
+  }
+
+  const body = asRecord(req.body);
+  if (body.purpose === "marketing") {
+    return sendJson(res, 400, {
+      success: false,
+      code: "marketing_invitation_required",
+      error: "Маркетинговое пространство подключается через ссылку-приглашение к аккаунту владельца.",
+    });
+  }
+  const validated = validateCredentialsOnboardingRequest(body);
+  const passwordDetails = validateOwnerPassword(body.password);
+  if ("status" in validated || passwordDetails.length > 0) {
+    const details = [...("status" in validated ? validated.details || [] : []), ...passwordDetails];
+    return sendJson(res, 400, {
+      success: false,
+      error: "Форма заполнена не до конца",
+      code: "invalid_onboarding",
+      ...(details.length > 0 ? { details } : {}),
+    });
+  }
+  const password = String(body.password);
+  const ownerIdentifier = validated.ownerLogin || validated.ownerEmail;
+
+  // То же правило, что у инвайт-пути: один клиент — одно подключение за раз.
+  // Живое приглашение владельца на эту почту значит, что пространство уже
+  // создано и ждёт — второе рядом почти наверняка двойная попытка.
+  const { data: pendingRows, error: pendingError } = await supabase
+    .from("staff_invitations")
+    .select("workspace_id")
+    .eq("role", "owner")
+    .ilike("email", escapeLikePattern(validated.ownerEmail))
+    .is("accepted_at", null)
+    .is("revoked_at", null)
+    .gt("expires_at", new Date().toISOString());
+  if (pendingError) {
+    return sendJson(res, 502, { success: false, error: "Не удалось проверить существующие приглашения", code: "unavailable" });
+  }
+  if (Array.isArray(pendingRows) && pendingRows.length > 0) {
+    const existingWorkspaceId = readString(asRecord(pendingRows[0]).workspace_id);
+    // Имя клиники — до кнопки перевыпуска: отзыв старой ссылки необратим, и
+    // жать его вслепую, не зная, к какой клинике относится, нельзя.
+    const { data: existingWorkspace } = await supabase
+      .from("workspaces")
+      .select("name")
+      .eq("id", existingWorkspaceId)
+      .maybeSingle();
+    const existingName = readString(asRecord(existingWorkspace).name);
+    return sendJson(res, 409, {
+      success: false,
+      error: validated.ownerLoginOnly ? "Этот логин уже подключается" : "Эта почта уже подключается",
+      code: "invitation_already_pending",
+      details: [
+        `Владельцу уже выписано живое приглашение${existingName ? ` в «${existingName}»` : ""}. Перевыпустите его кнопкой ниже — второе пространство для того же входа не создаётся.`,
+      ],
+      data: { existingWorkspaceId },
+    });
+  }
+
+  // У почты уже есть клиника? Проверка стоит ДО createUser: без неё повтор
+  // подключения после истёкшего приглашения, чьё письмо не ушло (Auth-аккаунта
+  // нет), молча создавал вторую клинику — createUser проходил, и insert ниже
+  // не спрашивал ничего. Парольному пути подтверждение «второй точки» не
+  // положено: у владельца второй точки уже есть аккаунт, и такой заход честно
+  // упрётся в email_exists с советом про инвайт-режим.
+  {
+    const { data: ownedRows, error: ownedError } = await supabase
+      .from("workspaces")
+      .select("id, name")
+      .ilike("owner_email", escapeLikePattern(validated.ownerEmail));
+    if (ownedError) {
+      return sendJson(res, 502, { success: false, error: "Не удалось проверить существующие клиники", code: "unavailable" });
+    }
+    if (Array.isArray(ownedRows) && ownedRows.length > 0) {
+      const ownedNames = ownedRows.map((row) => readString(asRecord(row).name)).filter(Boolean);
+      return sendJson(res, 409, {
+        success: false,
+        error: validated.ownerLoginOnly ? "У этого логина уже есть пространство" : "У этой почты уже есть клиника",
+        code: "owner_already_has_workspace",
+        details: [
+          `За этим входом уже числится: ${ownedNames.map((name) => `«${name}»`).join(", ")}.`,
+          ...(validated.ownerLoginOnly ? [
+            "Не создавайте второе пространство. Если привязка владельца не завершена, передайте новую ссылку вручную; для её принятия нужен действующий пароль.",
+            "У логина нет почты для восстановления. Если пароль потерян или нужна ещё одна точка, обратитесь в поддержку.",
+          ] : [
+            "Если владелец не может войти — перевыпустите приглашение кнопкой ниже: при выписке Supabase создаёт аккаунт и шлёт письмо, а ссылку можно передать и вручную.",
+            "Если владельцу нужна вторая точка — подключите её через «Ссылку-приглашение».",
+          ]),
+        ],
+        data: { existingWorkspaceId: readString(asRecord(ownedRows[0]).id) },
+      });
+    }
+  }
+
+  // Аккаунт — первым: отказ «почта занята» не должен оставлять мусора.
+  //
+  // Прямым вызовом Admin API, а не через клиент: supabase-js 2.105 больше не
+  // возит GoTrue-админку (auth.admin исчез и из типов, и из рантайма — сборка
+  // Vercel это поймала, локальный инкрементальный tsc проглядел). Паттерн тот
+  // же, что у sendSupabaseInviteEmail; ответ провайдера наружу не уходит —
+  // из него читаются только id и код ошибки.
+  type AdminCreateResponse = { ok: boolean; status: number; json(): Promise<unknown> };
+  const supabaseUrl = process.env.SUPABASE_URL?.trim().replace(/\/+$/, "");
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  if (!supabaseUrl || !serviceRoleKey) {
+    return sendJson(res, 503, { success: false, error: "Хранилище не настроено", code: "storage_not_configured" });
+  }
+  let createdResponse: AdminCreateResponse;
+  try {
+    createdResponse = (await fetch(`${supabaseUrl}/auth/v1/admin/users`, {
+      method: "POST",
+      redirect: "error",
+      headers: {
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${serviceRoleKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        email: validated.ownerEmail,
+        password,
+        email_confirm: true,
+        user_metadata: { full_name: validated.ownerName },
+      }),
+    })) as unknown as AdminCreateResponse;
+  } catch {
+    return sendJson(res, 502, { success: false, error: "Не удалось создать аккаунт владельца", code: "unavailable" });
+  }
+  if (!createdResponse.ok) {
+    const errorBody = asRecord(await createdResponse.json().catch(() => null));
+    const errorCode = readString(errorBody.error_code).toLowerCase();
+    const errorMessage = readString(errorBody.msg) || readString(errorBody.message) || readString(errorBody.error_description);
+    const emailTaken = errorCode === "email_exists" || /already (been )?registered/i.test(errorMessage);
+    if (!emailTaken && createdResponse.status === 422) {
+      // Наша проверка длиннее правил Supabase по умолчанию, но проект может
+      // нести свою политику пароля — отказ называется своими словами, тело
+      // провайдера наружу не пересказывается.
+      return sendJson(res, 400, {
+        success: false,
+        error: "Supabase отклонил такой пароль",
+        code: "password_rejected",
+        details: ["Задайте другой пароль — длиннее или с другими символами."],
+      });
+    }
+    if (emailTaken) {
+      // Занятая почта бывает и следом НАШЕГО прерванного прохода: аккаунт
+      // создан, пространство есть, а владелец к нему не привязан. Совет
+      // «подключите через приглашение» в этом случае создал бы второе
+      // пространство — вместо него отдаётся id недособранного, и форма
+      // предлагает перевыпуск приглашения именно в него.
+      const { data: candidateRows } = await supabase
+        .from("workspaces")
+        .select("id, name")
+        .ilike("owner_email", escapeLikePattern(validated.ownerEmail));
+      const assembledNames: string[] = [];
+      for (const row of Array.isArray(candidateRows) ? candidateRows : []) {
+        const candidateId = readString(asRecord(row).id);
+        if (!candidateId) continue;
+        const { data: ownerRow } = await supabase
+          .from("staff_users")
+          .select("id")
+          .eq("workspace_id", candidateId)
+          .eq("role", "owner")
+          .maybeSingle();
+        if (!ownerRow) {
+          return sendJson(res, 409, {
+            success: false,
+            error: validated.ownerLoginOnly ? "У этого логина уже есть аккаунт и недособранное пространство" : "У этой почты уже есть аккаунт и недособранное пространство",
+            code: "email_already_registered",
+            details: [
+              "Похоже на прерванное подключение: пространство создано, а владелец к нему не привязан.",
+              "Не создавайте второе. Выпишите приглашение кнопкой ниже — владелец войдёт со своим паролем и примет его.",
+            ],
+            data: { existingWorkspaceId: candidateId },
+          });
+        }
+        assembledNames.push(readString(asRecord(row).name) || candidateId);
+      }
+      if (assembledNames.length > 0) {
+        // Типовой случай — прошлое подключение состоялось, а оператор об этом
+        // не знает (ответ потерялся). Отправить его «через приглашение» значило
+        // бы молча создать вторую клинику.
+        return sendJson(res, 409, {
+          success: false,
+          error: validated.ownerLoginOnly ? "Этот логин уже владеет пространством" : "Эта почта уже владеет клиникой",
+          code: "email_already_registered",
+          details: [
+            `За этим входом уже числится: ${assembledNames.map((name) => `«${name}»`).join(", ")}. Возможно, подключение уже состоялось — проверьте карточку пространства.`,
+            validated.ownerLoginOnly ? "Если владельцу нужна вторая точка, обратитесь в поддержку: повторное создание аккаунта не допускается." : "Если владельцу нужна вторая точка — подключите её через «Ссылку-приглашение»: форма попросит подтвердить создание второй клиники.",
+          ],
+        });
+      }
+      if (validated.ownerLoginOnly) {
+        return sendJson(res, 409, {
+          success: false,
+          error: "Логин недоступен",
+          code: "owner_login_unavailable",
+          details: [
+            "Существующий аккаунт и его пароль не изменены. Для нового владельца выберите другой логин.",
+            "Если это повтор прерванного подключения, не создавайте дубль и обратитесь в поддержку.",
+          ],
+        });
+      }
+      return sendJson(res, 409, {
+        success: false,
+        error: "У этой почты уже есть аккаунт",
+        code: "email_already_registered",
+        details: [
+          "Пароль для существующего аккаунта отсюда не задаётся — это был бы захват чужого входа.",
+          "Подключите эту почту через «Ссылку-приглашение»: владелец войдёт со своим паролем и примет её. Пароль он может восстановить через «Забыли пароль?» на странице входа.",
+        ],
+      });
+    }
+    return sendJson(res, 502, { success: false, error: "Не удалось создать аккаунт владельца", code: "unavailable" });
+  }
+  const createdUser = asRecord(await createdResponse.json().catch(() => null));
+  const authUserId = readString(createdUser.id);
+  if (!authUserId) {
+    // 2xx без читаемого id: аккаунт создан, а привязать его не к чему.
+    // Повтор формы честно откажет «почта занята» — оттуда путь через
+    // приглашение, тупика нет.
+    return sendJson(res, 502, {
+      success: false,
+      error: "Аккаунт создан, но ответ Supabase не прочитан",
+      code: "unavailable",
+    });
+  }
+
+  const { data: workspaceRow, error: workspaceError } = await supabase
+    .from("workspaces")
+    .insert({ name: validated.name, owner_email: validated.ownerEmail })
+    .select("id")
+    .single();
+  if (workspaceError || !workspaceRow) {
+    // Дальше каждый отказ называет, что УЖЕ создано: полусозданное состояние
+    // владелец платформы должен видеть, а не угадывать.
+    return sendJson(res, 502, {
+      success: false,
+      error: "Аккаунт владельца создан, а пространство — нет",
+      code: "partial_credentials_onboarding",
+      details: [
+        `Аккаунт ${ownerIdentifier} уже существует, но пространство не создано.`,
+        validated.ownerLoginOnly ? "Не отправляйте форму повторно и не создавайте дубль под другим логином. Требуется восстановление подключения поддержкой; письмо для пароля этому входу недоступно." : "Повторная отправка этой формы откажет («почта занята») — подключите эту почту через «Ссылку-приглашение»: владелец войдёт с паролем и примет её.",
+      ],
+    });
+  }
+  const workspaceId = readString(asRecord(workspaceRow).id);
+
+  const { error: settingsError } = await supabase.from("workspace_settings").insert(onboardingSettings(workspaceId, validated));
+  if (settingsError) {
+    return sendJson(res, 502, {
+      success: false,
+      error: "Пространство создано, но настройки не записались",
+      code: "partial_credentials_onboarding",
+      details: [
+        `Пространство ${workspaceId} и аккаунт владельца уже существуют — не создавайте второе.`,
+        "Не записаны профиль пространства и часовой пояс; membership владельца тоже не создан.",
+        "Вход владельцу вернёт перевыпуск приглашения кнопкой ниже; профиль и часовой пояс останутся незаполненными.",
+      ],
+      data: { existingWorkspaceId: workspaceId },
+    });
+  }
+
+  // Строка сотрудника — та же, что создаёт принятие приглашения на /join:
+  // с auth_user_id сразу, вход привязан с первой секунды.
+  // password_reset_required: true — пароль задал не владелец, а платформа;
+  // сегодня CRM флаг не принуждает, но семантика честная, и включённое позже
+  // принуждение поведёт ровно этих владельцев менять переданный пароль.
+  const { error: staffError } = await supabase.from("staff_users").insert({
+    workspace_id: workspaceId,
+    email: validated.ownerEmail,
+    full_name: validated.ownerName,
+    role: "owner",
+    status: "active",
+    auth_user_id: authUserId,
+    invited_at: new Date().toISOString(),
+    password_reset_required: true,
+  });
+  if (staffError) {
+    return sendJson(res, 502, {
+      success: false,
+      error: "Пространство создано, но владелец к нему не привязан",
+      code: "partial_credentials_onboarding",
+      details: [
+        `Пространство ${workspaceId} с настройками уже существует — не создавайте второе.`,
+        "Вход владельца сказал бы «аккаунт не связан с клиникой». Перевыпустите приглашение кнопкой ниже — владелец войдёт со своим паролем и примет его.",
+      ],
+      data: { existingWorkspaceId: workspaceId },
+    });
+  }
+
+  // Пароля в ответе нет намеренно: владелец платформы задал его сам и он
+  // существует теперь только в двух головах и в хэше Supabase.
+  return sendJson(res, 201, {
+    success: true,
+    data: {
+      workspaceId,
+      name: validated.name,
+      purpose: validated.purpose,
+      vertical: validated.vertical,
+      ownerEmail: validated.ownerEmail,
+      ownerLogin: validated.ownerLogin,
+      ownerLoginOnly: validated.ownerLoginOnly,
+      timeZone: validated.timeZone,
+      loginUrl: `${readApplicationOrigin()}/login`,
+    },
+  });
+}
