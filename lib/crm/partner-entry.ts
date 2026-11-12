@@ -9,6 +9,16 @@ import { canonicalPartnerCode, newPartnerEntryFrame, partnerCapabilityHash, part
 
 type Row = Record<string, unknown>;
 type Config = { origin: string; hostname: string; key: Buffer; secret: string; siteKey: string; consentVersion: string };
+type ChallengeReadResult = { done: true; value?: Uint8Array } | { done: false; value: Uint8Array };
+type ChallengeReader = {
+  read(): Promise<ChallengeReadResult>;
+  cancel(): Promise<void> | void;
+  releaseLock(): void;
+};
+type ChallengeBody = { getReader(): ChallengeReader; cancel(): Promise<void> | void };
+type ChallengeFetch = (url: string, init: {
+  method: string; redirect: string; headers: Record<string, string>; body: string; signal: AbortSignal;
+}) => Promise<{ ok: boolean; body: ChallengeBody | null }>;
 const record = (v: unknown): Row | null => v && typeof v === "object" && !Array.isArray(v) ? v as Row : null;
 const keys = (v: Row, expected: string[]) => Object.keys(v).length === expected.length && expected.every(k => Object.hasOwn(v, k));
 export function partnerEntryConfig(env: NodeJS.ProcessEnv): Config | null {
@@ -49,7 +59,8 @@ async function body(req: VercelRequest): Promise<Row | null> {
   return record(JSON.parse(Buffer.concat(chunks, bytes).toString("utf8")));
 }
 export { body as readPartnerEntryBody, BodyLimitError as PartnerEntryBodyLimitError };
-export async function verifyPartnerEntryChallenge(config: Config, token: string, request: typeof fetch = fetch): Promise<boolean> {
+export async function verifyPartnerEntryChallenge(config: Config, token: string,
+  request: ChallengeFetch = fetch as unknown as ChallengeFetch): Promise<boolean> {
   try {
     const response = await request("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
       method: "POST", redirect: "error", headers: { "Content-Type": "application/json" },
