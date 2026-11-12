@@ -62,7 +62,7 @@ export function requireOperatorPreview(env, phase, expectedProjectId = qaProject
     if (disabledFlags.has(name) && value === "false") continue;
     if (name === "NODE_OPTIONS" && value === "--enable-source-maps") continue;
     if (platformBinding(name.toUpperCase())) continue;
-    fail("unexpected_binding");
+    fail("unexpected_binding:" + name);
   }
   if (phase === "build") {
     if (env.VITE_SUPABASE_URL !== testDatabaseOrigin
