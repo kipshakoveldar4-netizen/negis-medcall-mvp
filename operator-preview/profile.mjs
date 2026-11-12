@@ -31,6 +31,7 @@ const systemBindings = new Set([
   "VERCEL", "DD_TAGS", "TURBO_RUN_SUMMARY", "TURBO_PLATFORM_ENV", "UV_THREADPOOL_SIZE",
   "BUN_INSTALL_GLOBAL_STORE", "NEXT_ENABLE_ADAPTER", "__VERCEL_BUILD_RUNNING", "NEXT_PRIVATE_MULTI_PAYLOAD",
   "UV_PYTHON_DOWNLOADS", "UV_PYTHON_DOWNLOADS_JSON_URL",
+  "YARN_NODE_LINKER", "GEM_HOME",
   "PORT", "INIT_CWD", "PNPM_SCRIPT_SRC_DIR", "NPM_EXECPATH",
 ]);
 
@@ -82,7 +83,7 @@ export function requireOperatorPreview(env, phase, expectedProjectId = qaProject
     if (platformBinding(name.toUpperCase())) continue;
     unexpectedBindings.push(name);
   }
-  if (unexpectedBindings.length) fail("unexpected_binding:" + unexpectedBindings.join(","));
+  if (unexpectedBindings.length) fail("unexpected_binding");
   if (phase === "build") {
     if (env.VITE_SUPABASE_URL !== testDatabaseOrigin
       || (env.VITE_API_BASE_URL && env.VITE_API_BASE_URL !== "/")) fail("frontend_origin");
