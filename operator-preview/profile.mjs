@@ -6,6 +6,7 @@ const hostnamePattern = /^medina-os-[a-z0-9]{9}-yeldar-s-projects\.vercel\.app$/
 const allowedBindings = new Set([
   "MEDINA_OPERATOR_PREVIEW", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY",
   "MEDINA_OPERATOR_PREVIEW_WORKSPACE_ID", "VITE_SUPABASE_URL", "VITE_SUPABASE_ANON_KEY", "VITE_API_BASE_URL",
+  "REACT_APP_VERCEL_OBSERVABILITY_CLIENT_CONFIG",
 ]);
 const disabledFlags = new Set([
   "META_VIDEO_LAUNCH_ENABLED", "TIKTOK_DISABLED_LAUNCH_ENABLED", "TIKTOK_VIDEO_UPLOAD_ENABLED",
@@ -68,7 +69,7 @@ export function requireOperatorPreview(env, phase, expectedProjectId = qaProject
     if (disabledFlags.has(name) && value === "false") continue;
     if (name === "NODE_OPTIONS" && isSafeNodeOptions(value)) continue;
     if (platformBinding(name.toUpperCase())) continue;
-    fail("unexpected_binding:" + name);
+    fail("unexpected_binding");
   }
   if (phase === "build") {
     if (env.VITE_SUPABASE_URL !== testDatabaseOrigin
