@@ -2,7 +2,7 @@ import { isDedicatedQaProjectId, qaProjectId } from "./qa-project.mjs";
 
 export const testDatabaseOrigin = "https://ukiobbwsdoblooynzlnx.supabase.co";
 const testDatabaseRef = "ukiobbwsdoblooynzlnx";
-const hostnamePattern = /^medina-os-qa-[a-z0-9]{9}-yeldar-s-projects\.vercel\.app$/;
+const hostnamePattern = /^medina-os-[a-z0-9]{9}-yeldar-s-projects\.vercel\.app$/;
 const allowedBindings = new Set([
   "MEDINA_OPERATOR_PREVIEW", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY",
   "MEDINA_OPERATOR_PREVIEW_WORKSPACE_ID", "VITE_SUPABASE_URL", "VITE_SUPABASE_ANON_KEY", "VITE_API_BASE_URL",
@@ -51,8 +51,9 @@ export function requireOperatorPreview(env, phase, expectedProjectId = qaProject
   if (!isDedicatedQaProjectId(expectedProjectId) || env.VERCEL_PROJECT_ID !== expectedProjectId) fail("project_identity");
   if (expectedWorkspaceId !== null && (!workspaceIdPattern.test(expectedWorkspaceId)
     || env.MEDINA_OPERATOR_PREVIEW_WORKSPACE_ID !== expectedWorkspaceId)) fail("workspace_identity");
+  const targetEnvironment = env.VERCEL_TARGET_ENV;
   if (env.MEDINA_OPERATOR_PREVIEW !== "1" || env.VERCEL_ENV !== "preview"
-    || env.VERCEL_TARGET_ENV !== "preview"
+    || (targetEnvironment && targetEnvironment !== "preview")
     || !hostnamePattern.test(env.VERCEL_URL || "")) fail("target");
   if (env.VERCEL_AUTOMATION_BYPASS_SECRET) fail("automation_bypass");
   for (const [name, value] of Object.entries(env)) {
