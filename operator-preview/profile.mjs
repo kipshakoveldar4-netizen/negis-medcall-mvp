@@ -36,7 +36,7 @@ const systemBindings = new Set([
 
 function platformBinding(name) {
   return systemBindings.has(name)
-    || /^(?:VERCEL_|AWS_|LAMBDA_|VC_|LC_|NPM_CONFIG_|__VC_)[A-Z0-9_]+$/.test(name);
+    || /^(?:VERCEL_|AWS_|LAMBDA_|VC_|LC_|NPM_CONFIG_|PNPM_CONFIG_|__VC_)[A-Z0-9_]+$/.test(name);
 }
 
 function fail(code) {
@@ -82,7 +82,7 @@ export function requireOperatorPreview(env, phase, expectedProjectId = qaProject
     if (platformBinding(name.toUpperCase())) continue;
     unexpectedBindings.push(name);
   }
-  if (unexpectedBindings.length) fail("unexpected_binding:" + unexpectedBindings.join(","));
+  if (unexpectedBindings.length) fail("unexpected_binding");
   if (phase === "build") {
     if (env.VITE_SUPABASE_URL !== testDatabaseOrigin
       || (env.VITE_API_BASE_URL && env.VITE_API_BASE_URL !== "/")) fail("frontend_origin");
