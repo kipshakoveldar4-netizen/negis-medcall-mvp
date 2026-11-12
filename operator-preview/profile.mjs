@@ -64,6 +64,7 @@ export function requireOperatorPreview(env, phase, expectedProjectId = qaProject
     || (targetEnvironment && targetEnvironment !== "preview")
     || !hostnamePattern.test(env.VERCEL_URL || "")) fail("target");
   if (env.VERCEL_AUTOMATION_BYPASS_SECRET) fail("automation_bypass");
+  const unexpectedBindings = [];
   for (const [name, value] of Object.entries(env)) {
     if (typeof value !== "string" || !value.trim()) continue;
     if (allowedBindings.has(name)) continue;
@@ -71,8 +72,9 @@ export function requireOperatorPreview(env, phase, expectedProjectId = qaProject
     if (name === "NODE_OPTIONS" && isSafeNodeOptions(value)) continue;
     if (name === "NEXT_EXPERIMENTAL_LARGE_FUNCTIONS" && ["1", "true"].includes(value.toLowerCase())) continue;
     if (platformBinding(name.toUpperCase())) continue;
-    fail("unexpected_binding");
+    unexpectedBindings.push(name);
   }
+  if (unexpectedBindings.length) fail("unexpected_binding:" + unexpectedBindings.join(","));
   if (phase === "build") {
     if (env.VITE_SUPABASE_URL !== testDatabaseOrigin
       || (env.VITE_API_BASE_URL && env.VITE_API_BASE_URL !== "/")) fail("frontend_origin");
