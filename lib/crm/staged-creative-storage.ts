@@ -7,6 +7,12 @@ const allowedMimes = new Set(["image/jpeg", "image/png", "image/webp", "video/mp
 type Storage = Pick<SupabaseClient, "storage">;
 export type StagedCreativeStorageConfig = { supabase: Storage; origin: string; serviceRoleKey: string };
 type Config = StagedCreativeStorageConfig;
+type StorageReply<T> = { data: T; error: unknown };
+type StorageBucket = { id?: string; public?: boolean; file_size_limit?: number; allowed_mime_types?: string[] };
+type SignedUpload = { path?: string; token?: string; signedUrl?: string };
+type StorageObject = { name?: string; id?: string };
+type StorageResponse = { body: ReadableStream<Uint8Array> | null; headers: { get(name: string): string | null }; status: number; redirected: boolean };
+type StorageFetch = (url: string, init: RequestInit) => Promise<StorageResponse>;
 
 export class StagedCreativeStorageError extends Error {
   constructor(readonly code: string) { super(code); }
@@ -31,11 +37,12 @@ function originOf(config: Config): string {
 
 async function privateBucket(config: Config, ticket: StagedCreativeTicket): Promise<void> {
   try {
-    const { data, error } = await storageCall(() => config.supabase.storage.getBucket(STAGED_CREATIVE_BUCKET));
+    const bucketResult = config.supabase.storage.getBucket(STAGED_CREATIVE_BUCKET);
+    const { data, error } = await storageCall(() => bucketResult as unknown as Promise<StorageReply<StorageBucket>>);
     if (error || data?.id !== STAGED_CREATIVE_BUCKET || data.public !== false || !Number.isSafeInteger(data.file_size_limit)
       || Number(data.file_size_limit) < ticket.fileSize || Number(data.file_size_limit) > 100 * 1024 * 1024
       || !Array.isArray(data.allowed_mime_types) || !data.allowed_mime_types.includes(ticket.mimeType)
-      || data.allowed_mime_types.some(mime => !allowedMimes.has(mime))) throw new Error();
+      || data.allowed_mime_types.some((mime: string) => !allowedMimes.has(mime))) throw new Error();
   } catch { throw new StagedCreativeStorageError("creative_staging_bucket_unconfirmed"); }
 }
 
@@ -59,7 +66,8 @@ async function mintReservedUpload(config: Config, ticket: StagedCreativeTicket, 
   const origin = originOf(config);
   const info = uploadInfo(config, ticket, now), storagePath = info.storagePath;
   try {
-    const { data, error } = await storageCall(() => bucket.createSignedUploadUrl(storagePath, { upsert: false }));
+    const signedUpload = bucket.createSignedUploadUrl(storagePath, { upsert: false });
+    const { data, error } = await storageCall(() => signedUpload as unknown as Promise<StorageReply<SignedUpload>>);
     if (error || !data || data.path !== storagePath || typeof data.token !== "string" || !data.token
       || typeof data.signedUrl !== "string") throw new Error();
     const url = new URL(data.signedUrl);
@@ -84,7 +92,8 @@ export async function prepareOrResumeStagedCreativeUpload(config: Config, ticket
   const bucket = config.supabase.storage.from(STAGED_CREATIVE_BUCKET);
   const split = info.storagePath.lastIndexOf("/"), folder = info.storagePath.slice(0, split), name = info.storagePath.slice(split + 1);
   try {
-    const { data, error } = await storageCall(() => bucket.list(folder, { limit: 2, search: name }));
+    const listing = bucket.list(folder, { limit: 2, search: name });
+    const { data, error } = await storageCall(() => listing as unknown as Promise<StorageReply<StorageObject[]>>);
     if (error || !Array.isArray(data) || data.length > 1 || data.some(row => row.name !== name
       || typeof row.id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(row.id))) throw new Error();
     if (data.length === 1) return { ...info, uploadRequired: false as const };
@@ -109,7 +118,8 @@ export async function readAndNormalizeStagedCreativeImage(config: Config, handle
     timer = setTimeout(() => { controller.abort(); reject(new Error()); }, timeoutMs);
   });
   try {
-    const response = await Promise.race([fetch(`${origin}/storage/v1/object/${STAGED_CREATIVE_BUCKET}/${stagedCreativePath(ticket)}`, {
+    const request = fetch as unknown as StorageFetch;
+    const response = await Promise.race([request(`${origin}/storage/v1/object/${STAGED_CREATIVE_BUCKET}/${stagedCreativePath(ticket)}`, {
       redirect: "error", credentials: "omit", cache: "no-store", signal: controller.signal,
       headers: { Authorization: `Bearer ${config.serviceRoleKey}`, apikey: config.serviceRoleKey },
     }), expired]);
