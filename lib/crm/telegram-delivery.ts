@@ -5,6 +5,12 @@ import { getSupabaseServerClient } from "../supabase/server";
 
 type Row = Record<string, unknown>;
 type Actor = { workspaceId: string; staffUserId: string; userId: string };
+type TelegramHttpResponse = {
+  ok: boolean;
+  status: number;
+  redirected: boolean;
+  body: ReadableStream<Uint8Array> | null;
+};
 export class TelegramDeliveryError extends Error {
   constructor(readonly status: number, readonly code: string) { super(code); }
 }
@@ -46,15 +52,16 @@ export async function resolveTelegramRecipient(input: { token: string; chatId: s
         const response = await input.fetcher(`https://api.telegram.org/bot${input.token}/getChat`, {
           method: "POST", redirect: "error", signal: controller.signal,
           headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: input.chatId }),
-        });
+        }) as unknown as TelegramHttpResponse;
         if (controller.signal.aborted || !response.ok || response.status !== 200 || response.redirected || !response.body) {
           try { void response.body?.cancel().catch(() => {}); } catch { /* An unconfirmed body is never retained. */ }
           throw refused();
         }
-        reader = response.body.getReader();
+        const responseReader = response.body.getReader();
+        reader = responseReader;
         const chunks: Uint8Array[] = []; let bytes = 0, reads = 0;
         while (true) {
-          const item = await reader.read();
+          const item = await responseReader.read();
           if (controller.signal.aborted || ++reads > 65_537) throw refused();
           if (item.done) break;
           bytes += item.value.byteLength;
@@ -66,7 +73,7 @@ export async function resolveTelegramRecipient(input: { token: string; chatId: s
         const id = typeof chat.id === "number" ? canonicalTelegramChatId(String(chat.id)) : null;
         if (body.ok !== true || !id || !["channel", "supergroup"].includes(String(chat.type))
           || (chat.active_usernames !== undefined && (!Array.isArray(chat.active_usernames)
-            || chat.active_usernames.some(value => typeof value !== "string")))) throw refused();
+            || chat.active_usernames.some((value: unknown) => typeof value !== "string")))) throw refused();
         const names = [chat.username, ...(Array.isArray(chat.active_usernames) ? chat.active_usernames : [])];
         if (!names.some(name => typeof name === "string" && `@${name}`.toLowerCase() === input.chatId.toLowerCase())) throw refused();
         return id;
