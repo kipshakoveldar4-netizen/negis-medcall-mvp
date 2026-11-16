@@ -6,6 +6,15 @@ import { generatedVideoIdentity } from "./generated-video-identity";
 import type { VideoRequestLifetime } from "../content-studio/video-request-lifetime";
 
 type Row = Record<string, unknown>;
+type SupabaseReply = { data: unknown; error: unknown };
+type WorkflowHeaders = { get(name: string): string | null };
+type WorkflowHttpResponse = {
+  body: ReadableStream<Uint8Array> | null;
+  redirected: boolean;
+  url: string;
+  status: number;
+  headers: WorkflowHeaders;
+};
 export type GeneratedVideoActor = { workspaceId: string; staffUserId: string; userId: string };
 export type GeneratedVideoWorkflowActor = GeneratedVideoActor;
 export type GeneratedVideoWorkflowConfig = {
@@ -133,7 +142,7 @@ async function rpc(config: GeneratedVideoWorkflowConfig, name: string, args: Row
   // dispatch nonce or generation key would be a new paid action, not a retry.
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const { data, error } = await bounded(config, () => config.supabase.rpc(name, args));
+      const { data, error } = await bounded(config, () => config.supabase.rpc(name, args)) as SupabaseReply;
       if (error) throw knownError(error) || unavailable();
       return data;
     } catch (error) { if (error instanceof GeneratedVideoWorkflowError && error.status !== 503) throw error; }
@@ -146,7 +155,7 @@ async function liveActor(config: GeneratedVideoWorkflowConfig, actor: GeneratedV
   let row: Row;
   try {
     const { data, error } = await bounded(config, () => config.supabase.from("staff_users").select("id,workspace_id,auth_user_id,role,status")
-      .eq("id", actor.staffUserId).eq("workspace_id", actor.workspaceId).eq("auth_user_id", actor.userId).maybeSingle());
+      .eq("id", actor.staffUserId).eq("workspace_id", actor.workspaceId).eq("auth_user_id", actor.userId).maybeSingle()) as SupabaseReply;
     if (error) throw unavailable();
     row = object(data);
   } catch { throw unavailable(); }
@@ -158,7 +167,7 @@ async function liveActor(config: GeneratedVideoWorkflowConfig, actor: GeneratedV
 
 async function privateBucket(config: GeneratedVideoWorkflowConfig): Promise<void> {
   try {
-    const { data, error } = await bounded(config, () => config.supabase.storage.getBucket(config.rawBucket));
+    const { data, error } = await bounded(config, () => config.supabase.storage.getBucket(config.rawBucket)) as SupabaseReply;
     const row = object(data);
     if (error || row.id !== config.rawBucket || (row.name !== undefined && row.name !== config.rawBucket) || row.public !== false
       || !size(row.file_size_limit, 500 * 1024 * 1024) || row.file_size_limit < MAX_INPUT_BYTES
@@ -172,7 +181,7 @@ async function privateBucket(config: GeneratedVideoWorkflowConfig): Promise<void
 
 async function publicBucket(config: GeneratedVideoWorkflowConfig): Promise<void> {
   try {
-    const { data, error } = await bounded(config, () => config.supabase.storage.getBucket(config.outputBucket));
+    const { data, error } = await bounded(config, () => config.supabase.storage.getBucket(config.outputBucket)) as SupabaseReply;
     const row = object(data);
     if (error || row.id !== config.outputBucket || row.public !== true || !size(row.file_size_limit) || row.file_size_limit < MAX_INPUT_BYTES
       || !Array.isArray(row.allowed_mime_types) || !row.allowed_mime_types.includes("video/mp4")
@@ -360,10 +369,11 @@ async function proveBytes(config: GeneratedVideoWorkflowConfig, input: {
   try {
     const pending = fetch(url, { method: "GET", redirect: "error", credentials: "omit", cache: "no-store", signal: controller.signal,
       ...(input.private ? { headers: { Authorization: `Bearer ${config.serviceRoleKey}`, apikey: config.serviceRoleKey } } : {}) });
-    void pending.then(response => {
+    const typedPending = pending as unknown as Promise<WorkflowHttpResponse>;
+    void typedPending.then(response => {
       if (controller.signal.aborted) { try { void response.body?.cancel().catch(() => {}); } catch { /* Late body cleanup is best effort. */ } }
     }, () => {});
-    const response = await wait(() => Promise.race([pending, deadline]));
+    const response = await wait(() => Promise.race([typedPending, deadline])) as unknown as WorkflowHttpResponse;
     reader = response.body?.getReader();
     if (response.redirected || (response.url && response.url !== url)) throw unavailable();
     // Only a definite HTTP 404 is absence. Unknown SDK/network/body failures
@@ -502,8 +512,8 @@ export async function receiveGeneratedVideoInput(config: GeneratedVideoWorkflowC
     await liveActor(config, actor);
     try {
       const reply = await bounded(config, () => config.supabase.storage.from(config.rawBucket).upload(String(bound.operation.raw_path), bytes,
-        { contentType: "video/mp4", upsert: false }));
-      if (reply.error || reply.data?.path !== bound.operation.raw_path) throw unavailable();
+        { contentType: "video/mp4", upsert: false })) as SupabaseReply;
+      if (reply.error || object(reply.data).path !== bound.operation.raw_path) throw unavailable();
     } catch { /* The exact immutable private GET, not the upload ACK, decides whether queueing is safe. */ }
     await privateProof(config, bound);
   }
