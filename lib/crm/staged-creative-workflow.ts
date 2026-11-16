@@ -10,6 +10,7 @@ import { prepareOrResumeStagedCreativeUpload, readAndNormalizeStagedCreativeImag
 import { reclaimStagedCreativeUploads } from "./staged-creative-reclamation";
 
 type Row = Record<string, unknown>;
+type SupabaseReply<T = unknown> = { data: T; error: unknown };
 export type CreativeUploadWorkflowConfig = Omit<StagedCreativeStorageConfig, "supabase"> & { supabase: SupabaseClient };
 export class CreativeUploadWorkflowError extends Error {
   constructor(readonly status: number, readonly code: string) { super(code); }
@@ -36,7 +37,7 @@ function businessError(error: unknown): CreativeUploadWorkflowError | null {
 async function rpc(config: CreativeUploadWorkflowConfig, name: string, args: Row): Promise<unknown> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const { data, error } = await bounded(() => config.supabase.rpc(name, args));
+      const { data, error } = await bounded(() => config.supabase.rpc(name, args) as unknown as Promise<SupabaseReply>);
       if (error) { const denied = businessError(error); if (denied) throw denied; throw unavailable(); }
       return data;
     } catch (error) { if (error instanceof CreativeUploadWorkflowError && error.status !== 503) throw error; }
@@ -51,8 +52,9 @@ function actorArgs(actor: StagedCreativeActor): Row {
 export async function requireLiveCreativeUploadActor(config: CreativeUploadWorkflowConfig, actor: StagedCreativeActor): Promise<void> {
   let row: Row;
   try {
-    const { data, error } = await bounded(() => config.supabase.from("staff_users").select("id,workspace_id,auth_user_id,role,status")
-      .eq("id", actor.staffUserId).eq("workspace_id", actor.workspaceId).eq("auth_user_id", actor.userId).maybeSingle());
+    const query = config.supabase.from("staff_users").select("id,workspace_id,auth_user_id,role,status")
+      .eq("id", actor.staffUserId).eq("workspace_id", actor.workspaceId).eq("auth_user_id", actor.userId).maybeSingle();
+    const { data, error } = await bounded(() => query as unknown as Promise<SupabaseReply>);
     if (error) throw unavailable(); row = object(data);
   } catch { throw unavailable(); }
   if (row.id !== actor.staffUserId || row.workspace_id !== actor.workspaceId || row.auth_user_id !== actor.userId
@@ -142,8 +144,9 @@ async function commit(config: CreativeUploadWorkflowConfig, ticket: StagedCreati
 async function operation(config: CreativeUploadWorkflowConfig, ticket: StagedCreativeTicket, source: "signed" | "inline"): Promise<Row> {
   let value: unknown;
   try {
-    const { data, error } = await bounded(() => config.supabase.from("creative_upload_operations").select("*")
-      .eq("id", ticket.id).eq("workspace_id", ticket.workspaceId).eq("auth_user_id", ticket.userId).eq("staff_user_id", ticket.staffUserId).maybeSingle());
+    const query = config.supabase.from("creative_upload_operations").select("*")
+      .eq("id", ticket.id).eq("workspace_id", ticket.workspaceId).eq("auth_user_id", ticket.userId).eq("staff_user_id", ticket.staffUserId).maybeSingle();
+    const { data, error } = await bounded(() => query as unknown as Promise<SupabaseReply>);
     if (error) throw unavailable(); value = data;
   } catch { throw unavailable(); }
   const row = object(value);
@@ -160,8 +163,9 @@ async function publish(config: CreativeUploadWorkflowConfig, ticket: StagedCreat
   await requireLiveCreativeUploadActor(config, ticket);
   const sha256 = createHash("sha256").update(buffer).digest("hex"), result = resultFor(config, ticket, sha256, buffer.length);
   try {
-    const reply = await bounded(() => config.supabase.storage.from(String(result.storage_bucket))
-      .upload(String(result.storage_path), buffer, { contentType: ticket.mimeType, upsert: false }));
+    const upload = config.supabase.storage.from(String(result.storage_bucket))
+      .upload(String(result.storage_path), buffer, { contentType: ticket.mimeType, upsert: false });
+    const reply = await bounded(() => upload as unknown as Promise<SupabaseReply<{ path?: unknown }>>);
     if (reply.error || reply.data?.path !== result.storage_path) throw unavailable();
   } catch { /* Reconcile the exact immutable public bytes; never overwrite or create a new operation. */ }
   await confirmPublic(result);
